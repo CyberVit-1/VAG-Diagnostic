@@ -1,37 +1,30 @@
-# VAG Diagnostic — GitHub bootstrap
+# GitHub Android CI — VAG Diagnostic
 
-Version: **0.1.0 (source archive, not yet compiled as Android APK)**.  
-Date: **2026-10-21**.
+**Версия исходного проекта:** 0.1.0  
+**Дата:** 2026-10-21  
+**Ветка разработки:** `feature/initial-android-build`  
+**Pull Request:** https://github.com/CyberVit-1/VAG-Diagnostic/pull/1
 
-## Current status
+## Исходники
+Все **19 файлов** исходного архива `VagDiagnostic_v0.1.0_SOURCE.zip` импортированы в корень репозитория коммитом `43138e891c1053deb9e23f381dad92fbabe5c429`. Ветку `main` не изменяли.
 
-- This repository initially had only a short README on `main`.
-- A GitHub Actions workflow for Android SDK 35, JDK 17, Gradle 8.11.1 and debug APK artifacts was added on branch `feature/initial-android-build`.
-- **The Android source archive is not yet committed to this repository.** Therefore the workflow's source check is expected to fail until the contents are imported.
-- The source archive `VagDiagnostic_v0.1.0_SOURCE.zip` was previously generated in ChatGPT, containing `VagDiagnostic_0.1.0/` (19 project files).
+## Автоматическая сборка
+Workflow: `.github/workflows/android.yml` — Java 17, Android SDK 35, Gradle 8.11.1.
 
-## Required bootstrap
+1. Откройте [GitHub Actions](https://github.com/CyberVit-1/VAG-Diagnostic/actions).
+2. Найдите последний запуск `Android APK (debug)` в ветке `feature/initial-android-build`.
+3. Только **после успеха** скачайте artifact `VAG-Diagnostic-v0.1.0-debug-apk` из запуска.
+4. При `failure` проверяйте шаг `Compile debug APK` и технический журнал; отсутствие `artifact` означает отсутствие подтверждённой сборки.
 
-Import the **contents** of `VagDiagnostic_0.1.0/` into the repository root (not the directory itself):
+Исходный ZIP не содержит `gradle-wrapper.jar`: в workflow применяется установленный Gradle 8.11.1. На ранних запусках возникла инфраструктурная ошибка установки `tools` и поиска `sdkmanager`; обе причины были исправлены в конфигурации. Финальный результат сборки следует проверять в Actions, а не предполагать по коммиту.
 
-- `settings.gradle.kts`
-- `build.gradle.kts`
-- `gradle.properties`
-- `app/` (including Kotlin sources and `app/build.gradle.kts`)
-- `tools/`
-- `PROJECT_CONTEXT.md`, `RESEARCH.md`, `BUILDING.md`
-- `.gitignore`
+## Ограничения
+- Подтверждённый APK и испытания физического Android-смартфона **пока не зафиксированы**.
+- Полный VAG Auto-Scan и чтение CAN Gateway Installation List **не реализованы**.
+- Транспорты Wi-Fi TCP, Bluetooth SPP и BLE NUS представлены в исходниках, но пока не проверены на реальном автомобиле.
 
-The upload may be performed as a pull request commit or a push to the feature branch. Avoid importing over an existing more recent implementation.
+## Действия пользователя
+**Ничего не требуется** для загрузки исходников и запуска CI. После успешной сборки и готовности к аппаратному испытанию потребуются смартфон, физический ELM327 и журнал подключения.
 
-## Android build
-
-Go to **Actions → Android APK (debug)**, select `feature/initial-android-build`, and run the workflow (or push source changes). APK appears under the successful run's **Artifacts**, named `VAG-Diagnostic-v0.1.0-debug-apk`.
-
-## Diagnostic scope
-
-The existing source archive implements read-only OBD-II DTC modes 03/07/0A and draft transports for ELM327 Wi-Fi TCP, Bluetooth SPP and BLE/NUS. VAG gateway Auto-Scan is **not implemented**. Android build and physical vehicle tests **have not been confirmed**.
-
-**User action needed now:** none for the workflow itself; source files must be imported before any APK can be produced.
-
-**Next engineering task:** import project, run workflow, resolve compile errors, then test on a physical ELM327 without assuming multi-ECU VAG support.
+## Далее
+Проверить CI, устранить ошибки компиляции, получить APK; затем отдельно подтвердить подключение и чтение DTC на автомобиле.
