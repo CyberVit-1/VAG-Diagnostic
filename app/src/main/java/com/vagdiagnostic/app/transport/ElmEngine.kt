@@ -27,6 +27,9 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
         private set
     var carError: String = ""
         private set
+    // Null means do not attempt a mode-dependent DTC decode.
+    var isCanVehicle: Boolean? = null
+        private set
 
     suspend fun connect() {
         link.open()
@@ -58,6 +61,17 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                     .replace("\r", "").replace("\n", "").trim()
                 protocol = selected.takeUnless { it == "?" || it.isBlank() }
                     ?: "Не определён"
+                // ELM automatic-protocol reply A6..A9 is ISO 15765-4 CAN.
+                // A missing ATDPN can still be resolved from concrete CAN IDs
+                // in the verified 0100 response, but never from ELM version text.
+                isCanVehicle = when {
+                    Regex("^A?[6-9]$").matches(protocol) -> true
+                    Regex("^A?[0-5]$").matches(protocol) -> false
+                    parsed.messagesFor(0x41).keys.any {
+                        Regex("^(7E[8-F]|18D[AB][0-9A-F]{4})$").matches(it)
+                    } -> true
+                    else -> null
+                }
             }
         } catch (error: Throwable) { close(); throw error }
     }
@@ -99,5 +113,5 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
             catch (_: Exception) { /* a full log must not break car communication */ }
         }
     }
-    fun close() { vehicleReady = false; adapterReady = false; link.close() }
+    fun close() { vehicleReady = false; adapterReady = false; isCanVehicle = null; link.close() }
 }
