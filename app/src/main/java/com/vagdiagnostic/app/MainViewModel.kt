@@ -47,7 +47,7 @@ private fun isTransportDisconnected(error: Throwable): Boolean =
         (error is IllegalStateException &&
             error.message?.contains("Соединение закрыто до окончания ответа") == true)
 
-private val friendlyNames = mapOf("7E8" to "Двигатель / OBD-II ECU", "7E9" to "Трансмиссия / OBD-II ECU")
+private val friendlyNames = mapOf("7E8" to "Основной OBD-II ответчик", "7E9" to "Дополнительный OBD-II ответчик")
 data class DashboardState(
     val adapterConnected: Boolean = false,
     val carConnected: Boolean = false,
@@ -201,6 +201,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         _state.value = _state.value.copy(
                             error = "${kind.command}: " + assessment.problems.take(4).joinToString("; ")
                         )
+                    }
+                    // Keep the parser decision with the same raw journal, so a
+                    // real test reveals why an ECU/mode was accepted or rejected.
+                    val summary = buildString {
+                        append("OBD mode ${kind.command}; verified ECU replies: ")
+                        append(assessment.confirmed.size)
+                        append("; DTCs: ")
+                        append(assessment.confirmed.values.sumOf { it.size })
+                        if (assessment.problems.isNotEmpty()) {
+                            append("; warnings: ")
+                            append(assessment.problems.joinToString(" | "))
+                        }
+                    }
+                    runCatching {
+                        db.journal().insert(JournalEntity(
+                            timestamp = System.currentTimeMillis(),
+                            connection = cfg.type,
+                            command = "DTC_MODE_${kind.command}",
+                            raw = summary,
+                            elapsedMs = 0,
+                            outcome = if (assessment.complete) "PARSED" else "INCOMPLETE"
+                        ))
                     }
                     assessment.confirmed.forEach { (address, dtcs) ->
                         val old = units[address] ?: ControlUnit(
