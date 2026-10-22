@@ -35,9 +35,9 @@ class ElmScanSessionTest {
                 "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0", "ATAT1" -> "OK"
                 "ATDPN" -> "A6"
                 "0100" -> "SEARCHING...\r7E8064100BE3EA813\r7E906410098188001"
-                "03" -> "7E80443010299000000"
-                "07" -> "7E802470000000000"
-                "0A" -> "7E8024A0000000000"
+                "03" -> "7E80443010299000000\r7E9024300"
+                "07" -> "7E802470000000000\r7E9024700"
+                "0A" -> "7E8024A0000000000\r7E9024A00"
                 else -> error("Unexpected test command: $cmd")
             }
             val payload = result + if (dropPromptCommands.remove(cmd)) "" else ">"
@@ -71,7 +71,14 @@ class ElmScanSessionTest {
         for (mode in DtcKind.entries) {
             val frames = ElmFrames.parse(mode.command, scan.read(mode.command, 8500))
             assertTrue("Invalid ${mode.command}: ${frames.problems}", frames.problems.isEmpty())
-            ObdDecoder.decodedMode(frames, mode, true)
+            val assessment = ObdDecoder.assessMode(frames, mode, scan.current.isCanVehicle,
+                setOf("7E8", "7E9"))
+            assertTrue("Mode ${mode.command} not fully confirmed: ${assessment.problems}",
+                assessment.complete)
+            assertEquals(setOf("7E8", "7E9"), assessment.confirmed.keys)
+            if (mode == DtcKind.CONFIRMED) {
+                assertEquals(listOf("P0299"), assessment.confirmed["7E8"]?.map { it.code })
+            }
         }
         assertTrue(fresh.commands.containsAll(listOf("0100", "03", "07", "0A")))
         assertFalse(scan.hasReactiveRecovery)
