@@ -38,25 +38,26 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                 val result = command(cmd)
                 check(result.contains("OK", true)) { "Адаптер не подтвердил $cmd: $result" }
             }
-            // Adaptive timing is optional: clone capabilities cannot be assumed.
-            try { command("ATAT1") } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { /* missing optional AT command */ }
-            try {
-                val response = command("0100", 9000)
-                val parsed = ElmFrames.parse("0100", response)
-                vehicleReady = ObdDecoder.hasValidVehicleResponse(parsed)
-                carError = if (vehicleReady) "" else
-                    "Адаптер отвечает, но OBD-II связь с автомобилем не подтверждена: " +
-                        parsed.problems.joinToString().ifBlank { response.take(160) }
-                if (vehicleReady) {
-                    protocol = command("ATDPN").replace("ATDPN", "", true)
-                        .replace("\r", "").replace("\n", "").trim().takeUnless { it == "?" || it.isBlank() }
-                        ?: "Не определён"
-                }
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (error: Exception) {
-                vehicleReady = false
-                carError = "Адаптер отвечает, но ECU не подтверждён: ${error.message}"
+            // An unsupported ATAT1 must still finish with the ELM '>' prompt.
+            // Swallowing a transport timeout here would desynchronize the next 0100.
+            val adaptive = command("ATAT1")
+            if (!adaptive.contains("OK", ignoreCase = true) &&
+                !adaptive.contains("?", ignoreCase = true)) {
+                throw IOException("Ответ ATAT1 не подтверждён: ${adaptive.take(100)}")
+            }
+            val response = command("0100", 9000)
+            val parsed = ElmFrames.parse("0100", response)
+            vehicleReady = ObdDecoder.hasValidVehicleResponse(parsed)
+            carError = if (vehicleReady) "" else
+                "Адаптер отвечает, но OBD-II связь с автомобилем не подтверждена: " +
+                    parsed.problems.joinToString().ifBlank { response.take(160) }
+            if (vehicleReady) {
+                // ATDPN is informational, and a completed '?' means unsupported.
+                // It must not turn an already verified 0100 vehicle reply into a failure.
+                val selected = command("ATDPN").replace("ATDPN", "", true)
+                    .replace("\r", "").replace("\n", "").trim()
+                protocol = selected.takeUnless { it == "?" || it.isBlank() }
+                    ?: "Не определён"
             }
         } catch (error: Throwable) { close(); throw error }
     }
