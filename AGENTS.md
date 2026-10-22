@@ -40,6 +40,29 @@ application, its build workflow, transports, protocols, storage, or UI.
     build/CI evidence, **"Что требуется от пользователя сейчас"**
     (or **"Ничего не требуется"**), and the next development step.
 
+## Mandatory data-loss warning before user actions
+
+- **Warn BEFORE recommending any potentially destructive step.** This includes
+  uninstalling/reinstalling an APK, clearing app storage or cache when data may
+  be affected, changing Android package ID/applicationId/signing identity,
+  database migrations, importing/restoring backups, or switching test builds.
+- State explicitly whether existing scans, Room history, settings, and raw
+  diagnostic journals will survive the action. Say when preservation is
+  unknown; do not promise continuity without checking Android package/signature
+  compatibility and migration implementation.
+- **Export and verify a backup FIRST** before proposing an action with data-loss
+  risk. A successfully exported external TXT is independent of application
+  storage; exporting raw logs does not necessarily back up the entire history.
+- Prefer side-by-side test installations for incompatible debug signatures,
+  while clearly warning that separate application IDs do **not** share
+  databases or settings.
+- No deletion or reset instruction until the warning is delivered and the user
+  has had a chance to preserve evidence. Do not assume the user can recover
+  data after an uninstall. Historical logs supplied in chat remain a separate
+  source, but do not constitute recovery of the original Room database.
+- Every APK handoff must state: **install over existing or alongside it?**
+  **Will historical data be retained?** **What must be backed up first?**
+
 ## Repository workflow
 
 - Base changes on the latest verified branch/version, read
