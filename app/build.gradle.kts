@@ -12,20 +12,15 @@ android {
         applicationId = "com.vagdiagnostic.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.1.3"
+        versionCode = 5
+        versionName = "0.1.4"
     }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     testOptions { unitTests.isReturnDefaultValues = true }
-    // CI debug signatures may differ. Use a distinct test package for 0.1.2
-    // so existing Pilot 0.1.1 logs/settings survive until intentionally removed.
-    buildTypes {
-        getByName("debug") {
-            applicationIdSuffix = ".pilot3"
-        }
-    }
+    // Keep a single permanent applicationId. Development signing can vary
+    // across CI runs; inform the user before any required reinstall.
 }
 
 dependencies {

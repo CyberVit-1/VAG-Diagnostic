@@ -53,15 +53,37 @@ application, its build workflow, transports, protocols, storage, or UI.
 - **Export and verify a backup FIRST** before proposing an action with data-loss
   risk. A successfully exported external TXT is independent of application
   storage; exporting raw logs does not necessarily back up the entire history.
-- Prefer side-by-side test installations for incompatible debug signatures,
-  while clearly warning that separate application IDs do **not** share
-  databases or settings.
+- Keep **one permanent Android applicationId** `com.vagdiagnostic.app` for
+  future candidate and production versions; do **not** generate new
+  `.pilot2`, `.pilot3` or per-release package IDs. When CI debug signing
+  differs, warn about potential uninstall/reinstall and data loss first.
+  A saved TXT is independent evidence, not a complete Room backup.
+  The user routinely removes previous experimental builds after exporting TXT;
+  do not insist on retaining outdated applications.
 - No deletion or reset instruction until the warning is delivered and the user
   has had a chance to preserve evidence. Do not assume the user can recover
   data after an uninstall. Historical logs supplied in chat remain a separate
   source, but do not constitute recovery of the original Room database.
 - Every APK handoff must state: **install over existing or alongside it?**
   **Will historical data be retained?** **What must be backed up first?**
+
+## Full-path diagnostic reliability gate
+
+- Keep the entire user-authored 15-section master prompt (below) binding,
+  including accurate OBD-II/CAN/ISO-TP/UDS/KWP limits, Auto-Scan roadmap,
+  Android UI requirements, research, test evidence and release criteria.
+- Before recommending a new vehicle test, proactively analyze and improve
+  connection **and** diagnostics from end to end: Android Wi-Fi routing,
+  socket lifecycle, AT reset/initialization, prompt parsing, packed CAN,
+  protocol negotiation, pauses and timeouts, retries/recovery, DTC 03/07/0A,
+  bad/partial responses, state transitions and exported logs.
+- Test the happy path and plausible adjacent failures with repeatable tests,
+  not only the latest visible stack trace or false green status indicator.
+- Preserve Bluetooth Classic and BLE transports while modifying Wi-Fi code.
+  Clearly distinguish code verified in GitHub CI from real car operation.
+- Do not request another vehicle visit after each tiny change; bundle fixes
+  into a consolidated candidate with demonstrated software checks. Do not
+  claim stable hardware diagnostics without a corresponding physical test.
 
 ## Repository workflow
 

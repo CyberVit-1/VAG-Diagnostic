@@ -162,6 +162,29 @@ Before giving a download/install/test instruction:
 6. Treat prior deletion as an established fact and do not continue asking
    the user to preserve an app they have already uninstalled.
 
+## 7b. Master prompt and proactive troubleshooting requirements
+
+- Read the **entire original 15-section master prompt** inside root
+  `AGENTS.md`, with an unchanged standalone copy at `MASTER_PROMPT.md`.
+  The first-line role description is only one part of the specification.
+- User expectations are engineering requirements: diagnose beyond the last
+  reported error, preserve the protocol/transport architecture, prevent
+  repeated field trips for minor fixes, confirm every claimed feature on a
+  real vehicle, and avoid specific car/adapter coupling.
+- Before proposing an APK to test on a car, review every stage from transport
+  and AT initialization to OBD `0100` confirmation, idle socket handling,
+  ISO-TP response parsing, the `03/07/0A` DTC sequence, cancellation,
+  connection flags and RAW journal export. Correct plausible failure paths
+  and run repeatable software checks first.
+- Future releases have a single stable package name
+  `com.vagdiagnostic.app`. Never create extra `pilotN` applications as
+  a substitute for proper installation/signature handling. Before a required
+  uninstall, warn that app-internal journals, settings and history are lost;
+  preserve user-exported TXT, then let the user remove obsolete test apps.
+- Different versions of a **debug** APK may still have incompatible signing
+  keys; package-name consistency does not guarantee automatic updating.
+  Do not commit release signing keys. State this briefly when relevant.
+
 ## 8. Change → check → release loop
 
 1. Define the targeted behavior, preserved behavior and negative cases.

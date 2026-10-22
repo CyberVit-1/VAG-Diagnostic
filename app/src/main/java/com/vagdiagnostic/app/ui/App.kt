@@ -334,7 +334,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 Button(onClick = export, modifier = Modifier.fillMaxWidth()) { Text("Экспортировать журнал TXT") }
             }
         }
-        Text("Версия 0.1.3 · Только чтение", style = MaterialTheme.typography.bodyMedium)
+        Text("Версия 0.1.4 · Только чтение", style = MaterialTheme.typography.bodyMedium)
         Text("Не реализовано: Gateway Installation List, VAG UDS Auto-Scan, KWP1281, TP 2.0, запись и сброс ошибок. BLE поддерживает только Nordic UART.",
             style = MaterialTheme.typography.bodySmall)
     }
