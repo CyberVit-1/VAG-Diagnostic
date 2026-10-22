@@ -16,7 +16,8 @@ import org.junit.Test
 class ElmScanSessionTest {
     private class ScriptedLink(
         val failCommands: MutableSet<String> = mutableSetOf(),
-        val dropPromptCommands: MutableSet<String> = mutableSetOf()
+        val dropPromptCommands: MutableSet<String> = mutableSetOf(),
+        val customReplies: Map<String, String> = emptyMap()
     ) : ElmLink {
         override val label = "Scripted ELM"
         var opened = false
@@ -29,7 +30,7 @@ class ElmScanSessionTest {
             val cmd = bytes.toString(Charsets.US_ASCII).trim()
             commands.add(cmd)
             if (failCommands.remove(cmd)) throw IOException("Broken pipe")
-            val result = when (cmd) {
+            val result = customReplies[cmd] ?: when (cmd) {
                 "ATZ" -> "ELM327 v1.5"
                 "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0", "ATAT1" -> "OK"
                 "ATDPN" -> "A6"
@@ -139,6 +140,31 @@ class ElmScanSessionTest {
         assertEquals(listOf(false), states)
         assertTrue(events.contains("WIFI_IDLE_REFRESH"))
         assertTrue(events.contains("WIFI_SESSION_RESTORE_FAILED"))
+    }
+
+    @Test fun unsupportedAdaptiveTimingAndProtocolQueryStillConfirmVehicle() = runBlocking {
+        val link = ScriptedLink(customReplies = mapOf("ATAT1" to "?", "ATDPN" to "?"))
+        val e = engine(link)
+        e.connect()
+        assertTrue(e.vehicleReady)
+        assertTrue(e.adapterReady)
+        assertEquals("Не определён", e.protocol)
+    }
+
+    @Test fun missingAdaptiveTimingPromptFailsClosedRatherThanCorruptingNextObdQuery() = runBlocking {
+        val link = ScriptedLink(dropPromptCommands = mutableSetOf("ATAT1"))
+        val statuses = mutableListOf<String>()
+        val e = ElmEngine(link, { _, _, _, result -> statuses.add(result) })
+        try {
+            e.connect()
+            fail("ATAT1 timeout must not be ignored")
+        } catch (error: IOException) {
+            assertTrue(error.message.orEmpty().contains("Тайм-аут"))
+        }
+        assertTrue(link.closed)
+        assertFalse(e.vehicleReady)
+        assertFalse(link.commands.contains("0100"))
+        assertTrue(statuses.any { it.startsWith("TIMEOUT") })
     }
 
     @Test fun timeoutBecomesLoggedIOExceptionNotCancelledScan() = runBlocking {
