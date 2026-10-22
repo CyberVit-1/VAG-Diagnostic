@@ -166,6 +166,14 @@ class ElmScanSessionTest {
         assertEquals(true, e.isCanVehicle)
     }
 
+    @Test fun observedCanEcuHeadersOverrideInconsistentCloneProtocolReport() = runBlocking {
+        val elm = engine(ScriptedLink(customReplies = mapOf("ATDPN" to "A1")))
+        elm.connect()
+        assertTrue(elm.vehicleReady)
+        assertEquals("A1", elm.protocol)
+        assertEquals(true, elm.isCanVehicle)
+    }
+
     @Test fun automaticProtocolZeroNeverForcesLegacyDtcLayout() = runBlocking {
         val elm = engine(ScriptedLink(customReplies = mapOf("ATDPN" to "A0")))
         elm.connect()
