@@ -148,6 +148,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         carConnected = replacement.vehicleReady,
                         protocol = replacement.protocol
                     )
+                },
+                onEvent = { event, message ->
+                    db.journal().insert(JournalEntity(
+                        timestamp = System.currentTimeMillis(), connection = cfg.type,
+                        command = event, raw = message, elapsedMs = 0, outcome = "SESSION"
+                    ))
                 }
             )
             suspend fun readOnlyCommand(command: String, timeoutMs: Long): String =
