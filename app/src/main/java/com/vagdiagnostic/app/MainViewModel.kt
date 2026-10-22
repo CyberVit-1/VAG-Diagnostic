@@ -96,10 +96,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "BLE / NUS" -> BleNusLink(context, cfg.mac)
             else -> error("Неизвестный транспорт")
         }
-        return ElmEngine(driver) { cmd, raw, ms, result ->
+        return ElmEngine(driver, log = { cmd, raw, ms, result ->
             db.journal().insert(JournalEntity(timestamp = System.currentTimeMillis(), connection = driver.label,
                 command = cmd, raw = raw, elapsedMs = ms, outcome = result))
-        }
+        })
     }
 
     fun connect() {
