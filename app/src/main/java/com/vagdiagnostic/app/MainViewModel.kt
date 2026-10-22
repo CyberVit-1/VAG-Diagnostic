@@ -265,7 +265,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         URLEncoder.encode("VAG fault code $code", "UTF-8")
 
     suspend fun exportRedactedLogs(): String {
-        val content = StringBuilder("VAG Diagnostic 0.1.1 / Сырой журнал (VIN замаскирован)\n")
+        val content = StringBuilder("VAG Diagnostic ${BuildConfig.VERSION_NAME} / Сырой журнал (VIN замаскирован)\n")
         val entries = db.journal().latest(10000).reversed()
         entries.forEach { e ->
             content.append("${e.timestamp} | ${e.connection} | ${e.command} | ${e.elapsedMs}ms | ${e.outcome}\n")
