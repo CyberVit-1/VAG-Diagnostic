@@ -41,6 +41,14 @@ class ElmFramesRealLogTest {
     }
 
     @Test
+    fun compact29BitDiagnosticCanHeaderIsNotMistakenForPayload() {
+        val frames = ElmFrames.parse("0100", "18DAF110064100BE3EA813\\r>")
+        assertTrue("Unexpected problems: ${frames.problems}", frames.problems.isEmpty())
+        assertEquals(setOf("18DAF110"), frames.messagesFor(0x41).keys)
+        assertTrue(ObdDecoder.hasValidVehicleResponse(frames))
+    }
+
+    @Test
     fun unknownOrNoDataStillCannotCountAsVehicleReply() {
         val failed = ElmFrames.parse("0100", "SEARCHING...\rNO DATA\r>")
         assertFalse(ObdDecoder.hasValidVehicleResponse(failed))
