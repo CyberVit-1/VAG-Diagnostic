@@ -16,14 +16,6 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.UUID
 
-interface ElmLink {
-    val label: String
-    suspend fun open()
-    suspend fun write(bytes: ByteArray)
-    suspend fun readByte(): Int
-    fun close()
-}
-
 /** Only the adapter TCP socket binds to Wi-Fi; app/browser keeps cellular routing. */
 class WifiTcpLink(private val context: Context, private val host: String, private val port: Int) : ElmLink {
     override val label = "Wi-Fi $host:$port"
@@ -48,7 +40,8 @@ class WifiTcpLink(private val context: Context, private val host: String, privat
         } catch (error: Exception) { newSocket.close(); throw error }
     }
     override suspend fun write(bytes: ByteArray) = withContext(Dispatchers.IO) {
-        check(socket?.isConnected == true) { "TCP-соединение закрыто" }
+        if (socket?.isConnected != true || socket?.isClosed != false)
+            throw java.net.SocketException("TCP-соединение закрыто")
         requireNotNull(output).write(bytes)
         requireNotNull(output).flush()
     }
