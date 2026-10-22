@@ -12,18 +12,18 @@ android {
         applicationId = "com.vagdiagnostic.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.1.2"
     }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     testOptions { unitTests.isReturnDefaultValues = true }
-    // CI debug signatures may differ between runners. The pilot installs
-    // next to the existing 0.1.0 app and preserves its on-device logs.
+    // CI debug signatures may differ. Use a distinct test package for 0.1.2
+    // so existing Pilot 0.1.1 logs/settings survive until intentionally removed.
     buildTypes {
         getByName("debug") {
-            applicationIdSuffix = ".pilot"
+            applicationIdSuffix = ".pilot2"
         }
     }
 }
