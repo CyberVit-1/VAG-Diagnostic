@@ -25,6 +25,9 @@ data class FrameParse(val messages: Map<String, List<ByteArray>>, val problems: 
 /** Defensive ELM327 text decoder, limited to complete OBD/CAN frames. */
 object ElmFrames {
     private val ecuHeader = Regex("^([0-9A-F]{3}|[0-9A-F]{8})\\s+(.+)$")
+    // ELM327 with ATH1/ATS0 can return CAN headers without any separators.
+    // A standard 11-bit header contributes 3 hex characters, making the packed line odd-length.
+    private val packed11BitHeader = Regex("^([0-9A-F]{3})((?:[0-9A-F]{2}){2,})$")
     private val byteToken = Regex("^[0-9A-F]{2}$")
     private val errorTokens = listOf("NO DATA", "UNABLE TO CONNECT", "STOPPED", "BUFFER FULL", "CAN ERROR", "BUS ERROR", "RX ERROR", "?")
 
@@ -49,6 +52,23 @@ object ElmFrames {
                 address = header.groupValues[1]
                 line = header.groupValues[2]
                 lastAddress = address
+            } else {
+                // Real adapter example: 7E8064100BE3EA813 = 7E8 + 06 41 00 BE 3E A8 13.
+                // Odd-length hex cannot be a payload made of complete bytes.
+                val packed = line.takeIf { it.length % 2 == 1 && !it.contains(' ') }
+                    ?.let { packed11BitHeader.matchEntire(it) }
+                if (packed != null) {
+                    address = packed.groupValues[1]
+                    line = packed.groupValues[2]
+                    lastAddress = address
+                }
+            }
+            // ATS0 strips byte separators as well. Split compact payload after
+            // extracting the ECU address; never split a compact header as bytes.
+            val compactBytes = line.replace(" ", "")
+            if (compactBytes.length > 2 && compactBytes.length % 2 == 0 &&
+                compactBytes.all { it in "0123456789ABCDEF" }) {
+                line = compactBytes.chunked(2).joinToString(" ")
             }
             // In CAF1 mode the ELM sometimes prints numbered multiline chunks (0:, 1:, ...).
             val numberedMatch = Regex("^([0-9A-F]):\\s*(.*)$").matchEntire(line)
