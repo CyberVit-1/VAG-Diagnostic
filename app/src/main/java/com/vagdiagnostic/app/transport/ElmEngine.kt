@@ -7,10 +7,17 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
+import java.io.EOFException
+import java.io.IOException
 import kotlin.coroutines.coroutineContext
 
 /** Single writer / single reader. End-of-reply is a mandatory ELM '>' prompt. */
-class ElmEngine(private val link: ElmLink, private val log: suspend (String, String, Long, String) -> Unit) {
+class ElmEngine(private val link: ElmLink, private val log: suspend (String, String, Long, String) -> Unit,
+                private val clockNanos: () -> Long = System::nanoTime) {
+    private var lastCommandNanos: Long? = null
+    /** Monotonic age of the last completed ELM reply. */
+    fun idleMs(): Long = lastCommandNanos?.let { (clockNanos() - it).coerceAtLeast(0L) / 1_000_000L } ?: 0L
     private val lock = Mutex()
     var protocol: String = "Не определён"
         private set
@@ -66,17 +73,21 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                     coroutineContext.ensureActive()
                     val current = link.readByte()
                     if (current == -2) continue
-                    if (current == -1) error("Соединение закрыто до окончания ответа")
+                    if (current == -1) throw EOFException("Соединение закрыто до окончания ответа")
                     if (current == '>'.code) break
                     if (collected.length >= 32768) error("Ответ превышает допустимый размер")
                     if (current in 0..127) collected.append(current.toChar())
                 }
             }
             val raw = collected.toString()
+            lastCommandNanos = clockNanos()
             if (raw.contains("BUFFER FULL", true) || raw.contains("STOPPED", true) || raw.contains("CAN ERROR", true)) {
                 status = "ADAPTER_ERROR"
             }
             return@withLock raw
+        } catch (error: TimeoutCancellationException) {
+            status = "TIMEOUT: ${text} did not end with ELM > prompt"
+            throw IOException("Тайм-аут ответа ELM на $text", error)
         } catch (error: Throwable) {
             status = error::class.java.simpleName + ": " + (error.message ?: "")
             throw error
