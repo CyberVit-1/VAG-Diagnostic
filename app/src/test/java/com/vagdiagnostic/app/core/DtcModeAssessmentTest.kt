@@ -62,5 +62,6 @@ class DtcModeAssessmentTest {
         val result = ObdDecoder.assessMode(frames, DtcKind.CONFIRMED, true, setOf("7E8"))
         assertTrue(result.confirmed.isEmpty())
         assertFalse(result.complete)
+        assertTrue(result.problems.any { it.contains("0x11") && it.contains("7E8") })
     }
 }
