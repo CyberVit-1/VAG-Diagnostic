@@ -13,6 +13,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vagdiagnostic.app.core.ControlUnit
 import com.vagdiagnostic.app.core.DtcKind
+import com.vagdiagnostic.app.core.DiagnosticLogRedactor
 import com.vagdiagnostic.app.core.ElmFrames
 import com.vagdiagnostic.app.core.ObdDecoder
 import com.vagdiagnostic.app.core.ReadState
@@ -215,12 +216,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         URLEncoder.encode("VAG fault code $code", "UTF-8")
 
     suspend fun exportRedactedLogs(): String {
-        val content = StringBuilder("VAG Diagnostic 0.1.0 / Сырой журнал (VIN замаскирован)\n")
+        val content = StringBuilder("VAG Diagnostic 0.1.1 / Сырой журнал (VIN замаскирован)\n")
         val entries = db.journal().latest(10000).reversed()
-        val vinPattern = Regex("\\b[A-HJ-NPR-Z0-9]{17}\\b", RegexOption.IGNORE_CASE)
         entries.forEach { e ->
             content.append("${e.timestamp} | ${e.connection} | ${e.command} | ${e.elapsedMs}ms | ${e.outcome}\n")
-            content.append(e.raw.replace(vinPattern, "[VIN REDACTED]")).append("\n")
+            content.append(DiagnosticLogRedactor.redact(e.raw)).append("\n")
         }
         if (entries.size == 10000) content.append("\nДостигнут предел экспорта 10000 записей\n")
         return content.toString()
