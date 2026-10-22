@@ -159,6 +159,13 @@ class ElmScanSessionTest {
         assertEquals(true, e.isCanVehicle)
     }
 
+    @Test fun automaticProtocolZeroNeverForcesLegacyDtcLayout() = runBlocking {
+        val elm = engine(ScriptedLink(customReplies = mapOf("ATDPN" to "A0")))
+        elm.connect()
+        assertTrue(elm.vehicleReady)
+        assertEquals(true, elm.isCanVehicle)
+    }
+
     @Test fun noProtocolAndNoCanIdCannotAssignDtcFormat() = runBlocking {
         val link = ScriptedLink(customReplies = mapOf(
             "ATDPN" to "?",
