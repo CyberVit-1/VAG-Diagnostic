@@ -28,6 +28,9 @@ object ElmFrames {
     // ELM327 with ATH1/ATS0 can return CAN headers without any separators.
     // A standard 11-bit header contributes 3 hex characters, making the packed line odd-length.
     private val packed11BitHeader = Regex("^([0-9A-F]{3})((?:[0-9A-F]{2}){2,})$")
+    // Common 29-bit ISO 15765-4 diagnostic identifiers: e.g. 18DAF110.
+    // Restrict matching to diagnostic IDs to avoid guessing from byte payloads.
+    private val packed29BitHeader = Regex("^(18D[AB][0-9A-F]{4})((?:[0-9A-F]{2}){2,})$")
     private val byteToken = Regex("^[0-9A-F]{2}$")
     private val errorTokens = listOf("NO DATA", "UNABLE TO CONNECT", "STOPPED", "BUFFER FULL", "CAN ERROR", "BUS ERROR", "RX ERROR", "?")
 
@@ -55,8 +58,11 @@ object ElmFrames {
             } else {
                 // Real adapter example: 7E8064100BE3EA813 = 7E8 + 06 41 00 BE 3E A8 13.
                 // Odd-length hex cannot be a payload made of complete bytes.
-                val packed = line.takeIf { it.length % 2 == 1 && !it.contains(' ') }
-                    ?.let { packed11BitHeader.matchEntire(it) }
+                val packed = when {
+                    line.contains(' ') -> null
+                    line.length % 2 == 1 -> packed11BitHeader.matchEntire(line)
+                    else -> packed29BitHeader.matchEntire(line)
+                }
                 if (packed != null) {
                     address = packed.groupValues[1]
                     line = packed.groupValues[2]
