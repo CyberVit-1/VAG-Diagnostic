@@ -79,6 +79,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val settings: StateFlow<ConnectionSettings> = _settings.asStateFlow()
     val history = db.scans().observe()
     private var engine: ElmEngine? = null
+    private var connectedSettings: ConnectionSettings? = null
     private var activeJob: Job? = null
     private var scannerCallback: ScanCallback? = null
     private var scanner: android.bluetooth.le.BluetoothLeScanner? = null
@@ -111,10 +112,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             engine = client
             try {
                 client.connect()
+                connectedSettings = cfg
                 _state.value = _state.value.copy(adapterConnected = client.adapterReady, carConnected = client.vehicleReady,
                     protocol = client.protocol, adapterName = cfg.type, isBusy = false, error = client.carError)
             } catch (error: Throwable) {
-                client.close(); engine = null
+                client.close(); engine = null; connectedSettings = null
                 if (error is CancellationException) throw error
                 _state.value = _state.value.copy(adapterConnected = client.adapterReady, carConnected = false,
                     protocol = "Не определён", isBusy = false,
@@ -124,7 +126,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun disconnect() {
         activeJob?.cancel()
-        engine?.close(); engine = null
+        engine?.close(); engine = null; connectedSettings = null
         _state.value = _state.value.copy(adapterConnected = false, carConnected = false,
             isBusy = false, isScanning = false, protocol = "Не определён", current = "")
     }
@@ -134,7 +136,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!initialClient.vehicleReady) { _state.value = _state.value.copy(error = "Связь с автомобилем не подтверждена"); return }
         activeJob = viewModelScope.launch {
             // Snapshot settings: do not switch transports/host halfway through a scan.
-            val cfg = _settings.value
+            // Reconnect with the settings that opened this socket, not unsaved edits.
+            val cfg = connectedSettings ?: _settings.value
             val session = ElmScanSession(
                 first = initialClient,
                 wifi = cfg.type == "Wi-Fi",
@@ -160,6 +163,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 session.read(command, timeoutMs)
             scanStartedAt = System.currentTimeMillis()
             var interrupted = false
+            var incompleteModes = false
             var rowId = 0L
             suspend fun checkpoint(current: List<ControlUnit>, modes: Int, incomplete: Boolean) {
                 val record = ScanEntity(id = rowId, started = scanStartedAt, finished = System.currentTimeMillis(),
@@ -191,6 +195,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         ObdDecoder.decodedMode(frames, kind, session.current.protocol.lastOrNull() in listOf('6', '7', '8', '9'))
                     }
                     if (faults.isFailure) {
+                        incompleteModes = true
                         _state.value = _state.value.copy(error = "${kind.command}: ${faults.exceptionOrNull()?.message}")
                     } else {
                         faults.getOrThrow().forEach { (address, dtcs) ->
@@ -211,7 +216,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         })
                     }
                     _state.value = _state.value.copy(units = units.values.toList(), completedModes = index + 1)
-                    checkpoint(units.values.toList(), index + 1, index != 2)
+                    checkpoint(units.values.toList(), index + 1, index != 2 || incompleteModes)
                 }
             } catch (error: CancellationException) {
                 interrupted = true; throw error
@@ -219,17 +224,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 interrupted = true
                 val linkLost = error is java.io.IOException || engine == null ||
                     (cfg.type == "Wi-Fi" && session.hasReactiveRecovery)
-                if (linkLost) session.close()
+                if (linkLost) { session.close(); connectedSettings = null }
                 _state.value = _state.value.copy(error =
                     "Диагностика: ${error.message ?: error::class.java.simpleName}" +
                     if (linkLost) ". Связь потеряна; подключитесь снова." else "")
             } finally {
                 _state.value = _state.value.copy(isScanning = false, isBusy = false,
-                    current = "", units = units.values.toList(), lastScanInterrupted = interrupted)
+                    current = "", units = units.values.toList(), lastScanInterrupted = interrupted || incompleteModes)
                 // Non-cancellable persistence: partial scans survive Stop and disconnections.
                 kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
                     runCatching {
-                        checkpoint(units.values.toList(), _state.value.completedModes, interrupted)
+                        checkpoint(units.values.toList(), _state.value.completedModes, interrupted || incompleteModes)
                     }
                 }
             }
@@ -238,7 +243,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun stopScan() {
         activeJob?.cancel()
         // Abort the current transport command: otherwise the next read might see a stale prompt.
-        engine?.close(); engine = null
+        engine?.close(); engine = null; connectedSettings = null
         _state.value = _state.value.copy(adapterConnected = false, carConnected = false,
             protocol = "Не определён", error = "Сканирование остановлено, соединение закрыто для синхронизации")
     }
