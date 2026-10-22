@@ -138,6 +138,30 @@ interfaces unless an explicit compatibility migration is planned.
 - Use Russian UI strings, accessible labels, dark/light themes and deliberate
   Material 3 spacing; do not trade away diagnostic correctness for polish.
 
+## 7a. Prevent accidental data loss during APK upgrades
+
+Before giving a download/install/test instruction:
+
+1. Inspect the old and new `applicationId` (including any debug
+   `applicationIdSuffix`), signing certificate compatibility, Room schema and
+   migration, and storage/export behavior. Confirm what is known and unknown.
+2. **Warn in advance, prominently**, if an action may erase local history,
+   raw ELM journals or settings: uninstall, reinstall, clear storage, incompatible
+   signer, different package, or destructive database migration.
+3. Ask the user to export the existing TXT diagnostic log and verify the saved
+   file in external storage *before* any such action. Explicitly explain that
+   TXT export preserves shared evidence but does not recreate the Room
+   database, history screen, or preferences.
+4. If package IDs differ, say explicitly that both apps may be installed
+   side by side and that the new installation has an independent empty
+   database. If signing prevents an in-place update, never recommend
+   uninstalling the old build as the first fix.
+5. Include a short section **`Внимание: сохранность данных`** directly
+   before any user installation/upgrade steps, even if the update is believed
+   to be safe. Describe install mode, expected preservation and backup plan.
+6. Treat prior deletion as an established fact and do not continue asking
+   the user to preserve an app they have already uninstalled.
+
 ## 8. Change → check → release loop
 
 1. Define the targeted behavior, preserved behavior and negative cases.
