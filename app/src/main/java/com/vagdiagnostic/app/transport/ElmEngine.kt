@@ -66,7 +66,7 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                 // in the verified 0100 response, but never from ELM version text.
                 isCanVehicle = when {
                     Regex("^A?[6-9]$").matches(protocol) -> true
-                    Regex("^A?[0-5]$").matches(protocol) -> false
+                    Regex("^A?[1-5]$").matches(protocol) -> false
                     parsed.messagesFor(0x41).keys.any {
                         Regex("^(7E[8-F]|18D[AB][0-9A-F]{4})$").matches(it)
                     } -> true
