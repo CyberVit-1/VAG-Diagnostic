@@ -151,6 +151,25 @@ class ElmScanSessionTest {
         assertEquals("Не определён", e.protocol)
     }
 
+    @Test fun unknownAtdpnStillIdentifiesCanFromRealVehicleEcuHeaders() = runBlocking {
+        val link = ScriptedLink(customReplies = mapOf("ATDPN" to "?"))
+        val e = engine(link)
+        e.connect()
+        assertTrue(e.vehicleReady)
+        assertEquals(true, e.isCanVehicle)
+    }
+
+    @Test fun noProtocolAndNoCanIdCannotAssignDtcFormat() = runBlocking {
+        val link = ScriptedLink(customReplies = mapOf(
+            "ATDPN" to "?",
+            "0100" to "4100BE3EA813"
+        ))
+        val e = engine(link)
+        e.connect()
+        assertTrue(e.vehicleReady)
+        assertEquals(null, e.isCanVehicle)
+    }
+
     @Test fun missingAdaptiveTimingPromptFailsClosedRatherThanCorruptingNextObdQuery() = runBlocking {
         val link = ScriptedLink(dropPromptCommands = mutableSetOf("ATAT1"))
         val statuses = mutableListOf<String>()
