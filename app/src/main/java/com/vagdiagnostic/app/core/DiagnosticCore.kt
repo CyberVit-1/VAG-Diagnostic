@@ -199,6 +199,14 @@ object ObdDecoder {
     ): DtcModeAssessment {
         val issues = frames.problems.toMutableList()
         val replies = frames.messagesFor(kind.replySid)
+        val requestedSid = kind.command.toInt(16)
+        frames.messagesFor(0x7F).forEach { (address, negativeFrames) ->
+            negativeFrames.filter { it.size >= 3 && (it[1].toInt() and 0xFF) == requestedSid }
+                .forEach { payload ->
+                    issues += "ЭБУ $address: режим ${kind.command} отклонён, код ответа 0x" +
+                        "%02X".format(payload[2].toInt() and 0xFF)
+                }
+        }
         if (replies.isEmpty()) issues += "Нет подтверждённого ответа на режим ${kind.command}"
         if (isCan == null) {
             issues += "Неизвестен формат OBD DTC; полученные данные не расшифрованы"
