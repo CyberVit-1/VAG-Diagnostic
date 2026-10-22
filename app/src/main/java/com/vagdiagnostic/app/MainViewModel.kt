@@ -63,7 +63,8 @@ data class DashboardState(
     val bleFound: List<Pair<String, String>> = emptyList()
 ) {
     val discovered: Int get() = units.size
-    val polled: Int get() = if (completedModes == 3) units.size else 0
+    // An ECU is counted as queried only after a validated DTC-mode response.
+    val polled: Int get() = units.count { it.answeredModes.isNotEmpty() }
     val successful: Int get() = units.count { it.state == ReadState.COMPLETE }
     val faulty: Int get() = units.count { it.dtcs.isNotEmpty() }
     val faultCount: Int get() = units.sumOf { it.dtcs.size }
@@ -190,22 +191,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.value = _state.value.copy(current = "OBD-II: ${kind.title.lowercase()} память DTC")
                     val answer = readOnlyCommand(kind.command, 8500)
                     val frames = ElmFrames.parse(kind.command, answer)
-                    val faults = runCatching {
-                        check(frames.problems.isEmpty()) { frames.problems.joinToString() }
-                        ObdDecoder.decodedMode(frames, kind,
-                            checkNotNull(session.current.isCanVehicle) {
-                                "Формат DTC не определён: неизвестен OBD-протокол и отсутствует подтверждённый CAN-адрес"
-                            })
-                    }
-                    if (faults.isFailure) {
+                    val assessment = ObdDecoder.assessMode(
+                        frames = frames, kind = kind,
+                        isCan = session.current.isCanVehicle,
+                        expectedEcus = units.keys.toSet()
+                    )
+                    if (!assessment.complete) {
                         incompleteModes = true
-                        _state.value = _state.value.copy(error = "${kind.command}: ${faults.exceptionOrNull()?.message}")
-                    } else {
-                        faults.getOrThrow().forEach { (address, dtcs) ->
-                            val old = units[address] ?: ControlUnit(address, "OBD-II ответчик $address", ReadState.NOT_QUERIED)
-                            units[address] = old.copy(dtcs = (old.dtcs + dtcs).distinctBy { it.code to it.kind },
-                                answeredModes = old.answeredModes + kind)
-                        }
+                        _state.value = _state.value.copy(
+                            error = "${kind.command}: " + assessment.problems.take(4).joinToString("; ")
+                        )
+                    }
+                    assessment.confirmed.forEach { (address, dtcs) ->
+                        val old = units[address] ?: ControlUnit(
+                            address, "OBD-II ответчик $address", ReadState.NOT_QUERIED
+                        )
+                        units[address] = old.copy(
+                            dtcs = (old.dtcs + dtcs).distinctBy { it.code to it.kind },
+                            answeredModes = old.answeredModes + kind
+                        )
                     }
                     units.replaceAll { _, value ->
                         value.copy(state = when (value.answeredModes.size) {
