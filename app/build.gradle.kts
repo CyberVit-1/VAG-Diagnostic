@@ -19,6 +19,13 @@ android {
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     testOptions { unitTests.isReturnDefaultValues = true }
+    // CI debug signatures may differ between runners. The pilot installs
+    // next to the existing 0.1.0 app and preserves its on-device logs.
+    buildTypes {
+        getByName("debug") {
+            applicationIdSuffix = ".pilot"
+        }
+    }
 }
 
 dependencies {
