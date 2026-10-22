@@ -15,16 +15,26 @@ class ElmScanSession(
     private val wifi: Boolean,
     private val newEngine: () -> ElmEngine,
     private val onEngineChanged: (ElmEngine?) -> Unit,
-    private val idleReconnectMs: Long = 8_000L
+    private val idleReconnectMs: Long = 8_000L,
+    private val onEvent: suspend (String, String) -> Unit = { _, _ -> }
 ) {
     var current: ElmEngine = first
         private set
     var hasReactiveRecovery: Boolean = false
         private set
 
+    private suspend fun note(event: String, detail: String) {
+        try { onEvent(event, detail) }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { /* journaling must not break a live ELM session */ }
+    }
+
     /** Refresh an old Wi-Fi session before starting OBD discovery. */
     suspend fun prepare() {
-        if (wifi && current.idleMs() >= idleReconnectMs) reopen()
+        if (wifi && current.idleMs() >= idleReconnectMs) {
+            note("WIFI_IDLE_REFRESH", "Last complete ELM reply was ${current.idleMs()} ms ago")
+            reopen()
+        }
     }
 
     suspend fun read(command: String, timeoutMs: Long): String {
@@ -35,7 +45,12 @@ class ElmScanSession(
             return current.command(command, timeoutMs)
         } catch (failure: Throwable) {
             if (failure is CancellationException) throw failure
-            if (!wifi || hasReactiveRecovery || failure !is IOException) throw failure
+            if (!wifi || failure !is IOException) throw failure
+            if (hasReactiveRecovery) {
+                note("WIFI_RECOVERY_EXHAUSTED", failure::class.java.simpleName + ": " + failure.message)
+                throw failure
+            }
+            note("WIFI_IO_RECOVERY", failure::class.java.simpleName + ": " + failure.message)
             hasReactiveRecovery = true
             reopen()
             // One reactive recovery maximum: further failures propagate.
@@ -56,8 +71,10 @@ class ElmScanSession(
             )
             current = candidate
             onEngineChanged(candidate)
+            note("WIFI_SESSION_RESTORED", "ELM and OBD-II reply confirmed")
         } catch (failure: Throwable) {
             candidate.close()
+            note("WIFI_SESSION_RESTORE_FAILED", failure::class.java.simpleName + ": " + failure.message)
             throw failure
         }
     }
