@@ -117,6 +117,30 @@ class ElmScanSessionTest {
         assertFalse(session.hasReactiveRecovery)
     }
 
+    @Test fun failedIdleReopenLeavesUiDisconnectedAndJournalsCause() = runBlocking {
+        var now = 1_000_000_000L
+        val old = ScriptedLink()
+        val first = engine(old) { now }
+        first.connect()
+        now += 21_000_000_000L
+
+        val failing = ScriptedLink(mutableSetOf("ATZ"))
+        val states = mutableListOf<Boolean>()
+        val events = mutableListOf<String>()
+        val session = ElmScanSession(first, true, { engine(failing) { now } },
+            { e -> states.add(e?.vehicleReady == true) },
+            onEvent = { event, _ -> events.add(event) })
+        try {
+            session.prepare()
+            fail("Adapter failing at ATZ must not be treated as vehicle ready")
+        } catch (_: IOException) { }
+        assertTrue(old.closed)
+        assertTrue(failing.closed)
+        assertEquals(listOf(false), states)
+        assertTrue(events.contains("WIFI_IDLE_REFRESH"))
+        assertTrue(events.contains("WIFI_SESSION_RESTORE_FAILED"))
+    }
+
     @Test fun timeoutBecomesLoggedIOExceptionNotCancelledScan() = runBlocking {
         val io = ScriptedLink()
         val statuses = mutableListOf<String>()
