@@ -26,6 +26,7 @@ import com.vagdiagnostic.app.data.Settings
 import com.vagdiagnostic.app.transport.BleNusLink
 import com.vagdiagnostic.app.transport.BluetoothSppLink
 import com.vagdiagnostic.app.transport.ElmEngine
+import com.vagdiagnostic.app.transport.ElmScanSession
 import com.vagdiagnostic.app.transport.WifiTcpLink
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -134,41 +135,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         activeJob = viewModelScope.launch {
             // Snapshot settings: do not switch transports/host halfway through a scan.
             val cfg = _settings.value
-            var client = initialClient
-            var wifiRecoveryUsed = false
-            suspend fun readOnlyCommand(command: String, timeoutMs: Long): String {
-                try {
-                    return client.command(command, timeoutMs)
-                } catch (error: Throwable) {
-                    if (error is CancellationException) throw error
-                    if (cfg.type != "Wi-Fi" || wifiRecoveryUsed || !isTransportDisconnected(error)) throw error
-                    // Reopening a fresh socket handles stale TCP sessions. Bounded to
-                    // a single reconnect per scan, no blind retries of ECU writes.
-                    wifiRecoveryUsed = true
-                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                    client.close()
-                    if (engine === client) engine = null
-                    _state.value = _state.value.copy(adapterConnected = false, carConnected = false,
-                        protocol = "Не определён", current = "Восстановление Wi-Fi-соединения")
-                    val replacement = createEngine(cfg)
-                    try {
-                        replacement.connect()
-                        kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                        check(replacement.vehicleReady) {
-                            "Адаптер переподключён, но ответ автомобиля не подтверждён: ${replacement.carError}"
-                        }
-                        client = replacement
-                        engine = replacement
-                        _state.value = _state.value.copy(adapterConnected = true, carConnected = true,
-                            protocol = replacement.protocol, current = "Соединение восстановлено")
-                        return replacement.command(command, timeoutMs)
-                    } catch (failure: Throwable) {
-                        replacement.close()
-                        if (engine === replacement) engine = null
-                        throw failure
-                    }
+            val session = ElmScanSession(
+                first = initialClient,
+                wifi = cfg.type == "Wi-Fi",
+                newEngine = { createEngine(cfg) },
+                onEngineChanged = { replacement ->
+                    engine = replacement
+                    _state.value = if (replacement == null) _state.value.copy(
+                        adapterConnected = false, carConnected = false, protocol = "Не определён"
+                    ) else _state.value.copy(
+                        adapterConnected = replacement.adapterReady,
+                        carConnected = replacement.vehicleReady,
+                        protocol = replacement.protocol
+                    )
                 }
-            }
+            )
+            suspend fun readOnlyCommand(command: String, timeoutMs: Long): String =
+                session.read(command, timeoutMs)
             scanStartedAt = System.currentTimeMillis()
             var interrupted = false
             var rowId = 0L
@@ -183,6 +166,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val units = linkedMapOf<String, ControlUnit>()
             try {
                 checkpoint(emptyList(), 0, true)
+                session.prepare()
                 val raw = readOnlyCommand("0100", 9000)
                 val replies = ElmFrames.parse("0100", raw)
                 check(ObdDecoder.hasValidVehicleResponse(replies)) { "Ответ OBD-II не подтверждён" }
@@ -198,7 +182,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     val frames = ElmFrames.parse(kind.command, answer)
                     val faults = runCatching {
                         check(frames.problems.isEmpty()) { frames.problems.joinToString() }
-                        ObdDecoder.decodedMode(frames, kind, client.protocol.lastOrNull() in listOf('6', '7', '8', '9'))
+                        ObdDecoder.decodedMode(frames, kind, session.current.protocol.lastOrNull() in listOf('6', '7', '8', '9'))
                     }
                     if (faults.isFailure) {
                         _state.value = _state.value.copy(error = "${kind.command}: ${faults.exceptionOrNull()?.message}")
@@ -227,15 +211,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 interrupted = true; throw error
             } catch (error: Throwable) {
                 interrupted = true
-                if (isTransportDisconnected(error) || (cfg.type == "Wi-Fi" && wifiRecoveryUsed)) {
-                    client.close()
-                    if (engine === client) engine = null
-                    _state.value = _state.value.copy(adapterConnected = false, carConnected = false,
-                        protocol = "Не определён")
-                }
+                val linkLost = error is java.io.IOException || engine == null ||
+                    (cfg.type == "Wi-Fi" && session.hasReactiveRecovery)
+                if (linkLost) session.close()
                 _state.value = _state.value.copy(error =
                     "Диагностика: ${error.message ?: error::class.java.simpleName}" +
-                    if (!_state.value.carConnected) ". Связь потеряна, подключитесь заново." else "")
+                    if (linkLost) ". Связь потеряна; подключитесь снова." else "")
             } finally {
                 _state.value = _state.value.copy(isScanning = false, isBusy = false,
                     current = "", units = units.values.toList(), lastScanInterrupted = interrupted)
