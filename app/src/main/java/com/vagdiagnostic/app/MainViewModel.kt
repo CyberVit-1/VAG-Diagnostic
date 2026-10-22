@@ -192,7 +192,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     val frames = ElmFrames.parse(kind.command, answer)
                     val faults = runCatching {
                         check(frames.problems.isEmpty()) { frames.problems.joinToString() }
-                        ObdDecoder.decodedMode(frames, kind, session.current.protocol.lastOrNull() in listOf('6', '7', '8', '9'))
+                        ObdDecoder.decodedMode(frames, kind,
+                            checkNotNull(session.current.isCanVehicle) {
+                                "Формат DTC не определён: неизвестен OBD-протокол и отсутствует подтверждённый CAN-адрес"
+                            })
                     }
                     if (faults.isFailure) {
                         incompleteModes = true
