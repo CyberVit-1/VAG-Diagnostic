@@ -138,6 +138,18 @@ object ElmFrames {
     }
 }
 
+/**
+ * A requested mode is confirmed only by a valid positive ECU reply.
+ * An empty response, NO DATA, or an invalid payload cannot prove "no DTCs".
+ * Valid replies from other ECUs remain usable when one ECU responds badly.
+ */
+data class DtcModeAssessment(
+    val confirmed: Map<String, List<Dtc>>,
+    val problems: List<String>
+) {
+    val complete: Boolean get() = problems.isEmpty()
+}
+
 object ObdDecoder {
     fun codeOf(hi: Int, lo: Int): String {
         val group = "PCBU"[(hi ushr 6) and 3]
@@ -177,6 +189,34 @@ object ObdDecoder {
 
     fun decodedMode(frames: FrameParse, kind: DtcKind, isCan: Boolean): Map<String, List<Dtc>> {
         return frames.messagesFor(kind.replySid).mapValues { (_, payloads) -> payloads.flatMap { readDtc(it, kind, isCan) } }
+    }
+
+    fun assessMode(
+        frames: FrameParse,
+        kind: DtcKind,
+        isCan: Boolean?,
+        expectedEcus: Set<String>
+    ): DtcModeAssessment {
+        val issues = frames.problems.toMutableList()
+        val replies = frames.messagesFor(kind.replySid)
+        if (replies.isEmpty()) issues += "Нет подтверждённого ответа на режим ${kind.command}"
+        if (isCan == null) {
+            issues += "Неизвестен формат OBD DTC; полученные данные не расшифрованы"
+            return DtcModeAssessment(emptyMap(), issues)
+        }
+        val confirmed = linkedMapOf<String, List<Dtc>>()
+        replies.forEach { (address, payloads) ->
+            try {
+                // A valid zero-count positive reply is a genuine success.
+                confirmed[address] = payloads.flatMap { readDtc(it, kind, isCan) }
+            } catch (error: IllegalArgumentException) {
+                issues += "Некорректный ответ ${kind.command} от $address: ${error.message}"
+            }
+        }
+        (expectedEcus - confirmed.keys).forEach { address ->
+            issues += "Режим ${kind.command}: нет достоверного ответа от $address"
+        }
+        return DtcModeAssessment(confirmed, issues)
     }
 }
 
