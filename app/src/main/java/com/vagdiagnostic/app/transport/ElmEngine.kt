@@ -64,12 +64,14 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                 // ELM automatic-protocol reply A6..A9 is ISO 15765-4 CAN.
                 // A missing ATDPN can still be resolved from concrete CAN IDs
                 // in the verified 0100 response, but never from ELM version text.
+                val confirmedCanHeaders = parsed.messagesFor(0x41).keys.any {
+                    Regex("^(7E[8-F]|18D[AB][0-9A-F]{4})$").matches(it)
+                }
                 isCanVehicle = when {
+                    // Real message framing beats an inconsistent ATDPN from a clone.
+                    confirmedCanHeaders -> true
                     Regex("^A?[6-9]$").matches(protocol) -> true
                     Regex("^A?[1-5]$").matches(protocol) -> false
-                    parsed.messagesFor(0x41).keys.any {
-                        Regex("^(7E[8-F]|18D[AB][0-9A-F]{4})$").matches(it)
-                    } -> true
                     else -> null
                 }
             }
