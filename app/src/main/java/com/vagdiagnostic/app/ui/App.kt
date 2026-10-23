@@ -108,7 +108,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 when (page) {
                     0 -> Home(status, navigate = { page = it }, start = { vm.scan(); page = 2 })
                     1 -> Connection(status, settings, set = vm::saveSettings, connect = vm::connect,
-                        disconnect = vm::disconnect, probe = vm::probeAdapter, permission = requestPermissions,
+                        disconnect = vm::disconnect, permission = requestPermissions,
                         bleDiscovery = vm::discoverBle)
                     2 -> Diagnostics(status, start = vm::scan, stop = vm::stopScan, search = { code ->
                         search(code)?.let { scope.launch { toast.showSnackbar(it) } }
@@ -173,8 +173,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
 
 @Composable private fun Connection(status: DashboardState, s: ConnectionSettings,
                                     set: (ConnectionSettings) -> Unit, connect: () -> Unit,
-                                    disconnect: () -> Unit, probe: () -> Unit,
-                                    permission: () -> Unit, bleDiscovery: () -> Unit) {
+                                    disconnect: () -> Unit, permission: () -> Unit, bleDiscovery: () -> Unit) {
     val context = LocalContext.current
     val paired = remember(status.adapterConnected) { pairedClassic(context) }
     var portText by rememberSaveable { mutableStateOf(s.port.toString()) }
@@ -186,43 +185,6 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 Text("Адаптер: ${if (status.adapterConnected) "Подключён" else "Нет соединения"}")
                 Text("Автомобиль: ${if (status.carConnected) "OBD-II связь подтверждена" else "Не подтверждена"}")
                 Text("Протокол ELM: ${status.protocol}")
-            }
-        }
-        if (status.adapterName == "Wi-Fi" && status.carConnected) {
-            OutlinedButton(onClick = probe, enabled = !status.isBusy,
-                modifier = Modifier.fillMaxWidth()) {
-                Text("Проверить AT-возможности адаптера")
-            }
-            Text(
-                "Проверяется только принятие команд ELM327 — без запросов к блокам VAG. " +
-                    "После проверки обычная OBD-II связь восстанавливается.",
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
-        status.adapterProbeReport?.let { result ->
-            ElevatedCard {
-                Column(Modifier.fillMaxWidth().padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Проверка ELM327 — только AT-команды",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold)
-                    Text("Протокол 11 бит, 500 кбит/с: " +
-                        if (result.can11Bit500k) "подтверждён OBD" else "не подтверждён")
-                    Text("OBD-ответчик: " + (result.responder ?: "не найден"))
-                    result.checks.forEach { check ->
-                        Text(check.command + " — " +
-                            if (check.verdict ==
-                                com.vagdiagnostic.app.transport.ElmAdapterCapabilities.Verdict.ACCEPTED)
-                                "принято адаптером" else "отклонено адаптером",
-                            style = MaterialTheme.typography.bodySmall)
-                    }
-                    Text(
-                        "Принятие AT-команд не подтверждает работоспособность адресного " +
-                            "ISO-TP или Gateway 19. Новые ECU-запросы не выполнялись.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
             }
         }
         Text("Тип адаптера", fontWeight = FontWeight.SemiBold)
