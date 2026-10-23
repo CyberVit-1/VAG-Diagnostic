@@ -26,7 +26,6 @@ import com.vagdiagnostic.app.data.Settings
 import com.vagdiagnostic.app.transport.BleNusLink
 import com.vagdiagnostic.app.transport.BluetoothSppLink
 import com.vagdiagnostic.app.transport.ElmEngine
-import com.vagdiagnostic.app.transport.ElmAdapterCapabilities
 import com.vagdiagnostic.app.transport.ElmScanSession
 import com.vagdiagnostic.app.transport.WifiTcpLink
 import kotlinx.coroutines.CancellationException
@@ -38,8 +37,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.isActive
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -58,7 +55,6 @@ data class DashboardState(
     val adapterName: String = "—",
     val error: String = "",
     val scanWarning: String = "",
-    val adapterProbeReport: ElmAdapterCapabilities.Report? = null,
     val isBusy: Boolean = false,
     val isScanning: Boolean = false,
     val current: String = "",
@@ -137,81 +133,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(adapterConnected = false, carConnected = false,
             isBusy = false, isScanning = false, protocol = "Не определён", current = "")
     }
-    /**
-     * Non-destructive adapter AT capability check.
-     * Open a disposable session; do not modify the normal OBD session.
-     * Do not emit UDS or Gateway requests. Re-establish ordinary OBD on exit.
-     */
-    fun probeAdapter() {
-        if (activeJob?.isActive == true) return
-        val previous = engine ?: run {
-            _state.value = _state.value.copy(error = "Сначала подключитесь к автомобилю")
-            return
-        }
-        if (!previous.vehicleReady) {
-            _state.value = _state.value.copy(error = "OBD-II связь не подтверждена")
-            return
-        }
-        val cfg = connectedSettings ?: _settings.value
-        activeJob = viewModelScope.launch {
-            var disposable: ElmEngine? = null
-            previous.close()
-            engine = null
-            connectedSettings = null
-            _state.value = _state.value.copy(adapterConnected = false,
-                carConnected = false, isBusy = true, error = "",
-                current = "Проверка AT-команд ELM327", adapterProbeReport = null)
-            try {
-                disposable = createEngine(cfg)
-                engine = disposable
-                disposable.connect() // previously verified generic OBD 0100, not VAG UDS
-                val report = ElmAdapterCapabilities.inspect(disposable)
-                _state.value = _state.value.copy(adapterProbeReport = report)
-                db.journal().insert(JournalEntity(
-                    timestamp = System.currentTimeMillis(), connection = cfg.type,
-                    command = "AT_CAPABILITY_PROBE", raw = report.logText(),
-                    elapsedMs = 0, outcome = "AT_ONLY"
-                ))
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                _state.value = _state.value.copy(
-                    error = "Проверка команд ELM: " +
-                        (error.message ?: error::class.java.simpleName)
-                )
-            } finally {
-                disposable?.close()
-                if (engine === disposable) engine = null
-                // A user disconnect/cancel must NOT silently create a new socket.
-                if (currentCoroutineContext().isActive) {
-                    val restored = createEngine(cfg)
-                    engine = restored
-                    try {
-                        restored.connect()
-                        connectedSettings = cfg
-                        _state.value = _state.value.copy(
-                            adapterConnected = restored.adapterReady,
-                            carConnected = restored.vehicleReady,
-                            protocol = restored.protocol,
-                            adapterName = cfg.type,
-                            isBusy = false, current = ""
-                        )
-                    } catch (error: Exception) {
-                        restored.close()
-                        engine = null
-                        connectedSettings = null
-                        _state.value = _state.value.copy(
-                            adapterConnected = false, carConnected = false,
-                            protocol = "Не определён", isBusy = false, current = "",
-                            error = "Повторное подключение после AT-проверки: " +
-                                (error.message ?: error::class.java.simpleName)
-                        )
-                    }
-                }
-            }
-        }
-    }
-
     fun scan() {
         if (activeJob?.isActive == true) return
         val initialClient = engine ?: run { _state.value = _state.value.copy(error = "Подключите адаптер"); return }
