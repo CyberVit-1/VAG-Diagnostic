@@ -87,6 +87,39 @@ class ElmScanSessionTest {
         assertFalse(scan.hasReactiveRecovery)
     }
 
+    @Test fun identicalReadOnlyDtcSequenceWorksAcrossTransportKinds() = runBlocking {
+        for (kind in listOf("WIFI", "BT_CLASSIC", "BLE_NUS")) {
+            val link = ScriptedLink()
+            val engine = engine(link)
+            engine.connect()
+            assertTrue("$kind did not confirm OBD-II", engine.vehicleReady)
+            val session = ElmScanSession(
+                engine, wifi = kind == "WIFI",
+                newEngine = { engine(ScriptedLink()) },
+                onEngineChanged = { },
+                transportTag = kind
+            )
+            session.prepare()
+            val discovery = ElmFrames.parse("0100", session.read("0100", 9000))
+            assertTrue("$kind: invalid 0100", ObdDecoder.hasValidVehicleResponse(discovery))
+            val ecus = discovery.messagesFor(0x41).keys
+            assertEquals(setOf("7E8", "7E9"), ecus)
+            for (mode in DtcKind.entries) {
+                val raw = session.read(mode.command, 8500)
+                val result = ObdDecoder.assessMode(
+                    ElmFrames.parse(mode.command, raw),
+                    mode, session.current.isCanVehicle, ecus
+                )
+                assertTrue("$kind: mode ${mode.command}: ${result.problems}",
+                    result.complete)
+            }
+            assertEquals("No transport-specific diagnostic commands allowed: $kind",
+                listOf("ATZ", "ATE0", "ATL0", "ATS0", "ATH1",
+                    "ATSP0", "ATAT1", "0100", "ATDPN", "0100", "03", "07", "0A"),
+                link.commands)
+        }
+    }
+
     @Test fun reactiveRecoveryAndNoFurtherInfiniteReconnects() = runBlocking {
         val first = ScriptedLink()
         val live = engine(first)
