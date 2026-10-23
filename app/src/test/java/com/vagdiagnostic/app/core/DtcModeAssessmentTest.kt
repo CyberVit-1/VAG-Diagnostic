@@ -9,6 +9,32 @@ import org.junit.Test
 class DtcModeAssessmentTest {
     private val expected = setOf("7E8", "7E9")
 
+    /** Exact observed raw CAN lines from the physical ELM327 session on 2026-10-23. */
+    @Test fun physicalTest03And07SucceededBut0ACannotBeCalledFaultFree() {
+        val ecus = setOf("7E8", "7E9")
+        val mode03 = ObdDecoder.assessMode(
+            ElmFrames.parse("03", "7E8024300\r7E9024300\r>"),
+            DtcKind.CONFIRMED, true, ecus
+        )
+        val mode07 = ObdDecoder.assessMode(
+            ElmFrames.parse("07", "7E8024700\r7E9024700\r>"),
+            DtcKind.PENDING, true, ecus
+        )
+        val mode0A = ObdDecoder.assessMode(
+            ElmFrames.parse("0A", "NO DATA\r>"),
+            DtcKind.PERMANENT, true, ecus
+        )
+        assertTrue(mode03.complete)
+        assertTrue(mode07.complete)
+        assertEquals(ecus, mode03.confirmed.keys)
+        assertEquals(ecus, mode07.confirmed.keys)
+        assertTrue(mode03.confirmed.values.all { it.isEmpty() })
+        assertTrue(mode07.confirmed.values.all { it.isEmpty() })
+        assertFalse(mode0A.complete)
+        assertTrue(mode0A.confirmed.isEmpty())
+        assertTrue(mode0A.problems.any { it.contains("NO DATA") })
+    }
+
     @Test fun emptyResponseCannotCountAsFaultFreeOrCompletedScan() {
         val result = ObdDecoder.assessMode(ElmFrames.parse("03", ""), DtcKind.CONFIRMED, true, expected)
         assertTrue(result.confirmed.isEmpty())
