@@ -230,6 +230,18 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
 @Composable private fun Diagnostics(status: DashboardState, start: () -> Unit, stop: () -> Unit, search: (String) -> Unit) {
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Metrics(status)
+        if (status.completedModes > 0 && status.units.isNotEmpty()) {
+            val counts = DtcKind.entries.joinToString(" · ") { kind ->
+                "${kind.command}: ${status.units.count { kind in it.answeredModes }}/${status.units.size}"
+            }
+            Text("Подтверждённые ответы по режимам — $counts",
+                style = MaterialTheme.typography.bodySmall)
+        }
+        if (status.scanWarning.isNotBlank()) {
+            Text("Не подтверждено: ${status.scanWarning}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall)
+        }
         if (status.isScanning) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) // indeterminate until vehicle ECU count is known
             Text("Сейчас: ${status.current}")
@@ -250,13 +262,13 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
     ElevatedCard {
         Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Row(horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
-                Metric("Найдено", status.discovered); Metric("Опрошено", status.polled); Metric("Успешно", status.successful)
+                Metric("Найдено", status.discovered); Metric("Опрошено", status.polled); Metric("Все режимы", status.successful)
             }
             HorizontalDivider()
             Row(horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
-                Metric("С ошибками", status.faulty); Metric("Всего DTC", status.faultCount)
+                Metric("Частично", status.partial); Metric("С DTC", status.faulty); Metric("Всего DTC", status.faultCount)
             }
-            Text("Показатели относятся только к OBD-II ответчикам и подтверждённым ответам.", style = MaterialTheme.typography.labelSmall,
+            Text("«Все режимы» — ответы 03, 07 и 0A. «Частично» — подтверждена только часть режимов. Показаны лишь достоверные DTC.", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
