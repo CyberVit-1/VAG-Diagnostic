@@ -125,6 +125,19 @@ class VagAddressedCanTest {
         }
     }
 
+    @Test fun explicitDlcFormatFromCanReadersIsValidatedRatherThanGuessed() {
+        val example = VagAddressedCan.decodeSingleEcu(
+            "7E8 8 10 0B 59 02 FF 12 34 56\r7E8 8 21 7F 89 AB CD 01 00 00\r>",
+            0x7E8
+        )
+        assertTrue(example.problems.toString(), example.valid)
+        assertEquals(11, example.payload!!.size)
+        val broken = VagAddressedCan.decodeSingleEcu(
+            "7E8 8 03 59 02 FF\r>", 0x7E8
+        )
+        assertFalse(broken.valid)
+    }
+
     @Test fun strictDecoderNeverForwardsWrongEcuToUdsDtcAssessment() {
         val bad = VagAddressedCan.interpretGatewayDtcReply("7E9 03 59 02 FF\r>", 0x7E8)
         assertTrue(bad is VagUdsReadOnly.DtcReply.Invalid)
