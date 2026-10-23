@@ -16,6 +16,7 @@ import org.junit.Test
 class ElmScanSessionTest {
     private class ScriptedLink(
         val failCommands: MutableSet<String> = mutableSetOf(),
+        val closeChannelCommands: MutableSet<String> = mutableSetOf(),
         val dropPromptCommands: MutableSet<String> = mutableSetOf(),
         val customReplies: Map<String, String> = emptyMap()
     ) : ElmLink {
@@ -30,6 +31,8 @@ class ElmScanSessionTest {
             val cmd = bytes.toString(Charsets.US_ASCII).trim()
             commands.add(cmd)
             if (failCommands.remove(cmd)) throw IOException("Broken pipe")
+            if (closeChannelCommands.remove(cmd))
+                throw kotlinx.coroutines.channels.ClosedReceiveChannelException("BLE GATT closed")
             val result = customReplies[cmd] ?: when (cmd) {
                 "ATZ" -> "ELM327 v1.5"
                 "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0", "ATAT1" -> "OK"
@@ -155,6 +158,22 @@ class ElmScanSessionTest {
         } catch (_: IOException) {}
         assertEquals(1, reconnects)
         assertTrue(session.hasReactiveRecovery)
+    }
+
+    @Test fun bleClosedGATTNotificationStreamTriggersReadOnlyRecovery() = runBlocking {
+        val link = ScriptedLink(closeChannelCommands = mutableSetOf())
+        val first = engine(link)
+        first.connect()
+        link.closeChannelCommands.add("07")
+        var reconnects = 0
+        val next = ScriptedLink()
+        val session = ElmScanSession(first, false, {
+            reconnects++
+            engine(next)
+        }, { }, transportTag = "BLE_NUS")
+        assertTrue(session.read("07", 8500).isNotBlank())
+        assertEquals(1, reconnects)
+        assertTrue(link.closed)
     }
 
     @Test fun bluetoothReadOnlyRecoveryNeverRetriesWriteOrUnknownCommands() = runBlocking {
