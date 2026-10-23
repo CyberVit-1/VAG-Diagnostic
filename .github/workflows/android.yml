@@ -1,0 +1,73 @@
+name: Android APK (debug)
+
+on:
+  push:
+    branches: [main, feature/initial-android-build]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Assemble + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: true
+
+      - name: Require Android project
+        run: test -f app/build.gradle.kts && test -f settings.gradle.kts
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Use runner Android SDK and install platform 35
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -path "*/bin/sdkmanager" -type f | head -n 1)"
+          fi
+          test -n "$SDKMANAGER" && test -x "$SDKMANAGER"
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.11.1 (archive contains no wrapper)
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.11.1'
+          cache-provider: basic
+
+      - name: Compile debug APK
+        run: gradle --no-daemon :app:assembleDebug --stacktrace
+
+      - name: JVM unit tests
+        run: gradle --no-daemon :app:testDebugUnitTest --stacktrace
+
+      - name: Upload debuggable APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VAG-Diagnostic-v0.2.0-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build-reports
+          path: |
+            app/build/reports/**
+            app/build/test-results/**
+          if-no-files-found: ignore
