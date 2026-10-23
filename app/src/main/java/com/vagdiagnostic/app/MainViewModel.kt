@@ -294,9 +294,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         // Only the KNOWN legislated OBD physical pair 7E0->7E8.
                         // No VAG Gateway address is inferred. Probe all transports
                         // with the same code and a disposable, isolated ELM link.
-                        if (check?.verified?.contains("7E8") == true &&
-                            session.current.protocol in setOf("6", "A6") &&
-                            session.current.observedCanResponderIds.contains("7E8")
+                        val confirmedPhysicalEcu = check?.verified?.firstOrNull { id ->
+                            Regex("^7E[8-F]$").matches(id) &&
+                                id in session.current.observedCanResponderIds
+                        }
+                        if (confirmedPhysicalEcu != null &&
+                            session.current.protocol in setOf("6", "A6")
                         ) {
                             _state.value = _state.value.copy(
                                 current = "OBD-II: адресная ISO-TP проверка"
@@ -308,7 +311,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                 disposable = createEngine(cfg)
                                 engine = disposable
                                 disposable.connect()
-                                val addressed = ElmAddressedObdProbe.runOnDisposableEngine(disposable)
+                                val addressed = ElmAddressedObdProbe.runOnDisposableEngine(
+                                    disposable, confirmedPhysicalEcu
+                                )
                                 _state.value = _state.value.copy(
                                     isoTpReadiness = resultText + "; " +
                                         if (addressed.verified) "адресный OBD ISO-TP подтверждён"
