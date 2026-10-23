@@ -238,6 +238,11 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
             Text("Подтверждённые ответы по режимам — $counts",
                 style = MaterialTheme.typography.bodySmall)
         }
+        if (status.isoTpReadiness.isNotBlank()) {
+            Text("Проверка ISO-TP: ${status.isoTpReadiness}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         if (status.scanWarning.isNotBlank()) {
             Text("Не подтверждено: ${status.scanWarning}",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
