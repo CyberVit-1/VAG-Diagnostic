@@ -27,6 +27,7 @@ import com.vagdiagnostic.app.data.Settings
 import com.vagdiagnostic.app.transport.BleNusLink
 import com.vagdiagnostic.app.transport.BluetoothSppLink
 import com.vagdiagnostic.app.transport.ElmEngine
+import com.vagdiagnostic.app.transport.ElmAddressedObdProbe
 import com.vagdiagnostic.app.transport.ElmScanSession
 import com.vagdiagnostic.app.transport.WifiTcpLink
 import kotlinx.coroutines.CancellationException
@@ -38,6 +39,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -288,6 +291,79 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             elapsedMs = 0,
                             outcome = if (check?.confirmed == true) "CONFIRMED" else "INCONCLUSIVE"
                         ))
+                        // Only the KNOWN legislated OBD physical pair 7E0->7E8.
+                        // No VAG Gateway address is inferred. Probe all transports
+                        // with the same code and a disposable, isolated ELM link.
+                        if (check?.verified?.contains("7E8") == true &&
+                            session.current.protocol in setOf("6", "A6") &&
+                            session.current.observedCanResponderIds.contains("7E8")
+                        ) {
+                            _state.value = _state.value.copy(
+                                current = "OBD-II: адресная ISO-TP проверка"
+                            )
+                            session.close()
+                            connectedSettings = null
+                            var disposable: ElmEngine? = null
+                            try {
+                                disposable = createEngine(cfg)
+                                engine = disposable
+                                disposable.connect()
+                                val addressed = ElmAddressedObdProbe.runOnDisposableEngine(disposable)
+                                _state.value = _state.value.copy(
+                                    isoTpReadiness = resultText + "; " +
+                                        if (addressed.verified) "адресный OBD ISO-TP подтверждён"
+                                        else "адресный OBD ISO-TP не подтверждён"
+                                )
+                                db.journal().insert(JournalEntity(
+                                    timestamp = System.currentTimeMillis(),
+                                    connection = cfg.type,
+                                    command = "ADDRESSED_OBD_ISOTP",
+                                    raw = addressed.journalSummary(), elapsedMs = 0,
+                                    outcome = if (addressed.verified) "CONFIRMED"
+                                        else "INCONCLUSIVE"
+                                ))
+                            } catch (cancel: CancellationException) {
+                                throw cancel
+                            } catch (problem: Exception) {
+                                val note = "Адресная OBD-проверка: " +
+                                    (problem.message ?: problem::class.java.simpleName)
+                                _state.value = _state.value.copy(
+                                    isoTpReadiness = resultText + "; " + note
+                                )
+                                db.journal().insert(JournalEntity(
+                                    timestamp = System.currentTimeMillis(),
+                                    connection = cfg.type, command = "ADDRESSED_OBD_ISOTP",
+                                    raw = note, elapsedMs = 0, outcome = "INCONCLUSIVE"
+                                ))
+                            } finally {
+                                disposable?.close()
+                                if (engine === disposable) engine = null
+                                // Never reconnect if the user pressed Stop.
+                                if (currentCoroutineContext().isActive) {
+                                    val restored = createEngine(cfg)
+                                    engine = restored
+                                    try {
+                                        restored.connect()
+                                        connectedSettings = cfg
+                                        _state.value = _state.value.copy(
+                                            adapterConnected = restored.adapterReady,
+                                            carConnected = restored.vehicleReady,
+                                            protocol = restored.protocol, current = ""
+                                        )
+                                    } catch (problem: Exception) {
+                                        restored.close()
+                                        engine = null
+                                        connectedSettings = null
+                                        _state.value = _state.value.copy(
+                                            adapterConnected = false, carConnected = false,
+                                            protocol = "Не определён",
+                                            error = "Штатное OBD-подключение после проверки не восстановлено: " +
+                                                (problem.message ?: problem::class.java.simpleName)
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     } catch (cancel: CancellationException) {
                         throw cancel
                     } catch (error: Exception) {
