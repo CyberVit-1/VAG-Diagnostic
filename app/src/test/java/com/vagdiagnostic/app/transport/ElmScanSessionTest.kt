@@ -110,17 +110,64 @@ class ElmScanSessionTest {
         assertTrue(session.hasReactiveRecovery)
     }
 
-    @Test fun bluetoothDoesNotAcquireWifiSocketOnIoFailure() = runBlocking {
+    @Test fun bluetoothClassicUsesFreshSPPLinkAfterIoErrorOnly() = runBlocking {
+        var now = 1_000_000_000L
         val first = ScriptedLink()
-        val live = engine(first)
+        val live = engine(first) { now }
         live.connect()
+        now += 60_000_000_000L
+        val fallback = ScriptedLink()
+        var opens = 0
+        val events = mutableListOf<String>()
+        val session = ElmScanSession(
+            live, false, { opens++; engine(fallback) { now } }, { },
+            onEvent = { event, _ -> events.add(event) }, transportTag = "BT_CLASSIC"
+        )
+        session.prepare() // Non-Wi-Fi never reconnects merely due to idle time.
+        assertEquals(0, opens)
+        assertFalse(first.closed)
         first.failCommands.add("0100")
-        var creates = 0
-        val session = ElmScanSession(live, false, { creates++; engine(ScriptedLink()) }, { })
+        val response = ElmFrames.parse("0100", session.read("0100", 9000))
+        assertTrue(ObdDecoder.hasValidVehicleResponse(response))
+        assertEquals(1, opens)
+        assertTrue(first.closed)
+        assertTrue(session.hasReactiveRecovery)
+        assertTrue(events.contains("BT_CLASSIC_IO_RECOVERY"))
+        assertTrue(events.contains("BT_CLASSIC_SESSION_RESTORED"))
+    }
+
+    @Test fun bleNusRecoveryIsBoundedToOneAttempt() = runBlocking {
+        val link = ScriptedLink()
+        val first = engine(link)
+        first.connect()
+        val replacement = ScriptedLink()
+        var reconnects = 0
+        val session = ElmScanSession(
+            first, false, { reconnects++; engine(replacement) }, { },
+            transportTag = "BLE_NUS"
+        )
+        link.failCommands.add("03")
+        assertTrue(session.read("03", 8500).isNotBlank())
+        replacement.failCommands.add("07")
         try {
-            session.read("0100", 9000)
-            fail("Non-Wi-Fi link must propagate I/O error")
-        } catch (_: IOException) { }
+            session.read("07", 8500)
+            fail("Second BLE I/O failure must propagate")
+        } catch (_: IOException) {}
+        assertEquals(1, reconnects)
+        assertTrue(session.hasReactiveRecovery)
+    }
+
+    @Test fun bluetoothReadOnlyRecoveryNeverRetriesWriteOrUnknownCommands() = runBlocking {
+        val first = ScriptedLink()
+        val engine = engine(first)
+        engine.connect()
+        var creates = 0
+        val session = ElmScanSession(engine, false,
+            { creates++; engine(ScriptedLink()) }, { }, transportTag = "BT_CLASSIC")
+        try {
+            session.read("14", 8500) // ClearDTC is not read-only!
+            fail("Unknown/mutating OBD command must be rejected")
+        } catch (_: IllegalArgumentException) { }
         assertEquals(0, creates)
         assertFalse(session.hasReactiveRecovery)
     }
