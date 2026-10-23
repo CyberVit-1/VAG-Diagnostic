@@ -43,7 +43,7 @@ class ElmScanSession(
     }
 
     suspend fun read(command: String, timeoutMs: Long): String {
-        require(command in listOf("0100", "03", "07", "0A")) {
+        require(command in listOf("0100", "03", "07", "0A", "0900", "0902")) {
             "Автовосстановление разрешено только для read-only OBD"
         }
         try {
