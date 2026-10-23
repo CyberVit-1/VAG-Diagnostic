@@ -6,8 +6,10 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
 /**
- * Limits Wi-Fi scan reconnects. A session that has been idle may be stale even
- * when Socket.isConnected is true. Read-only OBD commands only.
+ * Bounded read-only ELM reconnects for Wi-Fi, SPP and BLE.
+ * Proactive idle refresh applies ONLY to Wi-Fi TCP, because Socket.isConnected
+ * can remain true for stale links; other transports reconnect on actual I/O
+ * failures, not on elapsed time.
  * No Android dependencies: can be checked with scripted ELM byte streams.
  */
 class ElmScanSession(
@@ -16,7 +18,9 @@ class ElmScanSession(
     private val newEngine: () -> ElmEngine,
     private val onEngineChanged: (ElmEngine?) -> Unit,
     private val idleReconnectMs: Long = 8_000L,
-    private val onEvent: suspend (String, String) -> Unit = { _, _ -> }
+    private val onEvent: suspend (String, String) -> Unit = { _, _ -> },
+    private val transportTag: String = if (wifi) "WIFI" else "TRANSPORT"
+
 ) {
     var current: ElmEngine = first
         private set
@@ -45,12 +49,12 @@ class ElmScanSession(
             return current.command(command, timeoutMs)
         } catch (failure: Throwable) {
             if (failure is CancellationException) throw failure
-            if (!wifi || failure !is IOException) throw failure
+            if (failure !is IOException) throw failure
             if (hasReactiveRecovery) {
-                note("WIFI_RECOVERY_EXHAUSTED", failure::class.java.simpleName + ": " + failure.message)
+                note("${transportTag}_RECOVERY_EXHAUSTED", failure::class.java.simpleName + ": " + failure.message)
                 throw failure
             }
-            note("WIFI_IO_RECOVERY", failure::class.java.simpleName + ": " + failure.message)
+            note("${transportTag}_IO_RECOVERY", failure::class.java.simpleName + ": " + failure.message)
             hasReactiveRecovery = true
             reopen()
             // One reactive recovery maximum: further failures propagate.
@@ -71,10 +75,10 @@ class ElmScanSession(
             )
             current = candidate
             onEngineChanged(candidate)
-            note("WIFI_SESSION_RESTORED", "ELM and OBD-II reply confirmed")
+            note("${transportTag}_SESSION_RESTORED", "ELM and OBD-II reply confirmed")
         } catch (failure: Throwable) {
             candidate.close()
-            note("WIFI_SESSION_RESTORE_FAILED", failure::class.java.simpleName + ": " + failure.message)
+            note("${transportTag}_SESSION_RESTORE_FAILED", failure::class.java.simpleName + ": " + failure.message)
             throw failure
         }
     }
