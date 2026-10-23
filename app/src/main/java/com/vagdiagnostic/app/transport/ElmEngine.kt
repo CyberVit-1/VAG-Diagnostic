@@ -30,6 +30,9 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
     // Null means do not attempt a mode-dependent DTC decode.
     var isCanVehicle: Boolean? = null
         private set
+    /** ECU CAN IDs confirmed by a real positive 41 00 reply. */
+    var observedCanResponderIds: Set<String> = emptySet()
+        private set
 
     suspend fun connect() {
         link.open()
@@ -51,6 +54,13 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
             val response = command("0100", 9000)
             val parsed = ElmFrames.parse("0100", response)
             vehicleReady = ObdDecoder.hasValidVehicleResponse(parsed)
+            observedCanResponderIds = if (vehicleReady) {
+                parsed.messagesFor(0x41).filterValues { responses ->
+                    responses.any { it.size >= 6 && it[1].toInt() == 0 }
+                }.keys.filter {
+                    Regex("^(7E[8-F]|18D[AB][0-9A-F]{4})$").matches(it)
+                }.toSet()
+            } else emptySet()
             carError = if (vehicleReady) "" else
                 "Адаптер отвечает, но OBD-II связь с автомобилем не подтверждена: " +
                     parsed.problems.joinToString().ifBlank { response.take(160) }
@@ -115,5 +125,5 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
             catch (_: Exception) { /* a full log must not break car communication */ }
         }
     }
-    fun close() { vehicleReady = false; adapterReady = false; isCanVehicle = null; link.close() }
+    fun close() { vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); link.close() }
 }
