@@ -54,6 +54,7 @@ data class DashboardState(
     val protocol: String = "Не определён",
     val adapterName: String = "—",
     val error: String = "",
+    val scanWarning: String = "",
     val isBusy: Boolean = false,
     val isScanning: Boolean = false,
     val current: String = "",
@@ -66,6 +67,7 @@ data class DashboardState(
     // An ECU is counted as queried only after a validated DTC-mode response.
     val polled: Int get() = units.count { it.answeredModes.isNotEmpty() }
     val successful: Int get() = units.count { it.state == ReadState.COMPLETE }
+    val partial: Int get() = units.count { it.state == ReadState.PARTIAL }
     val faulty: Int get() = units.count { it.dtcs.isNotEmpty() }
     val faultCount: Int get() = units.sumOf { it.dtcs.size }
 }
@@ -165,6 +167,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             scanStartedAt = System.currentTimeMillis()
             var interrupted = false
             var incompleteModes = false
+            val scanWarnings = mutableListOf<String>()
             var rowId = 0L
             suspend fun checkpoint(current: List<ControlUnit>, modes: Int, incomplete: Boolean) {
                 val record = ScanEntity(id = rowId, started = scanStartedAt, finished = System.currentTimeMillis(),
@@ -173,7 +176,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 else db.scans().update(record)
             }
             _state.value = _state.value.copy(isScanning = true, isBusy = true, units = emptyList(),
-                current = "Обнаружение ответчиков OBD-II", error = "", completedModes = 0, lastScanInterrupted = false)
+                current = "Обнаружение ответчиков OBD-II", error = "", scanWarning = "",
+                completedModes = 0, lastScanInterrupted = false)
             val units = linkedMapOf<String, ControlUnit>()
             try {
                 checkpoint(emptyList(), 0, true)
@@ -198,9 +202,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     if (!assessment.complete) {
                         incompleteModes = true
-                        _state.value = _state.value.copy(
-                            error = "${kind.command}: " + assessment.problems.take(4).joinToString("; ")
-                        )
+                        val warning = "${kind.command}: " + assessment.problems.take(4).joinToString("; ")
+                        scanWarnings += warning
+                        _state.value = _state.value.copy(scanWarning = scanWarnings.joinToString("\n"))
                     }
                     // Keep the parser decision with the same raw journal, so a
                     // real test reveals why an ECU/mode was accepted or rejected.
@@ -278,7 +282,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun useHistory(scan: ScanEntity) = runCatching {
         _state.value = _state.value.copy(units = ScanCodec.decode(scan.json), isScanning = false,
-            completedModes = scan.completedModes, lastScanInterrupted = scan.interrupted, current = "")
+            completedModes = scan.completedModes, lastScanInterrupted = scan.interrupted,
+            current = "", error = "", scanWarning = "")
     }.onFailure { _state.value = _state.value.copy(error = "История повреждена: ${it.message}") }
 
     fun internetAvailable(): Boolean {
