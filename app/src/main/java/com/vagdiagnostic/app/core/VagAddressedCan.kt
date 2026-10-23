@@ -52,6 +52,25 @@ object VagAddressedCan {
         )
     }
 
+    /**
+     * The only gateway DTC interpretation entrypoint. Never hand a raw,
+     * address-ambiguous ELM string to the UDS DTC decoder.
+     */
+    fun interpretGatewayDtcReply(
+        raw: String,
+        expectedCanId: Int
+    ): VagUdsReadOnly.DtcReply {
+        val response = decodeSingleEcu(raw, expectedCanId)
+        val address = if (expectedCanId <= 0x7FF) "%03X".format(expectedCanId)
+                      else "%08X".format(expectedCanId)
+        if (!response.valid) {
+            return VagUdsReadOnly.DtcReply.Invalid(
+                address, response.problems.joinToString("; ")
+            )
+        }
+        return VagUdsReadOnly.decodeDtcByStatusMask(address, response.payload!!)
+    }
+
     data class Reply(val payload: ByteArray?, val problems: List<String>) {
         val valid: Boolean get() = payload != null && problems.isEmpty()
     }
