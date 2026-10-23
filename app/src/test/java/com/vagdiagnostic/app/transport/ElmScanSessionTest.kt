@@ -37,6 +37,8 @@ class ElmScanSessionTest {
                 "ATZ" -> "ELM327 v1.5"
                 "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0", "ATAT1" -> "OK"
                 "ATDPN" -> "A6"
+                "0900" -> "7E806490040000000"
+                "0902" -> "7E81014490201313233\r7E82134353637383941\r7E82242434445464748"
                 "0100" -> "SEARCHING...\r7E8064100BE3EA813\r7E906410098188001"
                 "03" -> "7E80443010299000000\r7E9024300"
                 "07" -> "7E802470000000000\r7E9024700"
@@ -144,6 +146,30 @@ class ElmScanSessionTest {
         }
         assertEquals(1, creates)
         assertTrue(session.hasReactiveRecovery)
+    }
+
+    @Test fun readOnlyMode09CapabilityIsAvailableOnAllThreeELMTransports() = runBlocking {
+        for (kind in listOf("WIFI", "BT_CLASSIC", "BLE_NUS")) {
+            val stream = ScriptedLink()
+            val original = engine(stream)
+            original.connect()
+            val session = ElmScanSession(
+                original, kind == "WIFI", { engine(ScriptedLink()) }, { },
+                transportTag = kind
+            )
+            val known = setOf("7E8", "7E9")
+            val supported = com.vagdiagnostic.app.core.ObdMode09Readiness.supportedVinEcus(
+                ElmFrames.parse("0900", session.read("0900", 9500)), known
+            )
+            assertEquals(setOf("7E8"), supported.responders)
+            val check = com.vagdiagnostic.app.core.ObdMode09Readiness.assessVin(
+                ElmFrames.parse("0902", session.read("0902", 13500)),
+                supported.responders
+            )
+            assertTrue("$kind: ${check.issues}", check.confirmed)
+            assertTrue(stream.commands.containsAll(listOf("0900", "0902")))
+            assertFalse(stream.commands.any { it == "14" || it.startsWith("19") })
+        }
     }
 
     @Test fun bluetoothClassicUsesFreshSPPLinkAfterIoErrorOnly() = runBlocking {
