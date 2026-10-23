@@ -4,6 +4,7 @@ import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.channels.ClosedReceiveChannelException
 
 /**
  * Bounded read-only ELM reconnects for Wi-Fi, SPP and BLE.
@@ -49,7 +50,9 @@ class ElmScanSession(
             return current.command(command, timeoutMs)
         } catch (failure: Throwable) {
             if (failure is CancellationException) throw failure
-            if (failure !is IOException) throw failure
+            // BLE NUS reports a disconnected GATT notification stream as a
+            // closed coroutine channel, not necessarily as java.io.IOException.
+            if (failure !is IOException && failure !is ClosedReceiveChannelException) throw failure
             if (hasReactiveRecovery) {
                 note("${transportTag}_RECOVERY_EXHAUSTED", failure::class.java.simpleName + ": " + failure.message)
                 throw failure
