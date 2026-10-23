@@ -125,6 +125,18 @@ class VagAddressedCanTest {
         }
     }
 
+    @Test fun strictDecoderNeverForwardsWrongEcuToUdsDtcAssessment() {
+        val bad = VagAddressedCan.interpretGatewayDtcReply("7E9 03 59 02 FF\r>", 0x7E8)
+        assertTrue(bad is VagUdsReadOnly.DtcReply.Invalid)
+        val valid = VagAddressedCan.interpretGatewayDtcReply("7E8 03 59 02 FF\r>", 0x7E8)
+        assertTrue(valid is VagUdsReadOnly.DtcReply.Positive)
+        assertTrue((valid as VagUdsReadOnly.DtcReply.Positive).faults.isEmpty())
+        val pending = VagAddressedCan.interpretGatewayDtcReply("7E8 03 7F 19 78\r>", 0x7E8)
+        assertTrue(pending is VagUdsReadOnly.DtcReply.Pending)
+        val refused = VagAddressedCan.interpretGatewayDtcReply("7E8 03 7F 19 31\r>", 0x7E8)
+        assertTrue(refused is VagUdsReadOnly.DtcReply.Negative)
+    }
+
     @Test fun supportsExplicit29BitResponseHeaderWithoutGuessing11BitAddress() {
         val ok = VagAddressedCan.decodeSingleEcu("18DAF110035902FF\r>", 0x18DAF110)
         assertTrue(ok.problems.toString(), ok.valid)
