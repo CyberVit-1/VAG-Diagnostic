@@ -27,7 +27,8 @@ class ElmAddressedObdProbeTest {
                 "ATZ" -> "ELM327 v1.5"
                 "ATDPN" -> proto
                 "0100" -> obd
-                "ATCAF1", "ATCFC1", "ATSH7E0", "ATCRA7E8" ->
+                "ATCAF1", "ATCFC1", "ATSH7E0", "ATCRA7E8",
+                "ATSH7E1", "ATCRA7E9" ->
                     if (cmd == rejectAt) "?" else "OK"
                 "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0", "ATAT1" -> "OK"
                 "0902" -> reply0902
@@ -44,7 +45,7 @@ class ElmAddressedObdProbeTest {
         val link = Link()
         val engine = ElmEngine(link, { _, _, _, _ -> })
         engine.connect()
-        val result = ElmAddressedObdProbe.runOnDisposableEngine(engine)
+        val result = ElmAddressedObdProbe.runOnDisposableEngine(engine, "7E8")
         assertTrue(result.reason, result.verified)
         assertTrue(result.atAccepted)
         assertTrue(link.sent.contains("ATCRA7E8"))
@@ -57,7 +58,7 @@ class ElmAddressedObdProbeTest {
         val link = Link(rejectAt = "ATCRA7E8")
         val engine = ElmEngine(link, { _, _, _, _ -> })
         engine.connect()
-        val result = ElmAddressedObdProbe.runOnDisposableEngine(engine)
+        val result = ElmAddressedObdProbe.runOnDisposableEngine(engine, "7E8")
         assertFalse(result.verified)
         assertFalse(result.atAccepted)
         assertFalse(link.sent.contains("0902"))
@@ -67,7 +68,7 @@ class ElmAddressedObdProbeTest {
         val link = Link(obd = "7E906410098188001")
         val engine = ElmEngine(link, { _, _, _, _ -> })
         engine.connect()
-        val result = ElmAddressedObdProbe.runOnDisposableEngine(engine)
+        val result = ElmAddressedObdProbe.runOnDisposableEngine(engine, "7E8")
         assertFalse(result.verified)
         assertFalse(link.sent.contains("ATSH7E0"))
     }
@@ -77,17 +78,31 @@ class ElmAddressedObdProbeTest {
             val link = Link(reply0902 = raw)
             val engine = ElmEngine(link, { _, _, _, _ -> })
             engine.connect()
-            val result = ElmAddressedObdProbe.runOnDisposableEngine(engine)
+            val result = ElmAddressedObdProbe.runOnDisposableEngine(engine, "7E8")
             assertFalse(result.verified)
             assertTrue(result.atAccepted)
         }
+    }
+
+    @Test fun standard7E9ResponderUses7E1PhysicalRequest() = runBlocking {
+        val link = Link(
+            obd = "7E906410098188001",
+            reply0902 = "7E91014490201313233\r7E92134353637383941\r7E92242434445464748"
+        )
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val result = ElmAddressedObdProbe.runOnDisposableEngine(engine, "7E9")
+        assertTrue(result.reason, result.verified)
+        assertTrue(link.sent.contains("ATSH7E1"))
+        assertTrue(link.sent.contains("ATCRA7E9"))
+        assertFalse(link.sent.contains("ATSH7E0"))
     }
 
     @Test fun unsupportedCanProtocolSkipsAddressedCanCompletely() = runBlocking {
         val link = Link(proto = "A7")
         val engine = ElmEngine(link, { _, _, _, _ -> })
         engine.connect()
-        val result = ElmAddressedObdProbe.runOnDisposableEngine(engine)
+        val result = ElmAddressedObdProbe.runOnDisposableEngine(engine, "7E8")
         assertFalse(result.verified)
         assertFalse(link.sent.contains("ATCAF1"))
     }
