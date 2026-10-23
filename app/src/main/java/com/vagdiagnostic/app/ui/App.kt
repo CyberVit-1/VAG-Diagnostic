@@ -282,7 +282,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
 }
 @Composable private fun UnitList(status: DashboardState, search: (String) -> Unit) {
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Text("Найденные OBD-II ответчики. Для Gateway 19 и остальных блоков VAG пока нет проверенного адресного профиля.", style = MaterialTheme.typography.bodySmall) }
+        item { Text("Это подтверждённые OBD-II ответчики, не полный список блоков VAG. Для безопасного чтения Gateway 19 ещё необходимы проверенный профиль CAN-адресации, формат списка установленных блоков и совместимый ISO-TP интерфейс. Пока запросы к шлюзу не отправляются.", style = MaterialTheme.typography.bodySmall) }
         if (status.units.isEmpty()) item { Text("Сначала проведите сканирование") }
         items(status.units, key = { it.address }) { EcuCard(it, search) }
     }
@@ -347,8 +347,8 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 Button(onClick = export, modifier = Modifier.fillMaxWidth()) { Text("Экспортировать журнал TXT") }
             }
         }
-        Text("Версия 0.1.6 · Только чтение", style = MaterialTheme.typography.bodyMedium)
-        Text("Не реализовано: Gateway Installation List, VAG UDS Auto-Scan, KWP1281, TP 2.0, запись и сброс ошибок. BLE поддерживает только Nordic UART.",
+        Text("Версия 0.1.7 · Только чтение", style = MaterialTheme.typography.bodyMedium)
+        Text("UDS/ISO-TP: подготовлена строгая проверка ответов, но адресный опрос Gateway 19 и VAG Auto-Scan ещё не включены. KWP1281 и TP 2.0 не реализованы. Запись и сброс DTC запрещены. BLE: только Nordic UART.",
             style = MaterialTheme.typography.bodySmall)
     }
 }
