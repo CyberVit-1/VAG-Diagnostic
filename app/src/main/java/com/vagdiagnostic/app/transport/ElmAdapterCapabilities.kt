@@ -34,11 +34,11 @@ object ElmAdapterCapabilities {
     private val diagnostic11Bit = Regex("^7E[8-F]$")
 
     /** Use an ECU ID verified by the previous vehicle 0100 reply. */
-    suspend fun inspect(engine: ElmEngine): Report {
+    suspend fun inspect(engine: ElmEngine, expectedResponder: String? = null): Report {
         check(engine.vehicleReady) { "Сначала подтвердите OBD-II связь" }
         val isCan11 = engine.protocol in setOf("6", "A6") && engine.isCanVehicle == true
         val responder = engine.observedCanResponderIds.firstOrNull {
-            diagnostic11Bit.matches(it)
+            diagnostic11Bit.matches(it) && (expectedResponder == null || it == expectedResponder)
         }
         if (!isCan11 || responder == null) {
             return Report(
@@ -51,9 +51,12 @@ object ElmAdapterCapabilities {
             )
         }
         val checks = mutableListOf<Check>()
-        // Only an AT setting (not a CAN message). 7E0 is the standard OBD-II
-        // 11-bit physical Tx header. Rx ID comes from an actually observed ECU.
-        for (cmd in listOf("ATCAF1", "ATCFC1", "ATSH7E0", "ATCRA" + responder)) {
+        // Legislated OBD 11-bit physical request IDs 7E0..7E7 map to
+        // observed reply IDs 7E8..7EF (offset 8); no OEM ID is guessed.
+        // These are AT settings, not transmitted CAN diagnostic requests.
+        val physicalRequest = "%03X".format(responder.toInt(16) - 8)
+        for (cmd in listOf("ATCAF1", "ATCFC1",
+            "ATSH" + physicalRequest, "ATCRA" + responder)) {
             val raw = engine.command(cmd, timeoutMs = 5500)
             val normalized = raw.uppercase().replace(cmd, "").trim()
                 .replace("\r", "").replace("\n", "").replace(" ", "")
