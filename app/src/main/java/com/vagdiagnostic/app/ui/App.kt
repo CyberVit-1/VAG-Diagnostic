@@ -250,7 +250,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
         } else Button(onClick = start, enabled = status.carConnected && !status.isBusy, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.PlayArrow, null); Text(if (status.units.isEmpty()) "Начать сканирование" else "Повторить сканирование")
         }
-        if (status.lastScanInterrupted) Text("Сканирование завершилось не полностью. Сохранены полученные ответы.", style = MaterialTheme.typography.bodySmall)
+        if (status.lastScanInterrupted) Text("Сканирование прервано или часть режимов не подтвердила ответ. Полученные данные сохранены.", style = MaterialTheme.typography.bodySmall)
         Text("Обнаруженные OBD-II ответчики (не полный список блоков VAG)", style = MaterialTheme.typography.titleSmall)
         if (status.units.isEmpty()) Text("Нет подтверждённых ответчиков. Результаты не подставляются автоматически.", style = MaterialTheme.typography.bodySmall)
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 20.dp)) {
@@ -347,7 +347,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 Button(onClick = export, modifier = Modifier.fillMaxWidth()) { Text("Экспортировать журнал TXT") }
             }
         }
-        Text("Версия 0.1.5 · Только чтение", style = MaterialTheme.typography.bodyMedium)
+        Text("Версия 0.1.6 · Только чтение", style = MaterialTheme.typography.bodyMedium)
         Text("Не реализовано: Gateway Installation List, VAG UDS Auto-Scan, KWP1281, TP 2.0, запись и сброс ошибок. BLE поддерживает только Nordic UART.",
             style = MaterialTheme.typography.bodySmall)
     }
