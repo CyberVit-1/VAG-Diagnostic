@@ -16,6 +16,7 @@ import com.vagdiagnostic.app.core.DtcKind
 import com.vagdiagnostic.app.core.DiagnosticLogRedactor
 import com.vagdiagnostic.app.core.ElmFrames
 import com.vagdiagnostic.app.core.ObdDecoder
+import com.vagdiagnostic.app.core.ObdMode09Readiness
 import com.vagdiagnostic.app.core.ReadState
 import com.vagdiagnostic.app.data.ConnectionSettings
 import com.vagdiagnostic.app.data.DiagnosticDatabase
@@ -55,6 +56,7 @@ data class DashboardState(
     val adapterName: String = "—",
     val error: String = "",
     val scanWarning: String = "",
+    val isoTpReadiness: String = "",
     val isBusy: Boolean = false,
     val isScanning: Boolean = false,
     val current: String = "",
@@ -182,7 +184,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 else db.scans().update(record)
             }
             _state.value = _state.value.copy(isScanning = true, isBusy = true, units = emptyList(),
-                current = "Обнаружение ответчиков OBD-II", error = "", scanWarning = "",
+                current = "Обнаружение ответчиков OBD-II", error = "", scanWarning = "", isoTpReadiness = "",
                 completedModes = 0, lastScanInterrupted = false)
             val units = linkedMapOf<String, ControlUnit>()
             try {
@@ -257,6 +259,58 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.value = _state.value.copy(units = units.values.toList(), completedModes = index + 1)
                     checkpoint(units.values.toList(), index + 1, index != 2 || incompleteModes)
                 }
+                // Non-proprietary Mode09 readiness check. A missing VIN PID or a
+                // fragmented reply NEVER rewrites the earlier DTC results.
+                if (session.current.isCanVehicle == true) {
+                    _state.value = _state.value.copy(current = "OBD-II: проверка ISO-TP (Mode 09)")
+                    try {
+                        val supported = ObdMode09Readiness.supportedVinEcus(
+                            ElmFrames.parse("0900", readOnlyCommand("0900", 9500)),
+                            units.keys.toSet()
+                        )
+                        val check = if (supported.responders.isNotEmpty()) {
+                            ObdMode09Readiness.assessVin(
+                                ElmFrames.parse("0902", readOnlyCommand("0902", 13500)),
+                                supported.responders
+                            )
+                        } else null
+                        val resultText = if (check == null) {
+                            "Mode 09 PID02 не подтверждён; многофреймовый ответ не проверен"
+                        } else if (check.confirmed) {
+                            "Mode 09: полный ответ подтверждён у ${check.verified.size}/${check.supported.size} ЭБУ; адресный VAG ISO-TP ещё не проверен"
+                        } else "Mode 09: полный ответ не подтверждён"
+                        val details = supported.issues + check?.issues.orEmpty()
+                        _state.value = _state.value.copy(isoTpReadiness = resultText)
+                        db.journal().insert(JournalEntity(
+                            timestamp = System.currentTimeMillis(), connection = cfg.type,
+                            command = "OBD09_ISOTP_READINESS",
+                            raw = resultText + "; " + details.joinToString(" | "),
+                            elapsedMs = 0,
+                            outcome = if (check?.confirmed == true) "CONFIRMED" else "INCONCLUSIVE"
+                        ))
+                    } catch (cancel: CancellationException) {
+                        throw cancel
+                    } catch (error: Exception) {
+                        // A capability check is not a DTC read failure; keep all
+                        // preceding confirmed modes and log only the probe issue.
+                        val note = "Mode 09: проверка не завершена — " +
+                            (error.message ?: error::class.java.simpleName)
+                        _state.value = _state.value.copy(isoTpReadiness = note)
+                        db.journal().insert(JournalEntity(
+                            timestamp = System.currentTimeMillis(), connection = cfg.type,
+                            command = "OBD09_ISOTP_READINESS", raw = note,
+                            elapsedMs = 0, outcome = "INCONCLUSIVE"
+                        ))
+                        if (error is java.io.IOException) {
+                            session.close()
+                            connectedSettings = null
+                        }
+                    }
+                } else {
+                    _state.value = _state.value.copy(
+                        isoTpReadiness = "Mode 09 ISO-TP: CAN не подтверждён; проверка пропущена"
+                    )
+                }
             } catch (error: CancellationException) {
                 interrupted = true; throw error
             } catch (error: Throwable) {
@@ -289,7 +343,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun useHistory(scan: ScanEntity) = runCatching {
         _state.value = _state.value.copy(units = ScanCodec.decode(scan.json), isScanning = false,
             completedModes = scan.completedModes, lastScanInterrupted = scan.interrupted,
-            current = "", error = "", scanWarning = "")
+            current = "", error = "", scanWarning = "", isoTpReadiness = "")
     }.onFailure { _state.value = _state.value.copy(error = "История повреждена: ${it.message}") }
 
     fun internetAvailable(): Boolean {
