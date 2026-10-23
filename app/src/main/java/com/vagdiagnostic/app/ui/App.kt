@@ -347,8 +347,8 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 Button(onClick = export, modifier = Modifier.fillMaxWidth()) { Text("Экспортировать журнал TXT") }
             }
         }
-        Text("Версия 0.1.7 · Только чтение", style = MaterialTheme.typography.bodyMedium)
-        Text("UDS/ISO-TP: подготовлена строгая проверка ответов, но адресный опрос Gateway 19 и VAG Auto-Scan ещё не включены. KWP1281 и TP 2.0 не реализованы. Запись и сброс DTC запрещены. BLE: только Nordic UART.",
+        Text("Версия 0.1.8 · Только чтение", style = MaterialTheme.typography.bodyMedium)
+        Text("UDS/ISO-TP: добавлена строгая проверка одиночного адресного обмена и безопасная подготовка команды, но запросы Gateway 19 и VAG Auto-Scan ещё не включены. KWP1281 и TP 2.0 не реализованы. Запись и сброс DTC запрещены. BLE: только Nordic UART.",
             style = MaterialTheme.typography.bodySmall)
     }
 }
