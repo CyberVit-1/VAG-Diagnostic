@@ -41,6 +41,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vagdiagnostic.app.MainViewModel
 import com.vagdiagnostic.app.DashboardState
 import com.vagdiagnostic.app.core.ControlUnit
+import com.vagdiagnostic.app.core.DtcKind
 import com.vagdiagnostic.app.core.ReadState
 import com.vagdiagnostic.app.data.ConnectionSettings
 import com.vagdiagnostic.app.data.ScanCodec
