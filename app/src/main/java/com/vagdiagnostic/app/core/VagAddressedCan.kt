@@ -148,6 +148,21 @@ object VagAddressedCan {
                 continue
             }
             lastHeaderOk = true
+            // Some ELM/CAN readers print a separate one-digit DLC before
+            // the actual ISO-TP data bytes: "7E8 8 10 0B ...".
+            // Only recognize that representation when the count matches
+            // the complete set of data tokens; otherwise fail closed.
+            val tokens = bytesText.split(' ').filter { it.isNotEmpty() }
+            if (tokens.firstOrNull()?.length == 1) {
+                val dlc = tokens.first().toIntOrNull(16)
+                if (dlc == null || dlc !in 0..8 ||
+                    tokens.size - 1 != dlc ||
+                    tokens.drop(1).any { it.length != 2 || !hex.matches(it) }) {
+                    errors += "Некорректный DLC кадра от " + header
+                    continue
+                }
+                bytesText = tokens.drop(1).joinToString("")
+            }
             val packed = bytesText.replace(" ", "")
             if (packed.isEmpty() || packed.length % 2 != 0 || !hex.matches(packed)) {
                 errors += "Некорректные байты ISO-TP"
