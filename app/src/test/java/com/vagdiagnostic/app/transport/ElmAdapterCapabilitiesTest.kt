@@ -27,7 +27,8 @@ class ElmAdapterCapabilitiesTest {
                 "ATDPN" -> protocol
                 "0100" -> obdLine
                 "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0", "ATAT1",
-                "ATCAF1", "ATCFC1", "ATSH7E0", "ATCRA7E8", "ATCRA7E9" ->
+                "ATCAF1", "ATCFC1", "ATSH7E0", "ATSH7E1",
+                "ATCRA7E8", "ATCRA7E9" ->
                     if (cmd == reject) "?" else "OK"
                 else -> throw IOException("Unexpected non-whitelisted command: " + cmd)
             }
@@ -96,6 +97,7 @@ class ElmAdapterCapabilitiesTest {
         val report = ElmAdapterCapabilities.inspect(engine)
         assertTrue(report.completeAcceptance)
         assertEquals("7E9", report.responder)
+        assertEquals("ATSH7E1", report.checks[2].command)
         assertEquals("ATCRA7E9", report.checks.last().command)
         assertFalse(link.sent.contains("ATCRA7E8"))
     }
