@@ -160,6 +160,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         timestamp = System.currentTimeMillis(), connection = cfg.type,
                         command = event, raw = message, elapsedMs = 0, outcome = "SESSION"
                     ))
+                },
+                transportTag = when (cfg.type) {
+                    "Wi-Fi" -> "WIFI"
+                    "Bluetooth Classic" -> "BT_CLASSIC"
+                    "BLE / NUS" -> "BLE_NUS"
+                    else -> "ELM"
                 }
             )
             suspend fun readOnlyCommand(command: String, timeoutMs: Long): String =
@@ -256,7 +262,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             } catch (error: Throwable) {
                 interrupted = true
                 val linkLost = error is java.io.IOException || engine == null ||
-                    (cfg.type == "Wi-Fi" && session.hasReactiveRecovery)
+                    session.hasReactiveRecovery
                 if (linkLost) { session.close(); connectedSettings = null }
                 _state.value = _state.value.copy(error =
                     "Диагностика: ${error.message ?: error::class.java.simpleName}" +
