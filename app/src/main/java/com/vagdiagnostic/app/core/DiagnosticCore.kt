@@ -242,14 +242,17 @@ object LocalDescriptions {
 }
 
 object UdsDecoder {
-    /** UDS 19 02 status mask -> 59 02 supportedStatusMask [3-byte DTC, status]*. */
+    /** Compatibility facade. All UDS replies use the strict, shared validator. */
     data class UdsFault(val raw24: String, val statusMask: Int)
-    fun readDtcByStatusMask(payload: ByteArray): List<UdsFault> {
-        require(payload.size >= 3 && payload[0].toInt() and 255 == 0x59 && payload[1].toInt() and 255 == 2) { "Не 59 02" }
-        require((payload.size - 3) % 4 == 0) { "Неполная запись UDS DTC" }
-        return (3 until payload.size step 4).map { pos ->
-            val raw = (0..2).joinToString("") { "%02X".format(payload[pos + it].toInt() and 255) }
-            UdsFault(raw, payload[pos + 3].toInt() and 255)
+    fun readDtcByStatusMask(payload: ByteArray): List<UdsFault> =
+        when (val reply = VagUdsReadOnly.decodeDtcByStatusMask("UDS", payload)) {
+            is VagUdsReadOnly.DtcReply.Positive ->
+                reply.faults.map { UdsFault(it.raw24, it.rawStatus) }
+            is VagUdsReadOnly.DtcReply.Pending ->
+                throw IllegalArgumentException("UDS 19: ожидание ответа NRC 0x78, результат ещё не получен")
+            is VagUdsReadOnly.DtcReply.Negative ->
+                throw IllegalArgumentException("UDS 19: ответ отказа NRC 0x%02X".format(reply.nrc))
+            is VagUdsReadOnly.DtcReply.Invalid ->
+                throw IllegalArgumentException(reply.reason)
         }
-    }
 }
