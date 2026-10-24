@@ -16,7 +16,8 @@ class VagTp20GatewayTest {
     @Test fun validatesPositiveResponseOnlyWithExpected219HeaderAndIds() {
         for (sample in listOf("21900D00003A80701\r>",
             "219 00 D0 00 03 A8 07 01\r>",
-            "219 7 00 D0 00 03 A8 07 01\r>")) {
+            "219 7 00 D0 00 03 A8 07 01\r>",
+            "219 8 00 D0 00 03 A8 07 01 00\r>")) {
             val reply = VagTp20Gateway.decodeReply(sample)
             assertTrue("$sample: $reply", reply is VagTp20Gateway.Result.Accepted)
             val ok = reply as VagTp20Gateway.Result.Accepted
