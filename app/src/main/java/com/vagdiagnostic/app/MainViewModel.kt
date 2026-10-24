@@ -444,7 +444,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val entries = db.journal().latest(10000).reversed()
         entries.forEach { e ->
             content.append("${e.timestamp} | ${e.connection} | ${e.command} | ${e.elapsedMs}ms | ${e.outcome}\n")
-            content.append(DiagnosticLogRedactor.redact(e.raw)).append("\n")
+            content.append(DiagnosticLogRedactor.redact(e.raw, e.command)).append("\n")
         }
         if (entries.size == 10000) content.append("\nДостигнут предел экспорта 10000 записей\n")
         return content.toString()
