@@ -59,7 +59,7 @@ object VagTp20Gateway {
             val spaced = match.groupValues[2].trim().split(Regex("\\s+"))
             if (spaced.firstOrNull()?.length == 1) {
                 val dlc = spaced.first().toIntOrNull(16)
-                if (dlc !in 7..8 || spaced.size != dlc + 1 ||
+                if (dlc == null || dlc !in 7..8 || spaced.size != dlc + 1 ||
                     spaced.drop(1).any { it.length != 2 || !hex.matches(it) }) {
                     errors += "Неверный DLC ответа TP2.0"
                     continue
