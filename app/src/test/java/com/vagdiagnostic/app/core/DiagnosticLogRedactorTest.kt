@@ -13,7 +13,6 @@ class DiagnosticLogRedactorTest {
         assertFalse(exported.contains("7E81014"))
         assertFalse(exported.contains("7E821"))
         assertFalse(exported.contains("7E822"))
-        assertEquals(raw, raw) // Redaction does not modify the stored original.
     }
 
     @Test fun spacedMode09AndUdsVinRequestsAreProtected() {
