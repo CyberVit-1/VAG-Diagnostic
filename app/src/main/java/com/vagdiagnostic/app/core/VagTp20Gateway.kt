@@ -54,16 +54,20 @@ object VagTp20Gateway {
                 continue
             }
             var bytes = match.groupValues[2].trim().replace(" ", "")
-            // ATH1+CAF0 may include a separate DLC preceding the raw CAN data.
+            // ATH1+CAF0 may show the DLC separately; some ECUs pad the
+            // 7-byte channel response to eight bytes with 00.
             val spaced = match.groupValues[2].trim().split(Regex("\\s+"))
             if (spaced.firstOrNull()?.length == 1) {
                 val dlc = spaced.first().toIntOrNull(16)
-                if (dlc != 7 || spaced.size != dlc + 1 ||
+                if (dlc !in 7..8 || spaced.size != dlc + 1 ||
                     spaced.drop(1).any { it.length != 2 || !hex.matches(it) }) {
                     errors += "Неверный DLC ответа TP2.0"
                     continue
                 }
                 bytes = spaced.drop(1).joinToString("")
+            }
+            if (bytes.length == 16 && bytes.endsWith("00")) {
+                bytes = bytes.dropLast(2)
             }
             if (bytes.length != 14 || !hex.matches(bytes)) {
                 errors += "Неполный/неверный ответ настройки TP2.0"
