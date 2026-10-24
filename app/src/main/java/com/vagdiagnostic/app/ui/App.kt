@@ -352,7 +352,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 Button(onClick = export, modifier = Modifier.fillMaxWidth()) { Text("Экспортировать журнал TXT") }
             }
         }
-        Text("Версия 0.2.0 · Только чтение", style = MaterialTheme.typography.bodyMedium)
+        Text("Версия 0.2.1 · Только чтение", style = MaterialTheme.typography.bodyMedium)
         Text("UDS/ISO-TP: автоматическая проверка стандартного OBD 0900/0902 и адресного CAN (при подтверждённой поддержке). Запросы Gateway 19 и VAG Auto-Scan не включены. KWP1281 и TP 2.0 не реализованы. Запись и сброс DTC запрещены. BLE: только Nordic UART.",
             style = MaterialTheme.typography.bodySmall)
     }
