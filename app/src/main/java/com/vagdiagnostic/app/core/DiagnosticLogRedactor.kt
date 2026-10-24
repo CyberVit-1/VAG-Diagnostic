@@ -16,6 +16,19 @@ object DiagnosticLogRedactor {
     private val packedCan29 = Regex("^(?:18DA|18DB)[0-9A-F]{4}(?:[0-9A-F]{2}){3,}$")
     private val segment = Regex("[^\\r\\n]+")
 
+    /**
+     * Mode 09 PID 02 and UDS DID F190 carry the VIN as HEX-encoded ASCII.
+     * A plain 17-character VIN regex cannot protect such ISO-TP frames.
+     * Hide the entire command payload in a shared TXT export; the unchanged
+     * original remains in Room for local diagnostics. Never leak partial VIN.
+     */
+    fun redact(raw: String, command: String): String {
+        val request = command.uppercase().filter { it in '0'..'9' || it in 'A'..'F' }
+        return if (request == "0902" || request == "22F190") {
+            "[VIN-bearing diagnostic payload hidden in TXT export; original remains in local journal]"
+        } else redact(raw)
+    }
+
     fun redact(raw: String): String = segment.replace(raw) { match ->
         val line = match.value
         val compact = line.filterNot { it.isWhitespace() }.uppercase()
