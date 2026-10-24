@@ -47,7 +47,7 @@ class VagTp20GatewayTest {
     }
 
     @Test fun detectsOnlyTheChassisMarkerAndNeverPersistsVin() {
-        val markerVin = "AAAAAA1KAAAAAAAAA"
+        val markerVin = "WVWAAA1KAAAAAAAAA"
         val bytes = byteArrayOf(0x49, 0x02, 0x01) +
             markerVin.map { it.code.toByte() }.toByteArray()
         val frames = FrameParse(mapOf("7E8" to listOf(bytes)), emptyList())
