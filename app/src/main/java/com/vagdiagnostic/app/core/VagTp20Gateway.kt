@@ -81,7 +81,7 @@ object VagTp20Gateway {
             return Result.Rejected("Шлюз отклонил открытие TP2.0: 0x%02X".format(data[1]))
         if (data[1] != 0xD0) return Result.Rejected("Неверный opcode настройки TP2.0")
         fun canId(low: Int, vp: Int): Int? {
-            if (vp and 0xF0 != 0 || low !in 0..255) return null
+            if ((vp and 0xF0) != 0 || low !in 0..255) return null
             return ((vp and 0x0F) shl 8) or low
         }
         val testerReceive = canId(data[2], data[3])
