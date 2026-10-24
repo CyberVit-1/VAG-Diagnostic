@@ -17,6 +17,7 @@ import com.vagdiagnostic.app.core.DiagnosticLogRedactor
 import com.vagdiagnostic.app.core.ElmFrames
 import com.vagdiagnostic.app.core.ObdDecoder
 import com.vagdiagnostic.app.core.ObdMode09Readiness
+import com.vagdiagnostic.app.core.VagTp20Gateway
 import com.vagdiagnostic.app.core.ReadState
 import com.vagdiagnostic.app.data.ConnectionSettings
 import com.vagdiagnostic.app.data.DiagnosticDatabase
@@ -28,6 +29,7 @@ import com.vagdiagnostic.app.transport.BleNusLink
 import com.vagdiagnostic.app.transport.BluetoothSppLink
 import com.vagdiagnostic.app.transport.ElmEngine
 import com.vagdiagnostic.app.transport.ElmAddressedObdProbe
+import com.vagdiagnostic.app.transport.ElmTp20GatewayProbe
 import com.vagdiagnostic.app.transport.ElmScanSession
 import com.vagdiagnostic.app.transport.WifiTcpLink
 import kotlinx.coroutines.CancellationException
@@ -271,11 +273,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             ElmFrames.parse("0900", readOnlyCommand("0900", 9500)),
                             units.keys.toSet()
                         )
+                        var vinResponse: com.vagdiagnostic.app.core.FrameParse? = null
                         val check = if (supported.responders.isNotEmpty()) {
-                            ObdMode09Readiness.assessVin(
-                                ElmFrames.parse("0902", readOnlyCommand("0902", 13500)),
-                                supported.responders
-                            )
+                            val frames = ElmFrames.parse("0902", readOnlyCommand("0902", 13500))
+                            vinResponse = frames
+                            ObdMode09Readiness.assessVin(frames, supported.responders)
                         } else null
                         val resultText = if (check == null) {
                             "Mode 09 PID02 не подтверждён; многофреймовый ответ не проверен"
@@ -297,6 +299,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         val confirmedPhysicalEcu = check?.verified?.firstOrNull { id ->
                             Regex("^7E[8-F]$").matches(id) &&
                                 id in session.current.observedCanResponderIds
+                        }
+                        // Only a structurally validated VIN contributes the
+                        // two-character chassis marker; never log/persist VIN.
+                        // Unknown platforms do not trigger TP2.0 CAN traffic.
+                        val tp20Profile = confirmedPhysicalEcu?.let { ecu ->
+                            VagTp20Gateway.knownCandidate(
+                                vinResponse?.let {
+                                    VagTp20Gateway.chassisFromVerifiedMode09(it, ecu)
+                                }
+                            )
                         }
                         if (confirmedPhysicalEcu != null &&
                             session.current.protocol in setOf("6", "A6")
@@ -327,6 +339,46 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                     outcome = if (addressed.verified) "CONFIRMED"
                                         else "INCONCLUSIVE"
                                 ))
+                                if (addressed.verified && tp20Profile != null) {
+                                    _state.value = _state.value.copy(
+                                        current = "VAG: однократная проверка канала Gateway TP2.0"
+                                    )
+                                    try {
+                                        val gateway = ElmTp20GatewayProbe.inspect(
+                                            disposable, tp20Profile
+                                        )
+                                        _state.value = _state.value.copy(
+                                            isoTpReadiness = _state.value.isoTpReadiness +
+                                                if (gateway.accepted)
+                                                    "; Gateway 19 TP2.0: начальный канал подтверждён"
+                                                else "; Gateway 19 TP2.0: канал не подтверждён"
+                                        )
+                                        db.journal().insert(JournalEntity(
+                                            timestamp = System.currentTimeMillis(),
+                                            connection = cfg.type,
+                                            command = "TP20_GATEWAY_CHANNEL_PROBE",
+                                            raw = gateway.journalSummary(), elapsedMs = 0,
+                                            outcome = if (gateway.accepted) "CONFIRMED"
+                                                else "INCONCLUSIVE"
+                                        ))
+                                    } catch (cancel: CancellationException) {
+                                        throw cancel
+                                    } catch (problem: Exception) {
+                                        val description = "TP2.0: " +
+                                            (problem.message ?: problem::class.java.simpleName)
+                                        _state.value = _state.value.copy(
+                                            isoTpReadiness = _state.value.isoTpReadiness +
+                                                "; Gateway 19: проверка не завершена"
+                                        )
+                                        db.journal().insert(JournalEntity(
+                                            timestamp = System.currentTimeMillis(),
+                                            connection = cfg.type,
+                                            command = "TP20_GATEWAY_CHANNEL_PROBE",
+                                            raw = description, elapsedMs = 0,
+                                            outcome = "INCONCLUSIVE"
+                                        ))
+                                    }
+                                }
                             } catch (cancel: CancellationException) {
                                 throw cancel
                             } catch (problem: Exception) {
