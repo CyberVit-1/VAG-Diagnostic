@@ -106,6 +106,10 @@ object VagTp20Gateway {
         if (chars.size != 17 || !chars.all {
             it in 0x30..0x39 || it in 0x41..0x5A
         }) return null
+        // Limit this 1K profile to a Volkswagen VIN manufacturer prefix.
+        // Unknown WMI/chassis combinations never enable experimental TP2.0.
+        val wmi = chars.take(3).map { it.toChar() }.joinToString("")
+        if (wmi !in setOf("WVW", "3VW")) return null
         // Character positions seven and eight, 1-based, form chassis code.
         return "" + chars[6].toChar() + chars[7].toChar()
     }
