@@ -353,8 +353,8 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 Button(onClick = export, modifier = Modifier.fillMaxWidth()) { Text("Экспортировать журнал TXT") }
             }
         }
-        Text("Версия 0.2.2 · Только чтение", style = MaterialTheme.typography.bodyMedium)
-        Text("OBD/ISO-TP проверен; при распознанной совместимой платформе проверяется только начальная связь Gateway 19 через TP 2.0. Полный список блоков и VAG Auto-Scan ещё не реализованы. KWP1281 и TP 2.0 не реализованы. Запись и сброс DTC запрещены. BLE: только Nordic UART.",
+        Text("Версия 0.2.3 · Только чтение", style = MaterialTheme.typography.bodyMedium)
+        Text("OBD/ISO-TP подтверждён на испытанном Wi-Fi ELM. Для проверенного VW 1K выполняется только проба начального канала Gateway 19 через TP 2.0. Полный TP 2.0/KWP2000, список блоков и Auto-Scan ещё не реализованы. Запись и сброс DTC запрещены. BLE: Nordic UART.",
             style = MaterialTheme.typography.bodySmall)
     }
 }
