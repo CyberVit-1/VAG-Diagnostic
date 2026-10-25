@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vagdiagnostic.app.MainViewModel
 import com.vagdiagnostic.app.DashboardState
+import com.vagdiagnostic.app.core.ElmProtocolDescription
 import com.vagdiagnostic.app.core.ControlUnit
 import com.vagdiagnostic.app.core.DtcKind
 import com.vagdiagnostic.app.core.ReadState
@@ -184,7 +185,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 Text("Состояние соединения", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text("Адаптер: ${if (status.adapterConnected) "Подключён" else "Нет соединения"}")
                 Text("Автомобиль: ${if (status.carConnected) "OBD-II связь подтверждена" else "Не подтверждена"}")
-                Text("Протокол ELM: ${status.protocol}")
+                Text("Протокол: ${ElmProtocolDescription.describe(status.protocol)}")
             }
         }
         Text("Тип адаптера", fontWeight = FontWeight.SemiBold)
