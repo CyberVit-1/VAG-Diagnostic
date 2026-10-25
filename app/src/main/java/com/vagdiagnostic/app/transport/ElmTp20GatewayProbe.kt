@@ -35,7 +35,16 @@ object ElmTp20GatewayProbe {
         ) return Evidence(false, "Нет подтверждённого профиля/OBD CAN для TP2.0")
         // Requires raw CAN bytes. The ELM automatic ISO-TP mode used for OBD
         // must be disabled in this disposable diagnostic session.
-        val setup = listOf("ATCAF0", "ATCFC0", "ATSH200", "ATCRA219")
+        // TP2.0 channel setup is EXACTLY 7 bytes. In ISO 15765-4 mode
+        // ELM may pad to 8 unless variable DLC is explicitly enabled (V1).
+        // The physical test of 0.2.2 returned NO DATA with default settings;
+        // a longer fixed reply window also avoids an overly eager ELM prompt.
+        // ALL settings are isolated in the disposable session and ATZ is
+        // used by the caller's normal OBD reinitialization afterwards.
+        val setup = listOf(
+            "ATCAF0", "ATCFC0", "ATV1", "ATAT0", "ATST96",
+            "ATSH200", "ATCRA219"
+        )
         for (at in setup) {
             val reply = engine.command(at, timeoutMs = 5500)
             val clean = reply.uppercase().replace(at, "").replace(" ", "")
