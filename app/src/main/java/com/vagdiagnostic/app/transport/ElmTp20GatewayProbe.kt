@@ -33,16 +33,20 @@ object ElmTp20GatewayProbe {
             engine.isCanVehicle != true ||
             engine.observedCanResponderIds.none { Regex("^7E[8-F]$").matches(it) }
         ) return Evidence(false, "Нет подтверждённого профиля/OBD CAN для TP2.0")
-        // Requires raw CAN bytes. The ELM automatic ISO-TP mode used for OBD
-        // must be disabled in this disposable diagnostic session.
-        // TP2.0 channel setup is EXACTLY 7 bytes. In ISO 15765-4 mode
-        // ELM may pad to 8 unless variable DLC is explicitly enabled (V1).
-        // The physical test of 0.2.2 returned NO DATA with default settings;
-        // a longer fixed reply window also avoids an overly eager ELM prompt.
-        // ALL settings are isolated in the disposable session and ATZ is
-        // used by the caller's normal OBD reinitialization afterwards.
+        // A physical 0.2.3 test confirmed a 7-byte TP2.0 request under
+        // ISO 15765-4 protocol 6 (ATV1) still receives NO DATA. Published
+        // TP2.0 examples with ELM327 instead use USER1 raw CAN protocol B:
+        // ATPB C0 01 => 11-bit IDs, variable DLC, 500 kbit/s, no ISO-TP
+        // framing. ATSPB selects it and ATBI explicitly makes it active
+        // without an OBD-II initialization request.
+        //
+        // The trial is gated to the known 1K chassis, a single request on
+        // 0x200 and a single expected reply on 0x219. The engine is
+        // disposable, and the caller establishes a fresh ATSP0 OBD session
+        // immediately after. Never assume a clone accepts these commands.
         val setup = listOf(
-            "ATCAF0", "ATCFC0", "ATV1", "ATAT0", "ATST96",
+            "ATPBC001", "ATSPB", "ATCAF0", "ATCFC0",
+            "ATV1", "ATAT0", "ATST96", "ATBI",
             "ATSH200", "ATCRA219"
         )
         for (at in setup) {
@@ -54,7 +58,11 @@ object ElmTp20GatewayProbe {
         }
         // One explicitly documented TP2.0 0x200 channel setup to address 0x19.
         // No arbitrary IDs and no retries of non-OBD diagnostic commands.
-        val answer = engine.command(VagTp20Gateway.channelRequest(), timeoutMs = 8000)
+        // In the ELM327 text protocol an odd trailing nibble is the
+        // maximum *number of responses* (1), NOT an eighth CAN data byte.
+        // Keep the seven-byte TP2.0 payload isolated in channelRequest().
+        val oneResponse = VagTp20Gateway.channelRequest() + "1"
+        val answer = engine.command(oneResponse, timeoutMs = 8000)
         return when (val decoded = VagTp20Gateway.decodeReply(answer)) {
             is VagTp20Gateway.Result.Accepted ->
                 Evidence(true, "Канал Gateway 19 согласован (только настройка TP2.0)",
