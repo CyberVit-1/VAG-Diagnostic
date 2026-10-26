@@ -13,9 +13,11 @@ import org.junit.Test
 class ElmTp20GatewayProbeTest {
     private class Fake(private val rejectAt: String? = null,
                        private val gatewayReply: String = "21900D00003A80701",
-                       private val protocol: String = "A6") : ElmLink {
+                       private val protocol: String = "A6",
+                       private val fakeProtocolBReadback: Boolean = false) : ElmLink {
         override val label = "Scripted ELM link"
         val sent = mutableListOf<String>()
+        private var userBSelected = false
         private val queue = ArrayDeque<Int>()
         override suspend fun open() {}
         override suspend fun write(bytes: ByteArray) {
@@ -23,12 +25,19 @@ class ElmTp20GatewayProbeTest {
             sent += cmd
             val result = when (cmd) {
                 "ATZ" -> "ELM327 v1.5"
-                "ATDPN" -> protocol
+                "ATDPN" -> if (userBSelected && !fakeProtocolBReadback) "B" else protocol
+                "ATSPB" -> {
+                    if (cmd == rejectAt) "?" else {
+                        userBSelected = true
+                        "OK"
+                    }
+                }
                 "0100" -> "7E8064100BE3EA813\r7E906410098188001"
                 "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0", "ATAT1",
+                "ATPBC001", "ATBI",
                 "ATCAF0", "ATCFC0", "ATV1", "ATAT0", "ATST96", "ATSH200", "ATCRA219" ->
                     if (cmd == rejectAt) "?" else "OK"
-                "19C00010000301" -> gatewayReply
+                "19C000100003011" -> gatewayReply
                 else -> throw IOException("Unexpected command in TP20 test: " + cmd)
             }
             for (v in (result + ">").toByteArray(Charsets.US_ASCII)) queue.add(v.toInt() and 255)
@@ -47,9 +56,9 @@ class ElmTp20GatewayProbeTest {
             )
             assertTrue(transport + ": " + result.status, result.accepted)
             assertEquals(0x7A8, result.negotiatedTxCanId)
-            assertEquals(1, link.sent.count { it == "19C00010000301" })
-            assertTrue(link.sent.containsAll(listOf("ATCAF0", "ATCFC0", "ATV1", "ATAT0", "ATST96", "ATSH200", "ATCRA219")))
-            assertTrue(link.sent.indexOf("ATV1") < link.sent.indexOf("19C00010000301"))
+            assertEquals(1, link.sent.count { it == "19C000100003011" })
+            assertTrue(link.sent.containsAll(listOf("ATPBC001", "ATSPB", "ATCAF0", "ATCFC0", "ATV1", "ATAT0", "ATST96", "ATBI", "ATSH200", "ATCRA219")))
+            assertTrue(link.sent.indexOf("ATBI") < link.sent.indexOf("19C000100003011"))
             assertFalse(link.sent.any { it.startsWith("22") || it == "14" || it == "1902FF" })
         }
     }
@@ -60,7 +69,7 @@ class ElmTp20GatewayProbeTest {
         engine.connect()
         assertFalse(ElmTp20GatewayProbe.inspect(engine, null).accepted)
         assertFalse(link.sent.contains("ATSH200"))
-        assertFalse(link.sent.contains("19C00010000301"))
+        assertFalse(link.sent.contains("19C000100003011"))
     }
 
     @Test fun adapterRejectionStopsBeforeAnyGatewayTraffic() = runBlocking {
@@ -72,7 +81,7 @@ class ElmTp20GatewayProbeTest {
         )
         assertFalse(result.accepted)
         assertFalse(link.sent.contains("ATSH200"))
-        assertFalse(link.sent.contains("19C00010000301"))
+        assertFalse(link.sent.contains("19C000100003011"))
     }
 
     @Test fun cloneRejectingVariableDlcCannotSendUnreliableChannelSetup() = runBlocking {
@@ -82,7 +91,7 @@ class ElmTp20GatewayProbeTest {
         val result = ElmTp20GatewayProbe.inspect(engine, VagTp20Gateway.knownCandidate("1K"))
         assertFalse(result.accepted)
         assertFalse(link.sent.contains("ATSH200"))
-        assertFalse(link.sent.contains("19C00010000301"))
+        assertFalse(link.sent.contains("19C000100003011"))
     }
 
     @Test fun cloneRejectingReceiveTimeoutSettingCannotSendSetup() = runBlocking {
@@ -91,7 +100,29 @@ class ElmTp20GatewayProbeTest {
         engine.connect()
         val result = ElmTp20GatewayProbe.inspect(engine, VagTp20Gateway.knownCandidate("1K"))
         assertFalse(result.accepted)
-        assertFalse(link.sent.contains("19C00010000301"))
+        assertFalse(link.sent.contains("19C000100003011"))
+    }
+
+    @Test fun cloneRejectingProtocolBSettingsCannotSendGatewayMessage() = runBlocking {
+        for (bad in listOf("ATPBC001", "ATSPB", "ATBI")) {
+            val link = Fake(rejectAt = bad)
+            val engine = ElmEngine(link, { _, _, _, _ -> })
+            engine.connect()
+            val result = ElmTp20GatewayProbe.inspect(engine, VagTp20Gateway.knownCandidate("1K"))
+            assertFalse(bad, result.accepted)
+            assertFalse(bad, link.sent.contains("19C000100003011"))
+        }
+    }
+
+    @Test fun fakeProtocolBReadbackBlocksAllCanGatewayTraffic() = runBlocking {
+        val link = Fake(fakeProtocolBReadback = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val result = ElmTp20GatewayProbe.inspect(engine, VagTp20Gateway.knownCandidate("1K"))
+        assertFalse(result.accepted)
+        assertTrue(result.status.contains("ATDPN"))
+        assertFalse(link.sent.contains("19C000100003011"))
+        assertTrue(link.sent.contains("ATSPB"))
     }
 
     @Test fun gatewayNoDataDoesNotCountAsInstalledEcu() = runBlocking {
