@@ -56,6 +56,15 @@ object ElmTp20GatewayProbe {
             if (clean != "OK")
                 return Evidence(false, "ELM не подтвердил $at")
         }
+        // An ELM clone may acknowledge ATSPB without actually leaving OBD
+        // protocol 6. Do not send any raw TP2.0 frame unless the interpreter
+        // itself reports user-defined protocol B after bypass initialization.
+        val dpn = engine.command("ATDPN", timeoutMs = 5500)
+        val currentProtocol = dpn.uppercase().replace("ATDPN", "")
+            .replace("\\r", "").replace("\\n", "").trim()
+        if (currentProtocol != "B") {
+            return Evidence(false, "ELM не подтвердил пользовательский CAN B (ATDPN)")
+        }
         // One explicitly documented TP2.0 0x200 channel setup to address 0x19.
         // No arbitrary IDs and no retries of non-OBD diagnostic commands.
         // In the ELM327 text protocol an odd trailing nibble is the
