@@ -61,7 +61,7 @@ object ElmTp20GatewayProbe {
         // itself reports user-defined protocol B after bypass initialization.
         val dpn = engine.command("ATDPN", timeoutMs = 5500)
         val currentProtocol = dpn.uppercase().replace("ATDPN", "")
-            .replace("\\r", "").replace("\\n", "").trim()
+            .replace("\r", "").replace("\n", "").trim()
         if (currentProtocol != "B") {
             return Evidence(false, "ELM не подтвердил пользовательский CAN B (ATDPN)")
         }
