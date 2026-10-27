@@ -29,7 +29,7 @@ import com.vagdiagnostic.app.transport.BleNusLink
 import com.vagdiagnostic.app.transport.BluetoothSppLink
 import com.vagdiagnostic.app.transport.ElmEngine
 import com.vagdiagnostic.app.transport.ElmAddressedObdProbe
-import com.vagdiagnostic.app.transport.ElmTp20GatewayProbe
+import com.vagdiagnostic.app.transport.ElmVagScan
 import com.vagdiagnostic.app.transport.ElmScanSession
 import com.vagdiagnostic.app.transport.WifiTcpLink
 import kotlinx.coroutines.CancellationException
@@ -70,13 +70,17 @@ data class DashboardState(
     val lastScanInterrupted: Boolean = false,
     val bleFound: List<Pair<String, String>> = emptyList()
 ) {
-    val discovered: Int get() = units.size
+    // Generic OBD responders may represent the same physical ECU as OEM rows.
+    // Once OEM rows exist, show OEM counters rather than adding both namespaces.
+    val hasOemResults: Boolean get() = units.any { it.source != "OBD" }
+    private val countedUnits: List<ControlUnit> get() = units.filter { !hasOemResults || it.source != "OBD" }
+    val discovered: Int get() = countedUnits.count { it.source != "CANDIDATE" }
     // An ECU is counted as queried only after a validated DTC-mode response.
-    val polled: Int get() = units.count { it.answeredModes.isNotEmpty() }
-    val successful: Int get() = units.count { it.state == ReadState.COMPLETE }
-    val partial: Int get() = units.count { it.state == ReadState.PARTIAL }
-    val faulty: Int get() = units.count { it.dtcs.isNotEmpty() }
-    val faultCount: Int get() = units.sumOf { it.dtcs.size }
+    val polled: Int get() = countedUnits.count { it.answeredModes.isNotEmpty() }
+    val successful: Int get() = countedUnits.count { it.state == ReadState.COMPLETE }
+    val partial: Int get() = countedUnits.count { it.state == ReadState.PARTIAL }
+    val faulty: Int get() = countedUnits.count { it.dtcs.isNotEmpty() }
+    val faultCount: Int get() = countedUnits.sumOf { it.dtcs.size }
 }
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -204,7 +208,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.value = _state.value.copy(units = units.values.toList())
                 checkpoint(units.values.toList(), 0, true)
                 // Each Mode 03/07/0A is addressed as legislated OBD-II, NOT proprietary VAG scan.
-                for ((index, kind) in DtcKind.entries.withIndex()) {
+                for ((index, kind) in DtcKind.entries.filter { it != DtcKind.OEM }.withIndex()) {
                     _state.value = _state.value.copy(current = "OBD-II: ${kind.title.lowercase()} память DTC")
                     val answer = readOnlyCommand(kind.command, 8500)
                     val frames = ElmFrames.parse(kind.command, answer)
@@ -339,32 +343,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                     outcome = if (addressed.verified) "CONFIRMED"
                                         else "INCONCLUSIVE"
                                 ))
+                                if (addressed.verified && tp20Profile == null) {
+                                    val note = "VAG: подтверждённого платформенного профиля нет; OEM опрос пропущен"
+                                    _state.value = _state.value.copy(isoTpReadiness = _state.value.isoTpReadiness + "; " + note)
+                                    db.journal().insert(JournalEntity(timestamp = System.currentTimeMillis(), connection = cfg.type,
+                                        command = "VAG_SCAN_SKIPPED", raw = note, elapsedMs = 0, outcome = "UNSUPPORTED"))
+                                }
                                 if (addressed.verified && tp20Profile != null) {
                                     _state.value = _state.value.copy(
-                                        current = "VAG: однократная проверка канала Gateway TP2.0"
+                                        current = "VAG: подключение, список блоков и чтение DTC"
                                     )
                                     try {
-                                        val gateway = ElmTp20GatewayProbe.inspect(
-                                            disposable, tp20Profile
-                                        )
+                                        val gateway = ElmVagScan.scan(disposable,
+                                            onUnit = { unit ->
+                                                units[unit.address] = unit
+                                                _state.value = _state.value.copy(units = units.values.toList(), current = unit.name)
+                                                checkpoint(units.values.toList(), 3, true)
+                                            },
+                                            event = { command, detail, outcome ->
+                                                db.journal().insert(JournalEntity(
+                                                    timestamp = System.currentTimeMillis(), connection = cfg.type,
+                                                    command = command, raw = detail, elapsedMs = 0, outcome = outcome))
+                                            })
+                                        if (!gateway.complete) incompleteModes = true
                                         _state.value = _state.value.copy(
-                                            isoTpReadiness = _state.value.isoTpReadiness +
-                                                if (gateway.accepted)
-                                                    "; Gateway 19 TP2.0: начальный канал подтверждён"
-                                                else "; Gateway 19 TP2.0: канал не подтверждён"
-                                        )
-                                        db.journal().insert(JournalEntity(
-                                            timestamp = System.currentTimeMillis(),
-                                            connection = cfg.type,
-                                            command = "TP20_GATEWAY_CHANNEL_PROBE",
-                                            raw = gateway.journalSummary(), elapsedMs = 0,
-                                            outcome = if (gateway.accepted) "CONFIRMED"
-                                                else "INCONCLUSIVE"
-                                        ))
+                                            isoTpReadiness = _state.value.isoTpReadiness + "; " + gateway.note)
                                     } catch (cancel: CancellationException) {
                                         throw cancel
                                     } catch (problem: Exception) {
-                                        val description = "TP2.0: " +
+                                        incompleteModes = true
+                                        val description = "VAG: " +
                                             (problem.message ?: problem::class.java.simpleName)
                                         _state.value = _state.value.copy(
                                             isoTpReadiness = _state.value.isoTpReadiness +
@@ -401,6 +409,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                     engine = restored
                                     try {
                                         restored.connect()
+                                        if (!restored.vehicleReady) throw java.io.IOException(restored.carError)
                                         connectedSettings = cfg
                                         _state.value = _state.value.copy(
                                             adapterConnected = restored.adapterReady,
