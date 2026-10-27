@@ -14,7 +14,23 @@ import kotlin.coroutines.coroutineContext
 
 /** Single writer / single reader. End-of-reply is a mandatory ELM '>' prompt. */
 class ElmEngine(private val link: ElmLink, private val log: suspend (String, String, Long, String) -> Unit,
-                private val clockNanos: () -> Long = System::nanoTime) {
+                private val clockNanos: () -> Long = System::nanoTime,
+                private val timestampedLog: (suspend (String, String, Long, String, Long) -> Unit)? = null) {
+    private data class JournalRecord(val command: String, val raw: String, val elapsed: Long, val status: String, val timestamp: Long)
+    private val deferredJournal = ArrayDeque<JournalRecord>()
+    /** Flush after an ECU ACK/disconnect boundary, never while an ACK is due.
+     * Original wire timestamps are retained even if persistence is delayed. */
+    suspend fun flushJournal() {
+        while (deferredJournal.isNotEmpty()) persist(deferredJournal.removeFirst())
+    }
+    private suspend fun persist(record: JournalRecord) {
+        try {
+            val detailed = timestampedLog
+            if (detailed != null) detailed(record.command, record.raw, record.elapsed, record.status, record.timestamp)
+            else log(record.command, record.raw, record.elapsed, record.status)
+        } catch (error: CancellationException) { throw error }
+        catch (_: Exception) { /* Preserve the existing best-effort journal contract. */ }
+    }
     private var lastCommandNanos: Long? = null
     /** Monotonic age of the last completed ELM reply. */
     fun idleMs(): Long = lastCommandNanos?.let { (clockNanos() - it).coerceAtLeast(0L) / 1_000_000L } ?: 0L
@@ -88,7 +104,7 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
         } catch (error: Throwable) { close(); throw error }
     }
 
-    suspend fun command(text: String, timeoutMs: Long = 5500): String = lock.withLock {
+    suspend fun command(text: String, timeoutMs: Long = 5500, deferJournal: Boolean = false): String = lock.withLock {
         require(text.matches(Regex("[A-Z0-9]+", RegexOption.IGNORE_CASE))) { "Недопустимая команда" }
         val start = System.nanoTime()
         val collected = StringBuilder()
@@ -120,9 +136,11 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
             throw error
         } finally {
             val elapsed = (System.nanoTime() - start) / 1_000_000
-            try { log(text, collected.toString(), elapsed, status) }
-            catch (error: CancellationException) { /* preserve cancellation */ throw error }
-            catch (_: Exception) { /* a full log must not break car communication */ }
+            val record = JournalRecord(text, collected.toString(), elapsed, status, System.currentTimeMillis())
+            if (deferJournal) {
+                deferredJournal.addLast(record)
+                if (deferredJournal.size > 512) throw IOException("Превышен буфер протокольного журнала")
+            } else persist(record)
         }
     }
     fun close() { vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); link.close() }
