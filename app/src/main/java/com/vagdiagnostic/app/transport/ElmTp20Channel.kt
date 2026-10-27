@@ -25,10 +25,10 @@ class ElmTp20Channel(private val engine: ElmEngine) {
         // Configure variable-length raw frames in the profile's CAN mode.
         for (at in listOf("ATH1", "ATCAF0", "ATCFC0", "ATSP6", "ATD0", "ATV1", "ATCEA", "ATAT0", "ATST10",
             "ATSH200", "ATCRA%03X".format(0x200 or destination))) ok(at)
-        val dpn = engine.command("ATDPN").trim().uppercase()
+        val dpn = command("ATDPN").trim().uppercase()
         check(dpn in setOf("6", "A6")) { "ELM не подтвердил CAN 6: $dpn" }
         val request = "%02XC00010000301".format(destination)
-        val frames = frames(engine.command(request + "1", 5500), 0x200 or destination, request + "1")
+        val frames = frames(command(request + "1", 5500), 0x200 or destination, request + "1")
         check(frames.size == 1) { "Неоднозначный ответ CHANNEL SETUP" }
         val d = frames.single()
         check(d.size == 7 && d[0] == 0 && d[6] == 1) { "Неверная структура CHANNEL SETUP" }
@@ -39,7 +39,7 @@ class ElmTp20Channel(private val engine: ElmEngine) {
         check(rx == 0x300 && tx in 1..0x7FF && tx != rx && tx != 0x200) { "Неверная пара CAN канала" }
         // D0 is already a live negotiated channel; disconnect even if A1 fails.
         active = true
-        ok("ATSH%03X".format(tx)); ok("ATCRA%03X".format(rx)); ok("ATST64")
+        ok("ATSH%03X".format(tx)); ok("ATCRA%03X".format(rx)); ok("ATST10")
         val parameters = exchange("A00194FF82FF").singleOrNull()
             ?: error("Нет единственного A1 ответа" )
         check(parameters.size == 6 && parameters[0] == 0xA1 && parameters[1] in 1..15) { "Нет валидного согласования A0/A1" }
@@ -47,7 +47,11 @@ class ElmTp20Channel(private val engine: ElmEngine) {
         gapMs = timingMs(parameters[4])
         check(responseMs in 1..2000 && gapMs in 0..1000) { "Неподдержанные тайминги TP2.0" }
         peerParameters = listOf(0xA1, 1, 0x94, 0xFF, 0x82, 0xFF)
-        ok("ATST%02X".format(((responseMs + gapMs + 100 + 3) / 4).coerceIn(1, 255)))
+        // The ELM prompt must arrive BEFORE the peer's ACK deadline. A long
+        // T1-sized receive window would delay our ACK until the ECU gave up.
+        val receiveTicks = ((gapMs + 24 + 3) / 4).coerceAtLeast(1)
+        check(receiveTicks * 4 + gapMs <= 160) { "T3 не позволяет подтвердить кадр в объявленный T1" }
+        ok("ATST%02X".format(receiveTicks))
         sendSeq = 0; receiveSeq = 0
     }
 
@@ -126,17 +130,19 @@ class ElmTp20Channel(private val engine: ElmEngine) {
         quiet("A80")
     }
     private suspend fun quiet(command: String) {
-        val raw = engine.command(command, 5500).uppercase()
+        val raw = command(command, 5500).uppercase()
         check(listOf("?", "CAN ERROR", "BUS ERROR", "STOPPED", "BUFFER FULL", "UNABLE TO CONNECT").none { it in raw }) {
             "ELM не выполнил подтверждение/закрытие TP2.0: $raw"
         }
     }
     private suspend fun ok(at: String) {
-        val raw = engine.command(at)
+        val raw = command(at)
         check(raw.uppercase().replace(at, "").filterNot { it.isWhitespace() } == "OK") { "ELM отклонил $at" }
     }
     private suspend fun exchange(command: String): List<List<Int>> =
-        frames(engine.command(command, 5500), rx, command)
+        frames(command(command, 5500), rx, command)
+    private suspend fun command(text: String, timeoutMs: Long = 5500): String =
+        engine.command(text, timeoutMs, deferJournal = true)
 
     companion object {
         fun timingMs(value: Int): Long {
