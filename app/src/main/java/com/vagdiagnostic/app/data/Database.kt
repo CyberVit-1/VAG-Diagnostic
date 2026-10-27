@@ -52,10 +52,12 @@ object ScanCodec {
     fun encode(units: List<ControlUnit>): String = JSONArray().apply {
         units.forEach { unit -> put(JSONObject().apply {
             put("address", unit.address); put("name", unit.name); put("state", unit.state.name); put("note", unit.note)
+            put("source", unit.source)
             put("answered", JSONArray(unit.answeredModes.map { it.name }))
             put("dtcs", JSONArray().apply { unit.dtcs.forEach { fault -> put(JSONObject().apply {
                 put("raw", fault.raw); put("code", fault.code); put("kind", fault.kind.name)
                 put("description", fault.description ?: JSONObject.NULL)
+                put("statusText", fault.statusText ?: JSONObject.NULL)
             }) } })
         }) }
     }.toString()
@@ -68,11 +70,13 @@ object ScanCodec {
             ControlUnit(
                 address = obj.getString("address"), name = obj.getString("name"),
                 state = ReadState.valueOf(obj.getString("state")), note = obj.optString("note"),
+                source = obj.optString("source", "OBD"),
                 answeredModes = (0 until answered.length()).map { DtcKind.valueOf(answered.getString(it)) }.toSet(),
                 dtcs = (0 until faults.length()).map { j ->
                     val f = faults.getJSONObject(j)
                     Dtc(f.getString("raw"), f.getString("code"), DtcKind.valueOf(f.getString("kind")),
-                        f.optString("description").takeUnless { it == "null" || it.isBlank() })
+                        f.optString("description").takeUnless { it == "null" || it.isBlank() },
+                        f.optString("statusText").takeUnless { it == "null" || it.isBlank() })
                 }
             )
         }
