@@ -142,7 +142,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
             Column(Modifier.fillMaxWidth().padding(22.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Text("Диагностика без догадок", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                Text("Обнаружение OBD-II ответчиков и чтение DTC. Полный VAG Auto-Scan пока недоступен.")
+                Text("Чтение OBD-II и блоков VAG поддержанного профиля. Охват и неполные ответы показаны в результатах.")
                 Button(onClick = start, enabled = status.carConnected && !status.isBusy, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text("Начать диагностику")
                 }
@@ -152,7 +152,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
         val tiles = listOf(
             Triple("Подключение", "Wi-Fi / Bluetooth Classic / BLE NUS", 1),
             Triple("Диагностика", "Чтение DTC 03 / 07 / 0A", 2),
-            Triple("Блоки управления", "Обнаруженные OBD-II ответчики", 3),
+            Triple("Блоки управления", "Результаты OBD-II и VAG", 3),
             Triple("История диагностики", "Сохранённые результаты", 4),
             Triple("Настройки", "Темы и экспорт журналов", 5)
         )
@@ -233,8 +233,9 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Metrics(status)
         if (status.completedModes > 0 && status.units.isNotEmpty()) {
-            val counts = DtcKind.entries.joinToString(" · ") { kind ->
-                "${kind.command}: ${status.units.count { kind in it.answeredModes }}/${status.units.size}"
+            val obdUnits = status.units.filter { it.source == "OBD" }
+            val counts = DtcKind.entries.filter { it != DtcKind.OEM }.joinToString(" · ") { kind ->
+                "${kind.command}: ${obdUnits.count { kind in it.answeredModes }}/${obdUnits.size}"
             }
             Text("Подтверждённые ответы по режимам — $counts",
                 style = MaterialTheme.typography.bodySmall)
@@ -257,7 +258,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
             Icon(Icons.Default.PlayArrow, null); Text(if (status.units.isEmpty()) "Начать сканирование" else "Повторить сканирование")
         }
         if (status.lastScanInterrupted) Text("Сканирование прервано или часть режимов не подтвердила ответ. Полученные данные сохранены.", style = MaterialTheme.typography.bodySmall)
-        Text("Обнаруженные OBD-II ответчики (не полный список блоков VAG)", style = MaterialTheme.typography.titleSmall)
+        Text("Блоки OBD-II и VAG; кандидаты отмечены отдельно", style = MaterialTheme.typography.titleSmall)
         if (status.units.isEmpty()) Text("Нет подтверждённых ответчиков. Результаты не подставляются автоматически.", style = MaterialTheme.typography.bodySmall)
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 20.dp)) {
             items(status.units, key = { it.address }) { unit -> EcuCard(unit, search) }
@@ -268,14 +269,16 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
 @Composable private fun Metrics(status: DashboardState) {
     ElevatedCard {
         Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text(if (status.hasOemResults) "Результаты блоков VAG · OBD-II сохранён отдельно" else "Результаты OBD-II",
+                style = MaterialTheme.typography.labelSmall)
             Row(horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
-                Metric("Найдено", status.discovered); Metric("Опрошено", status.polled); Metric("Все режимы", status.successful)
+                Metric("Найдено", status.discovered); Metric("Опрошено", status.polled); Metric("Прочитано", status.successful)
             }
             HorizontalDivider()
             Row(horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
                 Metric("Частично", status.partial); Metric("С DTC", status.faulty); Metric("Всего DTC", status.faultCount)
             }
-            Text("«Все режимы» — ответы 03, 07 и 0A. «Частично» — подтверждена только часть режимов. Показаны лишь достоверные DTC.", style = MaterialTheme.typography.labelSmall,
+            Text("«Прочитано» — подтверждён полный ответ DTC (для OBD — 03, 07 и 0A). Кандидаты профиля не считаются найденными без ответа ECU. Показаны лишь достоверные DTC.", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
@@ -288,7 +291,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
 }
 @Composable private fun UnitList(status: DashboardState, search: (String) -> Unit) {
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Text("Это подтверждённые OBD-II ответчики, не полный список блоков VAG. Для безопасного чтения Gateway 19 ещё необходимы проверенный профиль CAN-адресации, формат списка установленных блоков и совместимый ISO-TP интерфейс. Пока запросы к шлюзу не отправляются.", style = MaterialTheme.typography.bodySmall) }
+        item { Text("OBD-II и VAG показаны отдельно. Список Gateway и ответы ECU подтверждают наличие блоков. Кандидат профиля ещё не означает установленный блок. Отсутствие ответа не означает отсутствие неисправностей.", style = MaterialTheme.typography.bodySmall) }
         if (status.units.isEmpty()) item { Text("Сначала проведите сканирование") }
         items(status.units, key = { it.address }) { EcuCard(it, search) }
     }
@@ -303,7 +306,8 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
     }
     val statusText = when {
         unit.dtcs.isNotEmpty() -> "Найдены неисправности: ${unit.dtcs.size}"
-        unit.state == ReadState.COMPLETE -> "Ошибок нет (OBD-II)"
+        unit.state == ReadState.COMPLETE -> if (unit.source == "OBD") "Ошибок нет (OBD-II)" else "DTC не найдены в прочитанной памяти ECU"
+        unit.source == "CANDIDATE" -> "Кандидат профиля — наличие не подтверждено"
         unit.state == ReadState.NOT_QUERIED -> "Не опрошен"
         unit.state == ReadState.PARTIAL -> "Неполный опрос"
         else -> "Нет ответа по DTC"
@@ -327,7 +331,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                         OutlinedCard(onClick = { search(fault.code) }, modifier = Modifier.fillMaxWidth()) {
                             Column(Modifier.padding(14.dp)) {
                                 Text("${fault.code} — ${fault.description ?: "Описание не найдено"}", fontWeight = FontWeight.SemiBold)
-                                Text("Статус: ${fault.kind.title}", style = MaterialTheme.typography.bodySmall)
+                                Text("Статус: ${fault.statusText ?: fault.kind.title}", style = MaterialTheme.typography.bodySmall)
                                 Text("Источник: ${if (fault.description == null) "нет достоверной расшифровки" else "локальный справочник"}", style = MaterialTheme.typography.labelSmall)
                                 Text("Поиск в Яндексе ↗", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
                             }
@@ -354,7 +358,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
             }
         }
         Text("Версия 0.2.4 · Только чтение", style = MaterialTheme.typography.bodyMedium)
-        Text("OBD/ISO-TP подтверждён на испытанном Wi-Fi ELM. Для проверенного VW 1K начальная TP 2.0-проба Gateway 19 использует изолированный пользовательский CAN-протокол B. Полный TP 2.0/KWP2000, список блоков и Auto-Scan ещё не реализованы. Запись и сброс DTC запрещены. BLE: Nordic UART.",
+        Text("На автомобиле подтверждена база OBD/ISO-TP через Wi-Fi. Новое подключение VAG, список Gateway и чтение DTC требуют аппаратной проверки. Пока включён профиль VW 1K. Запись и сброс DTC отсутствуют. BLE: Nordic UART.",
             style = MaterialTheme.typography.bodySmall)
     }
 }
