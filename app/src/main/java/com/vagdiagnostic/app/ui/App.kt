@@ -357,7 +357,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 Button(onClick = export, modifier = Modifier.fillMaxWidth()) { Text("Экспортировать журнал TXT") }
             }
         }
-        Text("Версия 0.2.4 · Только чтение", style = MaterialTheme.typography.bodyMedium)
+        Text("Версия ${com.vagdiagnostic.app.BuildConfig.VERSION_NAME} · Только чтение", style = MaterialTheme.typography.bodyMedium)
         Text("На автомобиле подтверждена база OBD/ISO-TP через Wi-Fi. Новое подключение VAG, список Gateway и чтение DTC требуют аппаратной проверки. Пока включён профиль VW 1K. Запись и сброс DTC отсутствуют. BLE: Nordic UART.",
             style = MaterialTheme.typography.bodySmall)
     }
