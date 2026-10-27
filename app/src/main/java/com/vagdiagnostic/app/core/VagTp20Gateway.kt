@@ -13,8 +13,9 @@ package com.vagdiagnostic.app.core
  */
 object VagTp20Gateway {
     const val GATEWAY_LOGICAL_ADDRESS = 0x19
+    const val GATEWAY_TP_DESTINATION = 0x1F
     const val SETUP_CAN_ID = 0x200
-    const val GATEWAY_REPLY_CAN_ID = SETUP_CAN_ID + GATEWAY_LOGICAL_ADDRESS
+    const val GATEWAY_REPLY_CAN_ID = SETUP_CAN_ID + GATEWAY_TP_DESTINATION
 
     /** 1K is a documented legacy CAN/VAG chassis; others require explicit profiles. */
     data class Profile(val chassis: String, val source: String)
@@ -25,7 +26,7 @@ object VagTp20Gateway {
         ) else null
 
     /** RX ID invalid (ECU chooses), tester RX ID 0x300, KWP application 0x01. */
-    fun channelRequest(): String = "19C00010000301"
+    fun channelRequest(): String = "1FC00010000301"
 
     sealed class Result {
         data class Accepted(
