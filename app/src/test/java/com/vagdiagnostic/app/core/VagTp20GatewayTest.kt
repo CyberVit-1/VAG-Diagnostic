@@ -8,16 +8,16 @@ import org.junit.Test
 /** TP2.0 channel setup vectors from public reverse-engineering references. */
 class VagTp20GatewayTest {
     @Test fun readsDocumentedChannelSetupAndGatewayLogicalAddress() {
-        assertEquals("19C00010000301", VagTp20Gateway.channelRequest())
+        assertEquals("1FC00010000301", VagTp20Gateway.channelRequest())
         assertEquals(0x200, VagTp20Gateway.SETUP_CAN_ID)
-        assertEquals(0x219, VagTp20Gateway.GATEWAY_REPLY_CAN_ID)
+        assertEquals(0x21F, VagTp20Gateway.GATEWAY_REPLY_CAN_ID)
     }
 
-    @Test fun validatesPositiveResponseOnlyWithExpected219HeaderAndIds() {
-        for (sample in listOf("21900D00003A80701\r>",
-            "219 00 D0 00 03 A8 07 01\r>",
-            "219 7 00 D0 00 03 A8 07 01\r>",
-            "219 8 00 D0 00 03 A8 07 01 00\r>")) {
+    @Test fun validatesPositiveResponseOnlyWithExpected21FHeaderAndIds() {
+        for (sample in listOf("21F00D00003A80701\r>",
+            "21F 00 D0 00 03 A8 07 01\r>",
+            "21F 7 00 D0 00 03 A8 07 01\r>",
+            "21F 8 00 D0 00 03 A8 07 01 00\r>")) {
             val reply = VagTp20Gateway.decodeReply(sample)
             assertTrue("$sample: $reply", reply is VagTp20Gateway.Result.Accepted)
             val ok = reply as VagTp20Gateway.Result.Accepted
@@ -29,19 +29,19 @@ class VagTp20GatewayTest {
     @Test fun rejectsWrongCanIdAndMissingHeader() {
         for (sample in listOf("21300D00003A80701\r>",
             "00D00003A80701\r>", "NO DATA\r>",
-            "219\r>", "21900D00003A80701\r21900D00003A80701\r>")) {
+            "21F\r>", "21F00D00003A80701\r21F00D00003A80701\r>")) {
             assertTrue(sample, VagTp20Gateway.decodeReply(sample)
                 is VagTp20Gateway.Result.Rejected)
         }
     }
 
     @Test fun distinguishesNegativeGatewayResultAndInvalidNegotiation() {
-        for (sample in listOf("21900D60003A80701\r>",
-            "21900D70003A80701\r>", "21900D80003A80701\r>",
-            "21900D00003A81701\r>", // invalid channel prefix
-            "21900D00103A80701\r>", // wrong RX 0x301
-            "21901D00003A80701\r>", // wrong tester address
-            "21900D00003A80700\r>")) { // wrong application
+        for (sample in listOf("21F00D60003A80701\r>",
+            "21F00D70003A80701\r>", "21F00D80003A80701\r>",
+            "21F00D00003A81701\r>", // invalid channel prefix
+            "21F00D00103A80701\r>", // wrong RX 0x301
+            "21F01D00003A80701\r>", // wrong tester address
+            "21F00D00003A80700\r>")) { // wrong application
             assertTrue(sample, VagTp20Gateway.decodeReply(sample)
                 is VagTp20Gateway.Result.Rejected)
         }
