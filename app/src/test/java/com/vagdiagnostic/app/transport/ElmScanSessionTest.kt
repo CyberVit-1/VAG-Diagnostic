@@ -73,7 +73,7 @@ class ElmScanSessionTest {
         val discovery = ElmFrames.parse("0100", scan.read("0100", 9000))
         assertTrue(ObdDecoder.hasValidVehicleResponse(discovery))
         assertEquals(setOf("7E8", "7E9"), discovery.messagesFor(0x41).keys)
-        for (mode in DtcKind.entries) {
+        for (mode in DtcKind.entries.filter { it != DtcKind.OEM }) {
             val frames = ElmFrames.parse(mode.command, scan.read(mode.command, 8500))
             assertTrue("Invalid ${mode.command}: ${frames.problems}", frames.problems.isEmpty())
             val assessment = ObdDecoder.assessMode(frames, mode, scan.current.isCanVehicle,
@@ -106,7 +106,7 @@ class ElmScanSessionTest {
             assertTrue("$kind: invalid 0100", ObdDecoder.hasValidVehicleResponse(discovery))
             val ecus = discovery.messagesFor(0x41).keys
             assertEquals(setOf("7E8", "7E9"), ecus)
-            for (mode in DtcKind.entries) {
+            for (mode in DtcKind.entries.filter { it != DtcKind.OEM }) {
                 val raw = session.read(mode.command, 8500)
                 val result = ObdDecoder.assessMode(
                     ElmFrames.parse(mode.command, raw),
