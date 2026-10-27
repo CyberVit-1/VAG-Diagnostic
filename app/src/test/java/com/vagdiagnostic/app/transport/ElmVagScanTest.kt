@@ -36,16 +36,22 @@ class ElmVagScanTest {
             for (b in (reply + ">").toByteArray(Charsets.US_ASCII)) queue.add(b.toInt() and 255)
         }
     }
-    private class Link(val failRead: Boolean = false, val wrongSequence: Boolean = false) : ElmLink {
+    private class Link(val failRead: Boolean = false, val wrongSequence: Boolean = false,
+        val clock: () -> Long = { 0L }) : ElmLink {
         override val label = "Scripted ELM"
         val sent = mutableListOf<String>()
         private val bytes = ArrayDeque<Int>()
         private val remaining = ArrayDeque<String>()
         private var destination = 0x1F
         private var receiveSeq = 0
+        private var ackDue: Long? = null
         override suspend fun open() {}
         override suspend fun write(data: ByteArray) {
             val cmd = data.toString(Charsets.US_ASCII).trim()
+            if (cmd.startsWith("B")) {
+                check(clock() <= requireNotNull(ackDue)) { "ACK exceeded advertised T1" }
+                ackDue = null
+            }
             sent += cmd
             val raw = when {
                 cmd == "ATZ" -> "ELM327 v1.5"
@@ -86,6 +92,7 @@ class ElmVagScanTest {
                 }
                 else -> error("Unexpected wire command $cmd")
             }
+            if (raw.split('\r').any { it.startsWith("3000") || it.startsWith("3001") }) ackDue = clock() + 200
             for (b in (raw + ">").toByteArray(Charsets.US_ASCII)) bytes.add(b.toInt() and 255)
         }
         override suspend fun readByte(): Int = bytes.pollFirst() ?: -2
@@ -117,6 +124,18 @@ class ElmVagScanTest {
         catch (_: IOException) { }
         assertEquals("1000021089", link.sent.last())
         assertFalse(link.sent.contains("ATSH710"))
+    }
+    @Test fun slowPersistenceCannotDelayTpAcknowledgmentsAndJournalIsFlushed() = runBlocking {
+        var now = 0L
+        val link = Link(clock = { now })
+        val logged = mutableListOf<String>()
+        val engine = ElmEngine(link, { command, _, _, _ -> logged += command; now += 250 })
+        engine.connect()
+        val result = ElmVagScan.scan(engine, {}, { _, _, _ -> })
+        assertTrue(result.note, result.complete)
+        assertEquals(link.sent, logged)
+        assertTrue(link.sent.contains("ATST0B"))
+        assertFalse(link.sent.contains("ATST64"))
     }
     @Test fun wrongSequenceIsNeverAcceptedAsZeroDtcs() = runBlocking {
         val link = Link(wrongSequence = true)
