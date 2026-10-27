@@ -5,16 +5,19 @@ enum class ReadState { NOT_QUERIED, COMPLETE, PARTIAL, NO_RESPONSE, FAILED }
 enum class DtcKind(val command: String, val replySid: Int, val title: String) {
     CONFIRMED("03", 0x43, "Подтверждённая"),
     PENDING("07", 0x47, "Ожидающая"),
-    PERMANENT("0A", 0x4A, "Постоянная")
+    PERMANENT("0A", 0x4A, "Постоянная"),
+    OEM("OEM", 0, "Статус OEM — см. исходный байт")
 }
-data class Dtc(val raw: String, val code: String, val kind: DtcKind, val description: String? = null)
+data class Dtc(val raw: String, val code: String, val kind: DtcKind, val description: String? = null,
+    val statusText: String? = null)
 data class ControlUnit(
     val address: String,
     val name: String,
     val state: ReadState,
     val dtcs: List<Dtc> = emptyList(),
     val note: String = "",
-    val answeredModes: Set<DtcKind> = emptySet()
+    val answeredModes: Set<DtcKind> = emptySet(),
+    val source: String = "OBD"
 )
 data class FrameParse(val messages: Map<String, List<ByteArray>>, val problems: List<String>) {
     fun messagesFor(sid: Int): Map<String, List<ByteArray>> = messages.mapValues { (_, frames) ->
