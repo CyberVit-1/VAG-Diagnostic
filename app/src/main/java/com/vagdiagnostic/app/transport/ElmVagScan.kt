@@ -5,6 +5,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
 import java.io.IOException
 
 /** Legacy CAN connection, UDS equivalent and gateway-list driven read path.
@@ -36,12 +38,14 @@ object ElmVagScan {
             } finally {
                 // Cancellation stops traffic immediately. Broken streams are discarded
                 // by the caller rather than used to send a second protocol's commands.
-                if (healthy && currentCoroutineContext().isActive) {
-                    try { channel.close() }
-                    catch (cancel: CancellationException) { throw cancel }
-                    catch (io: IOException) { throw io }
-                    catch (failure: IllegalStateException) { throw IOException("Не удалось завершить TP2.0; сессия будет закрыта", failure) }
-                }
+                try {
+                    if (healthy && currentCoroutineContext().isActive) {
+                        try { channel.close() }
+                        catch (cancel: CancellationException) { throw cancel }
+                        catch (io: IOException) { throw io }
+                        catch (failure: IllegalStateException) { throw IOException("Не удалось завершить TP2.0; сессия будет закрыта", failure) }
+                    }
+                } finally { withContext(NonCancellable) { engine.flushJournal() } }
             }
         }
         try {
