@@ -8,6 +8,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.yield
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
 import java.io.EOFException
 import java.io.IOException
 import kotlin.coroutines.coroutineContext
@@ -115,7 +119,7 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                 while (true) {
                     coroutineContext.ensureActive()
                     val current = link.readByte()
-                    if (current == -2) continue
+                    if (current == -2) { yield(); continue }
                     if (current == -1) throw EOFException("Соединение закрыто до окончания ответа")
                     if (current == '>'.code) break
                     if (collected.length >= 32768) error("Ответ превышает допустимый размер")
@@ -141,6 +145,70 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                 deferredJournal.addLast(record)
                 if (deferredJournal.size > 512) throw IOException("Превышен буфер протокольного журнала")
             } else persist(record)
+        }
+    }
+    /** Receive a delayed UDS single frame without retransmitting the request.
+     * Monitor mode cannot send ISO-TP flow control: reject a First Frame
+     * explicitly rather than pretending that an incomplete reply is valid.
+     * Any failure disposes the stream; no session-close request can consume
+     * the still outstanding diagnostic response. */
+    suspend fun receivePendingUdsFrame(expectedId: Int, timeoutMs: Long): String = lock.withLock {
+        require(expectedId in 0..0x7FF && timeoutMs in 1..6000)
+        val collected = StringBuilder()
+        val line = StringBuilder()
+        val start = System.nanoTime()
+        var status = "OK"
+        try {
+            link.write("ATMA\r".toByteArray(Charsets.US_ASCII))
+            var frame: String? = null
+            withTimeoutOrNull(timeoutMs) {
+                while (frame == null) {
+                    coroutineContext.ensureActive()
+                    val b = link.readByte()
+                    if (b == -2) { yield(); continue }
+                    if (b == -1) throw EOFException("Соединение закрыто при ожидании UDS")
+                    if (b == '>'.code) throw IOException("ELM завершил ожидание отложенного UDS без ответа")
+                    if (collected.length >= 32768) throw IOException("Переполнение отложенного UDS")
+                    if (b in 0..127) collected.append(b.toChar())
+                    if (b == '\r'.code || b == '\n'.code) {
+                        val row = line.toString().trim().uppercase()
+                        line.clear()
+                        if (row.isEmpty() || row == "ATMA") continue
+                        val data = ElmTp20Channel.frames(row, expectedId, "ATMA").single()
+                        if (data[0] !in 1..7 || data.size < data[0] + 1)
+                            throw IOException("Отложенный UDS не Single Frame; монитор ELM не выполняет ISO-TP flow control")
+                        frame = row
+                    } else if (b in 0..127) line.append(b.toChar())
+                }
+            } ?: throw IOException("Истёк срок ожидания отложенного UDS")
+            // Any received character stops ATMA. A lone CR is consumed as the
+            // stop character, not a repeat of the preceding diagnostic request.
+            link.write(byteArrayOf('\r'.code.toByte()))
+            withTimeoutOrNull(1500) {
+                while (true) {
+                    coroutineContext.ensureActive()
+                    val b = link.readByte()
+                    if (b == -2) { yield(); continue }
+                    if (b == -1) throw EOFException("ELM закрыл поток при завершении ATMA")
+                    if (b == '>'.code) break
+                    if (collected.length >= 32768) throw IOException("Переполнение ATMA")
+                    if (b in 0..127) collected.append(b.toChar())
+                }
+            } ?: throw IOException("ELM не завершил ATMA")
+            // STOPPED is expected here; a second frame would be unassociated.
+            val tail = collected.toString().uppercase().substringAfter(frame!!).trim()
+            if (tail.isNotEmpty() && tail != "STOPPED") throw IOException("Лишние данные после отложенного UDS: $tail")
+            lastCommandNanos = clockNanos()
+            frame!!
+        } catch (error: Throwable) {
+            status = error::class.java.simpleName + ": " + (error.message ?: "")
+            close()
+            if (error is CancellationException || error is IOException) throw error
+            throw IOException("Некорректный отложенный UDS: ${error.message}", error)
+        } finally {
+            val record = JournalRecord("ATMA", collected.toString(), (System.nanoTime() - start) / 1_000_000,
+                status, System.currentTimeMillis())
+            withContext(NonCancellable) { persist(record) }
         }
     }
     fun close() { vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); link.close() }
