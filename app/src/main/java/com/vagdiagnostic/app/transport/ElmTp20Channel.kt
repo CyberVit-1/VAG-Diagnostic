@@ -91,7 +91,7 @@ class ElmTp20Channel(private val engine: ElmEngine) {
                 }
                 op == 0x90 -> error("Отрицательное подтверждение TP2.0; запрос не повторяется")
                 frame[0] == 0xA8 -> error("ECU закрыл канал TP2.0")
-                frame[0] == 0xA3 -> queue.addAll(exchange(Wire.hex(peerParameters)))
+                frame[0] == 0xA3 -> queue.addAll(exchange(Wire.hex(peerParameters), allowEmpty = true))
                 frame[0] == 0xA1 -> check(frame.size == 6) { "Неверный keepalive A1" }
                 op in listOf(0x00, 0x10, 0x20, 0x30) -> {
                     check(acknowledged) { "Данные до подтверждения запроса TP2.0" }
@@ -139,8 +139,13 @@ class ElmTp20Channel(private val engine: ElmEngine) {
         val raw = command(at)
         check(raw.uppercase().replace(at, "").filterNot { it.isWhitespace() } == "OK") { "ELM отклонил $at" }
     }
-    private suspend fun exchange(command: String): List<List<Int>> =
-        frames(command(command, 5500), rx, command)
+    private suspend fun exchange(command: String, allowEmpty: Boolean = false): List<List<Int>> {
+        val raw = command(command, 5500)
+        // A1 acknowledges the peer's keepalive; no CAN reply is required.
+        // Retain queued data even if the adapter ends that exchange with NO DATA.
+        if (allowEmpty && raw.trim().uppercase() in setOf("", "NO DATA")) return emptyList()
+        return frames(raw, rx, command)
+    }
     private suspend fun command(text: String, timeoutMs: Long = 5500): String =
         engine.command(text, timeoutMs, deferJournal = true)
 
