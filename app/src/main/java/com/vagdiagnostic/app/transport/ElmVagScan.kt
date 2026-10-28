@@ -7,6 +7,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 
 /** Legacy CAN connection, UDS equivalent and gateway-list driven read path.
@@ -151,7 +152,7 @@ object ElmVagScan {
             catch (io: IOException) {
                 onUnit(unit.copy(state = if (unit.source == "RESPONSE") ReadState.PARTIAL else ReadState.NO_RESPONSE,
                     note = "Соединение потеряно; DTC не подтверждены: ${io.message}"))
-                throw io
+                throw IOException("${route.key}: ${io.message}", io)
             }
             catch (failure: RuntimeException) {
                 failed = true
@@ -169,10 +170,11 @@ object ElmVagScan {
     private class Uds(private val engine: ElmEngine) {
         private var route: VagOemReadOnly.Route? = null
         private var active = false
+        private var pendingMs = 5250L
         suspend fun open(target: VagOemReadOnly.Route) {
             val tx = requireNotNull(target.udsTx) { "Нет проверенного UDS-маршрута" }
             val rx = requireNotNull(target.udsRx)
-            for (cmd in listOf("ATSP6", "ATH1", "ATD0", "ATCAF1", "ATCFC1", "ATV0", "ATCEA", "ATAT1", "ATST96",
+            for (cmd in listOf("ATSP6", "ATH1", "ATD0", "ATCAF1", "ATCFC1", "ATV0", "ATCEA", "ATAT0", "ATSTFF",
                 "ATSH%03X".format(tx), "ATCRA%03X".format(rx))) {
                 val raw = engine.command(cmd).uppercase().replace(cmd, "").filterNot { it.isWhitespace() }
                 check(raw == "OK") { "ELM отклонил $cmd" }
@@ -181,6 +183,11 @@ object ElmVagScan {
             val reply = read("1003")
             check(reply.size >= 2 && reply.take(2) == listOf(0x50, 3)) { "Нет подтверждения UDS-сессии 1003" }
             active = true
+            if (reply.size >= 6) {
+                val star = ((reply[4] shl 8) or reply[5]) * 10L
+                check(star in 1..5750) { "UDS P2* вне поддержанного диапазона" }
+                pendingMs = star + 250
+            }
         }
         suspend fun close() {
             if (!active) return
@@ -191,10 +198,28 @@ object ElmVagScan {
         suspend fun read(command: String): List<Int> {
             require(command in setOf("1003", "1001", "2204A1", "19028D"))
             val target = requireNotNull(route)
-            val raw = engine.command(command, 8500)
-            val decoded = VagAddressedCan.decodeSingleEcu(raw, requireNotNull(target.udsRx))
-            check(decoded.valid) { "Неполный адресный UDS: ${decoded.problems.joinToString()}" }
-            return requireNotNull(decoded.payload).map { it.toInt() and 255 }
+            val result = withTimeoutOrNull(20000) {
+                    val rx = requireNotNull(target.udsRx)
+                    var raw = engine.command(command, 8500)
+                    var pending = 0
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val decoded = try { VagUdsTransaction.decode(raw, rx, command) }
+                            catch (bad: IllegalArgumentException) { throw IOException(bad.message, bad) }
+                        pending += decoded.pendingCount
+                        if (pending > 8) throw IOException("Слишком много UDS ResponsePending")
+                        decoded.payload?.let { return@withTimeoutOrNull it }
+                        // No new diagnostic request, session-close or tester-present
+                        // may run until this SID has a final response.
+                        raw = engine.receivePendingUdsFrame(rx, pendingMs)
+                    }
+                    @Suppress("UNREACHABLE_CODE") emptyList<Int>()
+            }
+            if (result == null) {
+                engine.close()
+                throw IOException("Превышен общий срок ожидания UDS $command")
+            }
+            return result
         }
     }
 }
