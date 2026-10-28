@@ -4,6 +4,10 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VagOemReadOnlyTest {
+    @Test fun actual04A1RecordsUseThirdBytePresenceRatherThanFourthByte() {
+        val found = VagOemReadOnly.installed04A1(VagOemReadOnly.bytes("6204A101010100111500000202010003030100"))
+        assertEquals(listOf(1, 2, 3), found.map { it.id })
+    }
     @Test fun addressNamespacesAndStrictInstallationList() {
         assertEquals(0x19, VagOemReadOnly.gateway.id)
         assertEquals(0x1F, VagOemReadOnly.gateway.tp)
