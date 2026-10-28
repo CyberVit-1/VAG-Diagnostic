@@ -97,7 +97,7 @@ object VagOemReadOnly {
     }
     fun udsFaults(reply: List<Int>): Faults = when (val result = VagUdsReadOnly.decodeDtcByStatusMask("OEM", reply.map { it.toByte() }.toByteArray())) {
         is VagUdsReadOnly.DtcReply.Positive -> Faults(result.faults.map {
-            Dtc(it.raw24, it.raw24, DtcKind.OEM, statusText = "UDS: статус 0x%02X; маска 0x%02X".format(it.rawStatus, it.availableStatusMask))
+            Dtc(it.raw24, it.raw24, DtcKind.OEM, statusText = it.statusDescription())
         }, "19028D")
         else -> error("Неподтверждённый ответ UDS DTC: $result")
     }

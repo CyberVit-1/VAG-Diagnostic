@@ -40,7 +40,21 @@ class ElmTp20Channel(private val engine: ElmEngine) {
         // D0 is already a live negotiated channel; disconnect even if A1 fails.
         active = true
         ok("ATSH%03X".format(tx)); ok("ATCRA%03X".format(rx)); ok("ATST10")
-        val parameters = exchange("A00194FF82FF").singleOrNull()
+        // Some adapters replay the exact D0 setup frame once after changing
+        // the receive filter. Ignore only that identical negotiated frame here;
+        // every other foreign ID/data remains an error, including later traffic.
+        val parametersRaw = command("A00194FF82FF")
+        val setupRow = "%03X".format(0x200 or destination) + Wire.hex(d)
+        val rows = parametersRaw.replace('>', '\n').replace('\r', '\n').split('\n')
+        var duplicateSetup = false
+        val filtered = rows.filter { row ->
+            if (row.filterNot { it.isWhitespace() }.uppercase() == setupRow) {
+                check(!duplicateSetup) { "Повторные CHANNEL SETUP после согласования" }
+                duplicateSetup = true
+                false
+            } else true
+        }.joinToString("\n")
+        val parameters = frames(filtered, rx, "A00194FF82FF").singleOrNull()
             ?: error("Нет единственного A1 ответа" )
         check(parameters.size == 6 && parameters[0] == 0xA1 && parameters[1] in 1..15) { "Нет валидного согласования A0/A1" }
         responseMs = timingMs(parameters[2])
@@ -70,15 +84,20 @@ class ElmTp20Channel(private val engine: ElmEngine) {
         var expected = -1
         var acknowledged = false
         var polls = 0
+        var lastDataNanos = System.nanoTime()
         var count = 0
         while (true) {
             coroutineContext.ensureActive()
             check(++count <= 256) { "Слишком много кадров TP2.0" }
             if (queue.isEmpty()) {
-                // Keep the channel alive with A3. Bound this to one probe;
-                // never retransmit an application request after uncertain delivery.
-                check(polls++ == 0) { "Неполный ответ TP2.0 ($expected/${result.size})" }
-                queue.addAll(exchange("A3"))
+                // A transport ACK is not the application reply. Allow a bounded
+                // receive period using channel keepalives, never retransmitting
+                // the diagnostic request. Individual command/IO timeouts still abort.
+                check(polls++ < 8 && (System.nanoTime() - lastDataNanos) / 1_000_000 < 1500) {
+                    "Неполный ответ TP2.0: получено ${result.size}, ожидается ${if (expected < 0) "начало ответа" else expected.toString()}"
+                }
+                delay(gapMs)
+                queue.addAll(exchange("A3", allowEmpty = true))
                 continue
             }
             val frame = queue.removeFirst()
@@ -105,6 +124,7 @@ class ElmTp20Channel(private val engine: ElmEngine) {
                     } else frame.drop(1)
                     check(result.size + data.size <= expected) { "Лишние данные TP2.0" }
                     result += data
+                    lastDataNanos = System.nanoTime()
                     val last = op == 0x10 || op == 0x30
                     if (last) check(result.size == expected) { "Обрезанный TP2.0 пакет" }
                     if (op == 0x00 || op == 0x10) {

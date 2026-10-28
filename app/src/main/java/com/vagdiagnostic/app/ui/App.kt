@@ -359,7 +359,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
         else -> Color(0xFFFFC56D)
     }
     val statusText = when {
-        unit.dtcs.isNotEmpty() -> "Найдены неисправности: ${unit.dtcs.size}"
+        unit.dtcs.isNotEmpty() -> "Получены записи DTC: ${unit.dtcs.size}"
         unit.state == ReadState.COMPLETE -> if (unit.source == "OBD") "Ошибок нет (OBD-II)" else "DTC не найдены в прочитанной памяти ECU"
         unit.source == "CANDIDATE" -> "Кандидат профиля — наличие не подтверждено"
         unit.state == ReadState.NOT_QUERIED -> "Не опрошен"

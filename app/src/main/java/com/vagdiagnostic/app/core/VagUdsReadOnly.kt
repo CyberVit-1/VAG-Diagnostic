@@ -15,6 +15,17 @@ object VagUdsReadOnly {
     ) {
         /** Do not interpret status flags that this ECU has not declared supported. */
         val supportedStatus: Int get() = rawStatus and availableStatusMask
+        fun statusDescription(): String {
+            val parts = mutableListOf<String>()
+            if (availableStatusMask and 0x01 != 0) parts +=
+                if (supportedStatus and 0x01 != 0) "Тест неисправности: сбой" else "Тест неисправности: сбой не установлен"
+            if (availableStatusMask and 0x08 != 0) parts +=
+                if (supportedStatus and 0x08 != 0) "Подтверждена ECU" else "Не подтверждена ECU"
+            else parts += "Признак подтверждения ECU не поддерживается"
+            if (supportedStatus and 0x04 != 0) parts += "Ожидающая"
+            if (supportedStatus and 0x80 != 0) parts += "Запрошен индикатор неисправности"
+            return parts.joinToString("; ") + "; UDS: статус 0x%02X; маска 0x%02X".format(rawStatus, availableStatusMask)
+        }
     }
 
     sealed class DtcReply {
