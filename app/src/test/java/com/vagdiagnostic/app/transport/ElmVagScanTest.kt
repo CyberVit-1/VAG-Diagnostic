@@ -10,7 +10,7 @@ import java.util.ArrayDeque
 
 /** Scripted transport contract, never a vehicle-confirmed result. */
 class ElmVagScanTest {
-    private class UdsLink(val wrongId: Boolean = false) : ElmLink {
+    private class UdsLink(val wrongId: Boolean = false, val pending: Int = 0) : ElmLink {
         override val label = "Scripted UDS link"
         val sent = mutableListOf<String>()
         private val queue = ArrayDeque<Int>()
@@ -21,6 +21,11 @@ class ElmVagScanTest {
             val command = bytes.toString(Charsets.US_ASCII).trim()
             sent += command
             val id = if (wrongId) "77B" else "77A"
+            if (command == "ATMA") {
+                val payload = if (pending == 3) "037F1978" else "03590299"
+                for (b in (id + payload + "\r").toByteArray(Charsets.US_ASCII)) queue.add(b.toInt() and 255)
+                return
+            }
             val reply = when {
                 command == "ATZ" -> "ELM327 v1.5"
                 command == "0100" -> "7E8064100BE3EA813"
@@ -29,14 +34,20 @@ class ElmVagScanTest {
                 command == "1FC000100003011" -> "NO DATA"
                 command == "1003" -> id + "025003"
                 command == "1001" -> id + "025001"
-                command == "2204A1" -> id + "076204A119000001"
-                command == "19028D" -> id + "0359028D"
+                command == "2204A1" -> id + "076204A1191F0100"
+                command == "19028D" -> when (pending) {
+                    1 -> id + "037F1978\r" + id + "03590299"
+                    2, 3 -> id + "037F1978"
+                    else -> id + "0359028D"
+                }
+                command == "" -> "STOPPED"
                 else -> error("Unexpected UDS command $command")
             }
             for (b in (reply + ">").toByteArray(Charsets.US_ASCII)) queue.add(b.toInt() and 255)
         }
     }
-    private class Link(val failRead: Boolean = false, val wrongSequence: Boolean = false,
+    private class Link(val failRead: Boolean = false, val wrongSequence: Boolean = false, val keepalive: Boolean = false,
+        val longList: Boolean = false,
         val clock: () -> Long = { 0L }) : ElmLink {
         override val label = "Scripted ELM"
         val sent = mutableListOf<String>()
@@ -45,6 +56,10 @@ class ElmVagScanTest {
         private var destination = 0x1F
         private var receiveSeq = 0
         private var ackDue: Long? = null
+        private fun nextFrame(): String {
+            val frame = remaining.removeFirst()
+            return frame + if (keepalive && longList && frame[4] == '7') "\r300A3" else ""
+        }
         override suspend fun open() {}
         override suspend fun write(data: ByteArray) {
             val cmd = data.toString(Charsets.US_ASCII).trim()
@@ -63,14 +78,16 @@ class ElmVagScanTest {
                     "%03X00D00003000701".format(0x200 or destination)
                 }
                 cmd == "A00194FF82FF" -> "300A10F94FF82FF"
+                cmd == "A10194FF82FF" -> "NO DATA"
                 cmd == "A80" || (cmd.length == 3 && cmd.startsWith("B")) -> "OK"
-                cmd.length == 2 && cmd.startsWith("B") -> remaining.removeFirst()
+                cmd.length == 2 && cmd.startsWith("B") -> nextFrame()
                 cmd.startsWith("1") -> {
                     if (failRead) throw IOException("Scripted disconnected stream")
                     val request = cmd.drop(6)
                     val reply = when (request) {
                         "1089" -> "5089"
-                        "1A9F" -> "5A9F090100000119000001"
+                        "1A9F" -> if (longList) "7F1A11" else "5A9F090100000119000001"
+                        "2204A1" -> "6204A1" + (1..65).joinToString("") { "%02X%02X0100".format(it, it) }
                         "1800FF00" -> "5801029908"
                         "1802FF00" -> "5800"
                         else -> error("Unexpected service $request")
@@ -88,7 +105,8 @@ class ElmVagScanTest {
                         remaining.add("300" + VagOemReadOnly.hex(frame))
                         first = false; receiveSeq = (receiveSeq + 1) and 15
                     }
-                    "300B%X\r".format((cmd.take(2).toInt(16) + 1) and 15) + remaining.removeFirst()
+                    "300B%X\r".format((cmd.take(2).toInt(16) + 1) and 15) + nextFrame() +
+                        if (keepalive && request == "1A9F") "\r300A3" else ""
                 }
                 else -> error("Unexpected wire command $cmd")
             }
@@ -137,6 +155,59 @@ class ElmVagScanTest {
         assertTrue(link.sent.contains("ATST0B"))
         assertFalse(link.sent.contains("ATST64"))
     }
+    @Test fun keepaliveEmptyReplyDoesNotDiscardAlreadyQueuedListData() = runBlocking {
+        val link = Link(keepalive = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val result = ElmVagScan.scan(engine, {}, { _, _, _ -> })
+        assertTrue(result.note, result.listConfirmed)
+        assertTrue(result.complete)
+        assertTrue(link.sent.contains("A10194FF82FF"))
+    }
+    @Test fun udsPendingAndFinalInOneElmBlockAreOneTransaction() = runBlocking {
+        val link = UdsLink(pending = 1)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val result = ElmVagScan.scan(engine, {}, { _, _, _ -> })
+        assertTrue(result.note, result.complete)
+        assertEquals(1, link.sent.count { it == "19028D" })
+    }
+    @Test fun synthetic263ByteListSurvivesRepeatedKeepaliveAndSequenceWrap() = runBlocking {
+        val link = Link(keepalive = true, longList = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> })
+        assertTrue(result.note, result.listConfirmed)
+        assertEquals(65, units.size)
+        assertEquals("GATEWAY", units.getValue("VAG-04").source)
+        assertEquals(ReadState.NOT_QUERIED, units.getValue("VAG-04").state)
+        assertTrue(link.sent.count { it == "A10194FF82FF" } >= 2)
+        assertFalse(result.complete) // Unknown reported IDs have no invented route.
+    }
+    @Test fun pendingAfterPromptUsesReceiveOnlyAndClosesSessionAfterFinal() = runBlocking {
+        val link = UdsLink(pending = 2)
+        val journal = mutableListOf<String>()
+        val engine = ElmEngine(link, { cmd, _, _, _ -> journal += cmd })
+        engine.connect()
+        val result = ElmVagScan.scan(engine, {}, { _, _, _ -> })
+        assertTrue(result.note, result.complete)
+        assertEquals(1, link.sent.count { it == "19028D" })
+        val readIndex = link.sent.indexOf("19028D")
+        assertEquals(listOf("ATMA", "", "1001"), link.sent.drop(readIndex + 1))
+        assertTrue(journal.contains("ATMA"))
+    }
+    @Test fun repeatedPendingIsBoundedWithoutResendOrPrematureSessionClose() = runBlocking {
+        val link = UdsLink(pending = 3)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        try { ElmVagScan.scan(engine, {}, { _, _, _ -> }); fail("pending limit expected") }
+        catch (failure: IOException) { assertTrue(failure.message!!.contains("VAG-19")) }
+        val afterRead = link.sent.drop(link.sent.indexOf("19028D") + 1)
+        assertEquals(1, link.sent.count { it == "19028D" })
+        assertEquals(8, afterRead.count { it == "ATMA" })
+        assertFalse(afterRead.contains("1001"))
+    }
     @Test fun wrongSequenceIsNeverAcceptedAsZeroDtcs() = runBlocking {
         val link = Link(wrongSequence = true)
         val engine = ElmEngine(link, { _, _, _, _ -> })
@@ -169,11 +240,10 @@ class ElmVagScanTest {
         val link = UdsLink(wrongId = true)
         val engine = ElmEngine(link, { _, _, _, _ -> })
         engine.connect()
-        val result = ElmVagScan.scan(engine, {}, { _, _, _ -> })
-        assertNull(result.protocol)
-        assertFalse(result.complete)
-        assertFalse(result.listConfirmed)
+        try { ElmVagScan.scan(engine, {}, { _, _, _ -> }); fail("Expected strict address failure") }
+        catch (_: IOException) { }
         assertFalse(link.sent.contains("19028D"))
+        assertFalse(link.sent.contains("1001"))
     }
     @Test fun cancellationDuringProgressDoesNotStartNextEcu() = runBlocking {
         val link = Link()
