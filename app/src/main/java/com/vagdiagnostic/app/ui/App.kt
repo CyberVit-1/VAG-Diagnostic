@@ -20,6 +20,8 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.DirectionsCar
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
@@ -37,6 +39,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vagdiagnostic.app.MainViewModel
 import com.vagdiagnostic.app.DashboardState
@@ -230,7 +235,68 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
 }
 
 @Composable private fun Diagnostics(status: DashboardState, start: () -> Unit, stop: () -> Unit, search: (String) -> Unit) {
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    var summaryExpanded by rememberSaveable { mutableStateOf(false) }
+    var wasScanning by rememberSaveable { mutableStateOf(status.isScanning) }
+    LaunchedEffect(status.isScanning) {
+        if (wasScanning && !status.isScanning) summaryExpanded = false
+        wasScanning = status.isScanning
+    }
+    // One scroll surface: even expanded details cannot squeeze the ECU list
+    // into the small remainder of a fixed-height screen.
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item(key = "scan-summary") {
+            ElevatedCard(modifier = Modifier.fillMaxWidth().animateContentSize()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.fillMaxWidth()
+                        .clickable(role = Role.Button, onClickLabel = if (summaryExpanded) "Свернуть сводку" else "Раскрыть сводку") {
+                            summaryExpanded = !summaryExpanded
+                        }
+                        .semantics { stateDescription = if (summaryExpanded) "Развёрнуто" else "Свёрнуто" }
+                        .padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(if (status.isScanning) "Идёт диагностика" else if (status.hasOemResults) "Результаты VAG" else "Диагностика OBD-II",
+                                style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Text("Найдено ${status.discovered} · Прочитано ${status.successful} · DTC ${status.faultCount}",
+                                style = MaterialTheme.typography.bodySmall)
+                            Text(if (summaryExpanded) "Свернуть подробности" else "Подробнее",
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        }
+                        Icon(if (summaryExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = null)
+                    }
+                    if (!status.isScanning && status.units.isNotEmpty() && (status.lastScanInterrupted ||
+                        status.scanWarning.isNotBlank() || status.units.any { it.state != ReadState.COMPLETE })) {
+                        Text("Опрос неполный · данные сохранены", style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error)
+                    }
+                    if (status.isScanning) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Text("Сейчас: ${status.current}", style = MaterialTheme.typography.bodySmall)
+                        OutlinedButton(onClick = stop, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.Stop, null); Spacer(Modifier.width(6.dp)); Text("Остановить")
+                        }
+                    } else Button(onClick = start, enabled = status.carConnected && !status.isBusy, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp))
+                        Text(if (status.units.isEmpty()) "Начать сканирование" else "Повторить")
+                    }
+                }
+            }
+        }
+        item(key = "scan-details") {
+            AnimatedVisibility(summaryExpanded, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                ScanDetails(status)
+            }
+        }
+        item(key = "ecu-heading") {
+            Text("Блоки OBD-II и VAG; кандидаты отмечены отдельно", style = MaterialTheme.typography.titleSmall)
+            if (status.units.isEmpty()) Text("Нет подтверждённых ответчиков. Результаты не подставляются автоматически.", style = MaterialTheme.typography.bodySmall)
+        }
+        items(status.units, key = { it.address }) { unit -> EcuCard(unit, search) }
+    }
+}
+
+@Composable private fun ScanDetails(status: DashboardState) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Metrics(status)
         if (status.completedModes > 0 && status.units.isNotEmpty()) {
             val obdUnits = status.units.filter { it.source == "OBD" }
@@ -250,19 +316,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall)
         }
-        if (status.isScanning) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) // indeterminate until vehicle ECU count is known
-            Text("Сейчас: ${status.current}")
-            OutlinedButton(onClick = stop, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Stop, null); Text("Остановить") }
-        } else Button(onClick = start, enabled = status.carConnected && !status.isBusy, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Default.PlayArrow, null); Text(if (status.units.isEmpty()) "Начать сканирование" else "Повторить сканирование")
-        }
         if (status.lastScanInterrupted) Text("Сканирование прервано или часть режимов не подтвердила ответ. Полученные данные сохранены.", style = MaterialTheme.typography.bodySmall)
-        Text("Блоки OBD-II и VAG; кандидаты отмечены отдельно", style = MaterialTheme.typography.titleSmall)
-        if (status.units.isEmpty()) Text("Нет подтверждённых ответчиков. Результаты не подставляются автоматически.", style = MaterialTheme.typography.bodySmall)
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 20.dp)) {
-            items(status.units, key = { it.address }) { unit -> EcuCard(unit, search) }
-        }
     }
 }
 
@@ -358,7 +412,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
             }
         }
         Text("Версия ${com.vagdiagnostic.app.BuildConfig.VERSION_NAME} · Только чтение", style = MaterialTheme.typography.bodyMedium)
-        Text("На автомобиле подтверждена база OBD/ISO-TP через Wi-Fi. Новое подключение VAG, список Gateway и чтение DTC требуют аппаратной проверки. Пока включён профиль VW 1K. Запись и сброс DTC отсутствуют. BLE: Nordic UART.",
+        Text("Через Wi-Fi в 0.3.1 подтверждены список Gateway и чтение DTC 12 блоков. Расширенные маршруты этой версии требуют испытания. Пока включён профиль VW 1K. Запись и сброс DTC отсутствуют. BLE: Nordic UART, аппаратно не проверен.",
             style = MaterialTheme.typography.bodySmall)
     }
 }

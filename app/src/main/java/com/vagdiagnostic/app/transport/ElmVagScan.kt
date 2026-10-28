@@ -93,7 +93,8 @@ object ElmVagScan {
         val listConfirmed = installed != null
         event("VAG_INSTALLATION_LIST", if (listConfirmed) "Подтверждены ID: " + installed!!.joinToString { "%02X".format(it.id) }
             else "Список не получен; ограниченная очередь известных адресов профиля, не список установленных блоков", if (listConfirmed) "CONFIRMED" else "INCONCLUSIVE")
-        val ids = if (listConfirmed) (listOf(0x19) + installed!!.map { it.id }).distinct() else VagOemReadOnly.routes.keys.toList()
+        val ids = if (listConfirmed) (listOf(0x19) + installed!!.map { it.id }).distinct()
+            else VagOemReadOnly.routes.values.filterNot { it.installedOnly }.map { it.id }
         var failed = !listConfirmed
         for (id in ids) {
             currentCoroutineContext().ensureActive()
@@ -106,6 +107,14 @@ object ElmVagScan {
             if (route == null) {
                 failed = true
                 onUnit(unit.copy(state = ReadState.NOT_QUERIED, note = "Gateway сообщил блок, но проверенного маршрута в профиле нет"))
+                continue
+            }
+            val advertisedTp = installed?.firstOrNull { it.id == id }?.tpDestination
+            if (advertisedTp != null && route.tp != null && advertisedTp != route.tp) {
+                failed = true
+                val note = "Адрес из списка Gateway не совпал с известным маршрутом; опрос пропущен"
+                onUnit(unit.copy(note = note))
+                event("VAG_ROUTE_MISMATCH", "${route.key}: list=%02X; profile=%02X".format(advertisedTp, route.tp), "UNSUPPORTED")
                 continue
             }
             try {
@@ -123,16 +132,27 @@ object ElmVagScan {
                     return requireNotNull(result)
                 }
                 suspend fun udsRead(): VagOemReadOnly.Faults {
-                    val channel = Uds(engine)
-                    var healthy = true
-                    try {
-                        channel.open(route)
-                        confirmedConnection()
-                        return VagOemReadOnly.udsFaults(channel.read("19028D"))
-                    } catch (io: IOException) { healthy = false; throw io }
-                    finally { if (healthy && currentCoroutineContext().isActive) channel.close() }
+                    val paths = route.udsPaths(listConfirmed)
+                    check(paths.isNotEmpty()) { "Нет проверенного UDS-маршрута" }
+                    var lastFailure: RuntimeException? = null
+                    for ((index, path) in paths.withIndex()) {
+                        val channel = Uds(engine)
+                        var healthy = true
+                        try {
+                            channel.open(path)
+                            confirmedConnection()
+                            return VagOemReadOnly.udsFaults(channel.read("19028D"))
+                        } catch (cancel: CancellationException) { throw cancel }
+                        catch (io: IOException) { healthy = false; throw io }
+                        catch (failure: RuntimeException) {
+                            lastFailure = failure
+                            if (index < paths.lastIndex) event("VAG_ECU_ADDRESS_FALLBACK",
+                                "${route.key}: завершённый отказ ${path.udsTx?.toString(16)}; ${failure.message}", "INCONCLUSIVE")
+                        } finally { if (healthy && currentCoroutineContext().isActive) channel.close() }
+                    }
+                    throw requireNotNull(lastFailure)
                 }
-                val result = if (protocol == Protocol.TP20 && route.tp != null) {
+                val result = if (route.tp != null && (protocol == Protocol.TP20 || route.udsTx == null)) {
                     try { tpRead() }
                     catch (cancel: CancellationException) { throw cancel }
                     catch (io: IOException) { throw io }
@@ -174,11 +194,30 @@ object ElmVagScan {
         suspend fun open(target: VagOemReadOnly.Route) {
             val tx = requireNotNull(target.udsTx) { "Нет проверенного UDS-маршрута" }
             val rx = requireNotNull(target.udsRx)
-            for (cmd in listOf("ATSP6", "ATH1", "ATD0", "ATCAF1", "ATCFC1", "ATV0", "ATCEA", "ATAT0", "ATSTFF",
-                "ATSH%03X".format(tx), "ATCRA%03X".format(rx))) {
+            suspend fun ok(cmd: String) {
                 val raw = engine.command(cmd).uppercase().replace(cmd, "").filterNot { it.isWhitespace() }
                 check(raw == "OK") { "ELM отклонил $cmd" }
             }
+            val protocol = if (target.is29Bit) "7" else "6"
+            // Keep automatic FC disabled until the new ID/filter/mode is ready.
+            for (cmd in listOf("ATSP$protocol", "ATH1", "ATD0", "ATCAF1", "ATCFC0", "ATV0", "ATCEA", "ATAT0", "ATSTFF")) ok(cmd)
+            if (target.is29Bit) {
+                engine.needsFlowControlReset = true
+                ok("ATCP%02X".format(tx ushr 24))
+                ok("ATSH%06X".format(tx and 0xFFFFFF))
+                ok("ATCRA%08X".format(rx))
+                // The non-OBD 29-bit route needs its exact FC transmit ID.
+                ok("ATFCSH%08X".format(tx)); ok("ATFCSD300000"); ok("ATFCSM1")
+                check(engine.command("ATDPN").trim().uppercase() in setOf("7", "A7")) { "ELM не подтвердил CAN 7" }
+            } else {
+                if (engine.needsFlowControlReset) {
+                    try { ok("ATFCSM0") }
+                    catch (bad: IllegalStateException) { throw IOException("Не удалось восстановить автоматический flow control", bad) }
+                    engine.needsFlowControlReset = false
+                }
+                ok("ATSH%03X".format(tx)); ok("ATCRA%03X".format(rx))
+            }
+            ok("ATCFC1")
             route = target
             val reply = read("1003")
             check(reply.size >= 2 && reply.take(2) == listOf(0x50, 3)) { "Нет подтверждения UDS-сессии 1003" }
@@ -204,6 +243,8 @@ object ElmVagScan {
                     var pending = 0
                     while (true) {
                         currentCoroutineContext().ensureActive()
+                        if (raw.trim().uppercase() == "NO DATA" && pending == 0)
+                            error("ELM завершил UDS $command без ответа")
                         val decoded = try { VagUdsTransaction.decode(raw, rx, command) }
                             catch (bad: IllegalArgumentException) { throw IOException(bad.message, bad) }
                         pending += decoded.pendingCount

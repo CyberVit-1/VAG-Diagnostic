@@ -33,6 +33,12 @@ class ElmPendingReceiveTest {
         assertFalse(link.closed)
         assertTrue(journal.single().contains("STOPPED"))
     }
+    @Test fun receiveOnlyUsesExact29BitId() = runBlocking {
+        val link = Link("17FE008B03590219\r")
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        assertEquals("17FE008B03590219", engine.receivePendingUdsFrame(0x17FE008B, 100))
+        assertEquals(listOf("ATMA", ""), link.sent)
+    }
     @Test fun wrongAddressOrFirstFrameNeverLeavesLiveStreamWithOutstandingRequest() = runBlocking {
         for (raw in listOf("77E03590299\r", "77F100B590299123456\r", "BUFFER FULL\r")) {
             val link = Link(raw)

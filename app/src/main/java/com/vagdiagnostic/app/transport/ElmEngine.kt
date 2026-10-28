@@ -2,6 +2,7 @@ package com.vagdiagnostic.app.transport
 
 import com.vagdiagnostic.app.core.ElmFrames
 import com.vagdiagnostic.app.core.ObdDecoder
+import com.vagdiagnostic.app.core.VagAddressedCan
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
@@ -39,6 +40,8 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
     /** Monotonic age of the last completed ELM reply. */
     fun idleMs(): Long = lastCommandNanos?.let { (clockNanos() - it).coerceAtLeast(0L) / 1_000_000L } ?: 0L
     private val lock = Mutex()
+    // Custom FC from a 29-bit OEM route must not leak into later 11-bit UDS.
+    internal var needsFlowControlReset = false
     var protocol: String = "Не определён"
         private set
     var vehicleReady: Boolean = false
@@ -59,6 +62,7 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
         try {
             val reset = command("ATZ", 8500)
             check(reset.contains("ELM", true) || reset.contains("OK", true)) { "Нет ответа на ATZ" }
+            needsFlowControlReset = false
             adapterReady = true
             for (cmd in listOf("ATE0", "ATL0", "ATS0", "ATH1", "ATSP0")) {
                 val result = command(cmd)
@@ -153,7 +157,7 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
      * Any failure disposes the stream; no session-close request can consume
      * the still outstanding diagnostic response. */
     suspend fun receivePendingUdsFrame(expectedId: Int, timeoutMs: Long): String = lock.withLock {
-        require(expectedId in 0..0x7FF && timeoutMs in 1..6000)
+        require(expectedId in 0..0x1FFFFFFF && timeoutMs in 1..6000)
         val collected = StringBuilder()
         val line = StringBuilder()
         val start = System.nanoTime()
@@ -174,9 +178,9 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                         val row = line.toString().trim().uppercase()
                         line.clear()
                         if (row.isEmpty() || row == "ATMA") continue
-                        val data = ElmTp20Channel.frames(row, expectedId, "ATMA").single()
-                        if (data[0] !in 1..7 || data.size < data[0] + 1)
-                            throw IOException("Отложенный UDS не Single Frame; монитор ELM не выполняет ISO-TP flow control")
+                        val decoded = VagAddressedCan.decodeSingleEcu(row, expectedId)
+                        if (!decoded.valid)
+                            throw IOException("Некорректный отложенный UDS: ${decoded.problems.joinToString()}; монитор ELM не выполняет ISO-TP flow control")
                         frame = row
                     } else if (b in 0..127) line.append(b.toChar())
                 }
@@ -211,5 +215,5 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
             withContext(NonCancellable) { persist(record) }
         }
     }
-    fun close() { vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); link.close() }
+    fun close() { vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); needsFlowControlReset = false; link.close() }
 }

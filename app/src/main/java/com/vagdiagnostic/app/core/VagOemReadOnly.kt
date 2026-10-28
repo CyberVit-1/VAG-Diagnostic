@@ -5,9 +5,17 @@ package com.vagdiagnostic.app.core
  * Only these known routes may be used; installed IDs outside the table stay visible, unqueried.
  */
 object VagOemReadOnly {
-    data class Route(val id: Int, val name: String, val tp: Int?, val udsTx: Int?) {
-        val udsRx: Int? get() = udsTx?.let { if (it in 0x7E0..0x7E7) it + 8 else it + 0x6A }
+    data class Route(val id: Int, val name: String, val tp: Int?, val udsTx: Int?,
+        val installedOnly: Boolean = false, val udsAlternatives: List<Int> = emptyList()) {
+        val udsRx: Int? get() = udsTx?.let {
+            when { it > 0x7FF -> it + 0x20000; it in 0x7E0..0x7E7 -> it + 8; else -> it + 0x6A }
+        }
+        val is29Bit: Boolean get() = udsTx?.let { it > 0x7FF } == true
         val key: String get() = "VAG-%02X".format(id)
+        fun udsPaths(listConfirmed: Boolean): List<Route> =
+            (listOfNotNull(udsTx) + if (listConfirmed) udsAlternatives else emptyList()).map {
+                copy(udsTx = it, udsAlternatives = emptyList())
+            }
     }
     val routes = listOf(
         Route(0x19, "CAN Gateway", 0x1F, 0x710),
@@ -21,12 +29,19 @@ object VagOemReadOnly {
         Route(0x17, "Панель приборов", 0x07, 0x714),
         Route(0x42, "Дверь водителя", 0x22, 0x74A),
         Route(0x44, "Усилитель рулевого управления", 0x09, 0x712),
-        Route(0x46, "Центральный комфорт", 0x21, null),
+        Route(0x46, "Центральный комфорт", 0x21, 0x70D, udsAlternatives = listOf(0x17FC008B)),
         Route(0x52, "Дверь пассажира", 0x23, 0x74B),
-        Route(0x53, "Стояночный тормоз", 0x19, 0x752)
+        Route(0x53, "Стояночный тормоз", 0x19, 0x752),
+        // Added routes require a genuine installation list, not candidate sweeping.
+        Route(0x04, "Датчик угла поворота руля", 0x13, 0x751, installedOnly = true),
+        Route(0x25, "Иммобилайзер", 0x14, 0x711, installedOnly = true),
+        Route(0x62, "Задняя левая дверь", 0x24, null, installedOnly = true),
+        Route(0x72, "Задняя правая дверь", 0x25, null, installedOnly = true),
+        Route(0x56, "Магнитола", 0x52, 0x718, installedOnly = true)
     ).associateBy { it.id }
     val gateway get() = routes.getValue(0x19)
-    data class Installed(val id: Int, val rawStatus: Int, val hasFaultFlag: Boolean)
+    data class Installed(val id: Int, val rawStatus: Int, val hasFaultFlag: Boolean,
+        val tpDestination: Int? = null, val extraStatus: Int? = null)
     data class Faults(val values: List<Dtc>, val service: String)
 
     fun bytes(hex: String): List<Int> {
@@ -64,7 +79,8 @@ object VagOemReadOnly {
     }
     private fun installedRecords(data: List<Int>, flagsIndex: Int): List<Installed> {
         val entries = data.chunked(4).filter { it[flagsIndex] != 0 }.map {
-            Installed(it[0], it[flagsIndex], it[flagsIndex] and 4 != 0)
+            Installed(it[0], it[flagsIndex], it[flagsIndex] and 4 != 0,
+                if (flagsIndex == 2) it[1] else null, if (flagsIndex == 2) it[3] else null)
         }
         require(entries.all { it.id in 1..255 } && entries.map { it.id }.distinct().size == entries.size) { "Неверные/повторные ID в списке" }
         return entries

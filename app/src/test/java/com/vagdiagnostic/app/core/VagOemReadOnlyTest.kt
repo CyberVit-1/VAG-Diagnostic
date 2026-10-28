@@ -7,6 +7,28 @@ class VagOemReadOnlyTest {
     @Test fun actual04A1RecordsUseThirdBytePresenceRatherThanFourthByte() {
         val found = VagOemReadOnly.installed04A1(VagOemReadOnly.bytes("6204A101010100111500000202010003030100"))
         assertEquals(listOf(1, 2, 3), found.map { it.id })
+        assertEquals(listOf(1, 2, 3), found.map { it.tpDestination })
+        assertEquals(listOf(0, 0, 0), found.map { it.extraStatus })
+    }
+    @Test fun expandedRoutesAreClosedAndAddedOnlyForGatewayListedModules() {
+        val expected = mapOf(0x04 to 0x13, 0x25 to 0x14, 0x62 to 0x24, 0x72 to 0x25, 0x56 to 0x52)
+        assertEquals(19, VagOemReadOnly.routes.size)
+        for ((id, tp) in expected) {
+            assertEquals(tp, VagOemReadOnly.routes.getValue(id).tp)
+            assertTrue(VagOemReadOnly.routes.getValue(id).installedOnly)
+        }
+        assertNull(VagOemReadOnly.routes.getValue(0x62).udsTx)
+        assertNull(VagOemReadOnly.routes.getValue(0x72).udsTx)
+        assertFalse(VagOemReadOnly.routes.containsKey(0x7F))
+    }
+    @Test fun comfort29BitPairAndListGateAreExplicit() {
+        val route = VagOemReadOnly.routes.getValue(0x46)
+        assertEquals(listOf(0x70D), route.udsPaths(false).map { it.udsTx })
+        val paths = route.udsPaths(true)
+        assertEquals(listOf(0x70D, 0x17FC008B), paths.map { it.udsTx })
+        assertEquals(listOf(0x777, 0x17FE008B), paths.map { it.udsRx })
+        assertFalse(paths.first().is29Bit)
+        assertTrue(paths.last().is29Bit)
     }
     @Test fun addressNamespacesAndStrictInstallationList() {
         assertEquals(0x19, VagOemReadOnly.gateway.id)
