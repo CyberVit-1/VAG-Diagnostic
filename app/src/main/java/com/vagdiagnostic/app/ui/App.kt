@@ -241,11 +241,9 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
         if (wasScanning && !status.isScanning) summaryExpanded = false
         wasScanning = status.isScanning
     }
-    // One scroll surface: even expanded details cannot squeeze the ECU list
-    // into the small remainder of a fixed-height screen.
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item(key = "scan-summary") {
+    // Only the compact controls stay fixed. Details and ECU cards share the
+    // scrolling area, so expanding details cannot squeeze the ECU viewport.
+    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             ElevatedCard(modifier = Modifier.fillMaxWidth().animateContentSize()) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(Modifier.fillMaxWidth()
@@ -281,7 +279,8 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                     }
                 }
             }
-        }
+        LazyColumn(Modifier.fillMaxWidth().weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(bottom = 20.dp)) {
         item(key = "scan-details") {
             AnimatedVisibility(summaryExpanded, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                 ScanDetails(status)
@@ -292,6 +291,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
             if (status.units.isEmpty()) Text("Нет подтверждённых ответчиков. Результаты не подставляются автоматически.", style = MaterialTheme.typography.bodySmall)
         }
         items(status.units, key = { it.address }) { unit -> EcuCard(unit, search) }
+        }
     }
 }
 
