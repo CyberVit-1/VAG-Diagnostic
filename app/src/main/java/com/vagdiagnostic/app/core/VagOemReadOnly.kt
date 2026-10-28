@@ -49,7 +49,7 @@ object VagOemReadOnly {
         require(body.firstOrNull() == 0x9F) { "Нет echo 9F" }
         val data = body.drop(1)
         require(data.isNotEmpty() && data[0] == data.size && (data.size - 1) % 4 == 0) { "Неполный список 1A9F" }
-        return installedRecords(data.drop(1))
+        return installedRecords(data.drop(1), 3)
     }
     /** Alternative installation list available on some legacy gateways,
      * may run over TP2.0; UDS service does not imply ISO-TP transport. */
@@ -57,11 +57,14 @@ object VagOemReadOnly {
         val body = positive(reply, 0x22)
         require(body.take(2) == listOf(0x04, 0xA1)) { "Нет echo 04A1" }
         require((body.size - 2) % 4 == 0) { "Неполный список 04A1" }
-        return installedRecords(body.drop(2))
+        require(body.size > 2) { "Пустой список 04A1" }
+        // 04A1: [display ID, transport address, installation flags, extra status].
+        // Its flags offset differs from the legacy 1A9F layout.
+        return installedRecords(body.drop(2), 2)
     }
-    private fun installedRecords(data: List<Int>): List<Installed> {
-        val entries = data.chunked(4).filter { it[3] != 0 }.map {
-            Installed(it[0], it[3], it[3] and 4 != 0)
+    private fun installedRecords(data: List<Int>, flagsIndex: Int): List<Installed> {
+        val entries = data.chunked(4).filter { it[flagsIndex] != 0 }.map {
+            Installed(it[0], it[flagsIndex], it[flagsIndex] and 4 != 0)
         }
         require(entries.all { it.id in 1..255 } && entries.map { it.id }.distinct().size == entries.size) { "Неверные/повторные ID в списке" }
         return entries
