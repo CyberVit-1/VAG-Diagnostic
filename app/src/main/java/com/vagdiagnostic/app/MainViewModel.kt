@@ -286,7 +286,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         val resultText = if (check == null) {
                             "Mode 09 PID02 не подтверждён; многофреймовый ответ не проверен"
                         } else if (check.confirmed) {
-                            "Mode 09: полный ответ подтверждён у ${check.verified.size}/${check.supported.size} ЭБУ; адресный VAG ISO-TP ещё не проверен"
+                            "Mode 09: полный ответ подтверждён у ${check.verified.size}/${check.supported.size} ЭБУ"
                         } else "Mode 09: полный ответ не подтверждён"
                         val details = supported.issues + check?.issues.orEmpty()
                         _state.value = _state.value.copy(isoTpReadiness = resultText)
@@ -376,12 +376,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                             (problem.message ?: problem::class.java.simpleName)
                                         _state.value = _state.value.copy(
                                             isoTpReadiness = _state.value.isoTpReadiness +
-                                                "; Gateway 19: проверка не завершена"
+                                                "; OEM опрос прерван: " + (problem.message ?: "ошибка обмена")
                                         )
                                         db.journal().insert(JournalEntity(
                                             timestamp = System.currentTimeMillis(),
                                             connection = cfg.type,
-                                            command = "TP20_GATEWAY_CHANNEL_PROBE",
+                                            command = "VAG_SCAN_INCOMPLETE",
                                             raw = description, elapsedMs = 0,
                                             outcome = "INCONCLUSIVE"
                                         ))
