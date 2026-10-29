@@ -28,6 +28,23 @@ object VagTp20Gateway {
     )
     fun knownCandidate(chassis: String?): Profile? = profiles[chassis]
 
+    /** Known manufacturer identity permits the fixed Gateway probe; the actual
+     * list format and routes must still be confirmed at runtime. Other chassis
+     * never inherit the legacy profile's unconfirmed candidate queue. */
+    fun profileFromVerifiedMode09(frames: FrameParse, sourceEcu: String, supportedEcus: Set<String>): Profile? {
+        if (sourceEcu !in ObdMode09Readiness.assessVin(frames, supportedEcus).verified) return null
+        val vin = ObdMode09Readiness.vinForDisplay(frames, supportedEcus) ?: return null
+        val brand = when (vin.take(3)) {
+            "WVW", "3VW" -> "Volkswagen"
+            "WAU" -> "Audi"
+            "TMB" -> "Škoda"
+            "VSS" -> "SEAT / CUPRA"
+            else -> return null
+        }
+        knownCandidate(chassisFromVerifiedMode09(frames, sourceEcu))?.let { return it }
+        return Profile(vin.substring(6, 8), "Идентификация производителя; формат списка проверяется ответом Gateway", brand)
+    }
+
     /** RX ID invalid (ECU chooses), tester RX ID 0x300, KWP application 0x01. */
     fun channelRequest(): String = "1FC00010000301"
 

@@ -11,13 +11,22 @@ import java.util.ArrayDeque
 /** Scripted transport contract, never a vehicle-confirmed result. */
 class ElmVagScanTest {
     private class UdsLink(val wrongId: Boolean = false, val pending: Int = 0, val identityReply: String = "7F2231",
-        val presenceReply: String = "7E00", val sessionReply: String = "5003") : ElmLink {
+        val presenceReply: String = "7E00", val sessionReply: String = "5003", val bitmapReply: String? = null) : ElmLink {
         override val label = "Scripted UDS link"
         val sent = mutableListOf<String>()
         private val queue = ArrayDeque<Int>()
         override suspend fun open() {}
         override fun close() { queue.clear() }
         override suspend fun readByte(): Int = queue.pollFirst() ?: -2
+        private fun payload(id: String, hex: String): String {
+            if (hex == "NO DATA") return hex
+            val length = hex.length / 2
+            if (length <= 7) return id + "%02X".format(length) + hex
+            return id + "10%02X".format(length) + hex.take(12) + "\r" +
+                hex.drop(12).chunked(14).mapIndexed { index, chunk ->
+                    id + "2%X".format(index + 1) + chunk.padEnd(14, '0')
+                }.joinToString("\r")
+        }
         override suspend fun write(bytes: ByteArray) {
             val command = bytes.toString(Charsets.US_ASCII).trim()
             sent += command
@@ -39,10 +48,8 @@ class ElmVagScanTest {
                     id + "%02X".format(sessionReply.length / 2) + sessionReply
                 command == "1001" -> id + "025001"
                 command == "2204A1" -> id + "076204A1191F0100"
-                command == "22F187" -> if (identityReply.length / 2 <= 7)
-                    id + "%02X".format(identityReply.length / 2) + identityReply
-                else id + "10%02X".format(identityReply.length / 2) + identityReply.take(12) + "\r" +
-                    id + "21" + identityReply.drop(12).padEnd(14, '0')
+                command == "22F187" -> payload(id, identityReply)
+                command == "222A26" -> payload(id, requireNotNull(bitmapReply))
                 command == "19028D" -> when (pending) {
                     1 -> id + "037F1978\r" + id + "03590299"
                     2, 3 -> id + "037F1978"
@@ -223,6 +230,53 @@ class ElmVagScanTest {
             assertFalse(link.sent.contains("1003"))
             assertFalse(link.sent.contains("19028D"))
             assertFalse(link.sent.contains("1001"))
+        }
+    }
+    private fun partReply(part: String) = "62F187" + VagOemReadOnly.hex(part.map { it.code })
+    @Test fun validatedPartNumberSelectsTheActualInstallationFormat() = runBlocking {
+        for ((part, bitmap) in listOf(
+            "5Q0907530" to ("01" + "00".repeat(31)),
+            "4G0907468" to ("000008" + "00".repeat(6)))) {
+            val link = UdsLink(identityReply = partReply(part), bitmapReply = "622A26$bitmap")
+            val units = linkedMapOf<String, ControlUnit>()
+            val outcome = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+                allowCandidateFallback = false, readGatewayIdentity = true)
+            assertTrue(outcome.note, outcome.complete)
+            assertEquals(setOf("VAG-19"), units.keys)
+            assertTrue(link.sent.indexOf("22F187") < link.sent.indexOf("222A26"))
+            assertFalse(link.sent.contains("2204A1"))
+            assertEquals(1, link.sent.count { it == "22F187" })
+        }
+    }
+    @Test fun unknownPositionsAndMissingAdditionalListsKeepCoverageIncomplete() = runBlocking {
+        for ((part, bitmap) in listOf(
+            "5Q0907530" to ("01" + "00".repeat(30) + "01"),
+            "5WA907530" to ("01" + "00".repeat(31)))) {
+            val link = UdsLink(identityReply = partReply(part), bitmapReply = "622A26$bitmap")
+            val units = linkedMapOf<String, ControlUnit>()
+            val outcome = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+                allowCandidateFallback = false)
+            assertTrue(outcome.listConfirmed)
+            assertFalse(outcome.complete)
+            assertEquals(setOf("VAG-19"), units.keys)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        }
+    }
+    @Test fun malformedBitmapDoesNotTurnIntoEmptyInstalledList() = runBlocking {
+        for (bitmap in listOf("622A26" + "00".repeat(31), "622A28" + "00".repeat(32), "7F2231")) {
+            val link = UdsLink(identityReply = partReply("5Q0907530"), bitmapReply = bitmap)
+            val units = mutableListOf<ControlUnit>()
+            val result = runCatching { ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units += it }, { _, _, _ -> },
+                allowCandidateFallback = false) }
+            if (bitmap.startsWith("622A28")) {
+                assertTrue(result.exceptionOrNull() is IOException)
+                assertEquals("222A26", link.sent.last())
+            } else {
+                assertFalse(result.getOrThrow().listConfirmed)
+                assertFalse(result.getOrThrow().complete)
+            }
+            assertTrue(units.isEmpty())
+            assertFalse(link.sent.contains("19028D"))
         }
     }
     @Test fun synthetic263ByteListSurvivesRepeatedKeepaliveAndSequenceWrap() = runBlocking {

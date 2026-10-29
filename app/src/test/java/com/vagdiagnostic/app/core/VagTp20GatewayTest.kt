@@ -63,4 +63,23 @@ class VagTp20GatewayTest {
         val tooShort = FrameParse(mapOf("7E8" to listOf(byteArrayOf(0x49, 0x02, 0x01))), emptyList())
         assertEquals(null, VagTp20Gateway.chassisFromVerifiedMode09(tooShort, "7E8"))
     }
+    private fun syntheticIdentity(wmi: String, chassis: String): ByteArray =
+        byteArrayOf(0x49, 2, 1) + (wmi + "AAA" + chassis + "AAAAAAAAA").map { it.code.toByte() }.toByteArray()
+    @Test fun otherVagChassisRequireGatewayListInsteadOfLegacyCandidateQueue() {
+        for ((wmi, chassis) in listOf("WVW" to "AU", "WAU" to "4G", "TMB" to "NE", "VSS" to "KL")) {
+            // Synthetic identifiers only; no recorded vehicle VIN in fixtures.
+            val frames = FrameParse(mapOf("7E8" to listOf(syntheticIdentity(wmi, chassis))), emptyList())
+            val profile = requireNotNull(VagTp20Gateway.profileFromVerifiedMode09(frames, "7E8", setOf("7E8")))
+            assertEquals(chassis, profile.chassis)
+            assertFalse(profile.allowCandidateFallback)
+            assertFalse(profile.source.contains(wmi + "AAA"))
+        }
+    }
+    @Test fun unknownManufacturerOrConflictingVinCannotEnableGatewayProbe() {
+        val unknown = FrameParse(mapOf("7E8" to listOf(syntheticIdentity("XXX", "1K"))), emptyList())
+        assertEquals(null, VagTp20Gateway.profileFromVerifiedMode09(unknown, "7E8", setOf("7E8")))
+        val conflict = FrameParse(mapOf("7E8" to listOf(syntheticIdentity("WVW", "AU")),
+            "7E9" to listOf(syntheticIdentity("WAU", "4G"))), emptyList())
+        assertEquals(null, VagTp20Gateway.profileFromVerifiedMode09(conflict, "7E8", setOf("7E8", "7E9")))
+    }
 }

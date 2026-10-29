@@ -213,13 +213,18 @@ object VagInstallationBitmap {
         ))
     )
 
+    private fun mappingFor(owner: Int, partNumber: String): Mapping? {
+        val part = partNumber.filterNot { it.isWhitespace() }.uppercase()
+        return mappings.singleOrNull { it.owner == owner && it.parts.any { pattern ->
+            pattern == "*" || (pattern.endsWith("*") && part.isNotEmpty() && part.startsWith(pattern.dropLast(1))) || part == pattern
+        } }
+    }
+    fun supports(owner: Int, partNumber: String): Boolean = mappingFor(owner, partNumber) != null
+
     /** 2A26 is the installation bitmap; 2A28 is the fault-indication bitmap.
      * Fault indications never substitute for reading an ECU's DTC memory. */
     fun decode(owner: Int, partNumber: String, reply: List<Int>, faults: Boolean = false): Result {
-        val part = partNumber.filterNot { it.isWhitespace() }.uppercase()
-        val mapping = mappings.singleOrNull { it.owner == owner && it.parts.any { pattern ->
-            pattern == "*" || (pattern.endsWith("*") && part.isNotEmpty() && part.startsWith(pattern.dropLast(1))) || part == pattern
-        } } ?: error("Нет подтверждённого формата списка для этого ECU")
+        val mapping = mappingFor(owner, partNumber) ?: error("Нет подтверждённого формата списка для этого ECU")
         val body = VagOemReadOnly.positive(reply, 0x22)
         require(body.take(2) == listOf(0x2A, if (faults) 0x28 else 0x26)) { "Не совпал DID списка" }
         val data = body.drop(2)

@@ -59,9 +59,10 @@ object VagOemReadOnly {
     ).associateBy { it.id }
     val routes = initialRoutes + VagOemRouteCatalog.routes.filterNot { it.id in initialRoutes }.associateBy { it.id }
     val gateway get() = routes.getValue(0x19)
-    data class Installed(val id: Int, val rawStatus: Int, val hasFaultFlag: Boolean,
+    data class Installed(val id: Int, val rawStatus: Int?, val hasFaultFlag: Boolean,
         val tpDestination: Int? = null, val extraStatus: Int? = null,
-        val observations: List<List<Int>> = emptyList(), val routeConflict: Boolean = false)
+        val observations: List<List<Int>> = emptyList(), val routeConflict: Boolean = false,
+        val mappedRoute: Route? = null)
     data class Faults(val values: List<Dtc>, val service: String)
 
     fun bytes(hex: String): List<Int> {

@@ -310,13 +310,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         // Only a structurally validated VIN contributes the
                         // two-character chassis marker. Full VIN is display-only;
                         // never copy it to summary events or saved scan results.
-                        // Unknown platforms do not trigger TP2.0 CAN traffic.
+                        // Other recognized VAG chassis require a genuine list;
+                        // they never inherit the legacy candidate queue.
                         val tp20Profile = confirmedPhysicalEcu?.let { ecu ->
-                            VagTp20Gateway.knownCandidate(
-                                vinResponse?.let {
-                                    VagTp20Gateway.chassisFromVerifiedMode09(it, ecu)
-                                }
-                            )
+                            vinResponse?.let { VagTp20Gateway.profileFromVerifiedMode09(it, ecu, supported.responders) }
                         }
                         if (confirmedPhysicalEcu != null &&
                             session.current.protocol in setOf("6", "A6")
