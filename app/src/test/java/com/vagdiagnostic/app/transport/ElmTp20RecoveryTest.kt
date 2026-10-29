@@ -28,7 +28,7 @@ class ElmTp20RecoveryTest {
                 c == "09C000100003011" -> "20900D00003A80701"
                 c == "A00194FF82FF" -> setup + "300A10F8AFF4AFF"
                 c == "1000021089" -> "300B1\r3001000025089"
-                c == "1100041802FF00" -> if (tail.startsWith("pending"))
+                c == "1100041802FF00" -> if (tail == "unacked") "NO DATA" else if (tail.startsWith("pending"))
                     "300B2\r3001100037F" + (if (tail == "pending-wrong") "1A" else "18") + "78" +
                     (if (tail == "pending-coalesced") "\r3001200025800" else "") else "300B2"
                 c == "A3" -> {
@@ -42,10 +42,13 @@ class ElmTp20RecoveryTest {
                         polls == 2 -> "NO DATA"
                         tail == "pending" -> "3001200025800"
                         tail == "reply" -> "3001100025800"
-                        else -> "300A10F8AFF4AFF"
+                        else -> if (tail == "changed-params") "300A10194FF82FF" else "300A10F8AFF4AFF"
                     }
                 }
-                (c.startsWith("B") && c.length == 3) || c == "A80" -> ""
+                c.startsWith("B") && c.length == 2 ->
+                    if (tail == "pending-on-ack" && c == "B2") "3001200025800" else ""
+                (c.startsWith("B") && c.length == 3) || c == "A80" ->
+                    if (c == "A80" && tail == "late-on-close") "3001100025800" else ""
                 else -> error("Unexpected command $c")
             }
             for (b in (raw + ">").toByteArray(Charsets.US_ASCII)) this.bytes.add(b.toInt() and 255)
@@ -79,9 +82,28 @@ class ElmTp20RecoveryTest {
         val link = Link(tail = "missing")
         val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
         channel.open(9); channel.request("1089")
-        assertTrue(runCatching { channel.request("1802FF00") }.exceptionOrNull() is IOException)
+        assertTrue(runCatching { channel.request("1802FF00") }.exceptionOrNull() is ElmTp20Channel.NoApplicationResponse)
         assertEquals(8, link.polls)
         assertEquals(1, link.sent.count { it == "1100041802FF00" })
+        channel.close()
+        assertEquals("A80", link.sent.last())
+    }
+    @Test fun missingAckOrChangedPeerParametersCannotBeResetAsHealthySilence() = runBlocking {
+        for (tail in listOf("unacked", "changed-params")) {
+            val link = Link(tail = tail)
+            val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
+            channel.open(9); channel.request("1089")
+            assertTrue(runCatching { channel.request("1802FF00") }.exceptionOrNull() is IOException)
+            assertFalse(link.sent.contains("A80"))
+        }
+    }
+    @Test fun lateDataDuringChannelTerminationPreventsStartingAnotherTransaction() = runBlocking {
+        val link = Link(tail = "late-on-close")
+        val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
+        channel.open(9); channel.request("1089")
+        assertTrue(runCatching { channel.request("1802FF00") }.exceptionOrNull() is ElmTp20Channel.NoApplicationResponse)
+        assertTrue(runCatching { channel.close() }.exceptionOrNull() is IOException)
+        assertEquals("A80", link.sent.last())
     }
     @Test fun brokenStreamCancellationAndForeignIdStopImmediately() = runBlocking {
         for (tail in listOf("io", "cancel", "foreign")) {
@@ -99,15 +121,16 @@ class ElmTp20RecoveryTest {
         }
     }
     @Test fun pendingKeepsSessionUntilFinalWithoutResendingDiagnosticRequest() = runBlocking {
-        for (tail in listOf("pending", "pending-coalesced")) {
+        for (tail in listOf("pending", "pending-coalesced", "pending-on-ack")) {
         val link = Link(tail = tail)
         val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
         channel.open(9); channel.request("1089")
         assertEquals(listOf(0x58, 0), channel.request("1802FF00"))
         assertEquals(1, link.sent.count { it.endsWith("1802FF00") })
-        assertTrue(link.sent.contains("B20"))
+        assertTrue(link.sent.contains("B2"))
         assertTrue(link.sent.contains("B30"))
         assertFalse(link.sent.contains("A80"))
+        if (tail == "pending-on-ack") assertEquals(0, link.polls)
         }
     }
     @Test fun mismatchedOrExcessPendingAbortsAsUnfinishedTransaction() = runBlocking {

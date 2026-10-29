@@ -26,7 +26,11 @@ class ElmTp20MessagesTest {
                 command == "1000021089" -> "300B1\r3001000025089"
                 dtc && command == "1100041802FF00" -> "300B2\r3001180055801051924"
                 command == "1100032204A1" || command == "1100041802FF00" ->
-                    "300B2\r3002180076204A1191F\r300120100"
+                    "300B2\r300218007" + (when (tail) {
+                        "wrong-sid" -> "5804A1"
+                        "wrong-did" -> "6204A2"
+                        else -> "6204A1"
+                    }) + "191F\r300120100"
                 tail == "many" && command.matches(Regex("B[0-9A-F]")) ->
                     "300%02X80056201010100".format(0x10 or command[1].digitToInt(16))
                 dtc && command == "B2" -> when (tail) {
@@ -41,6 +45,10 @@ class ElmTp20MessagesTest {
                     else -> "3001300056201010100"
                 }
                 command == "A3" -> "300A10F94FF82FF"
+                command == "B40" && tail == "extra-on-quiet" -> "30014000162"
+                command == "B40" && tail == "keepalive-on-quiet" -> "300A3"
+                command == "B40" && tail == "closed-on-quiet" -> "300A8"
+                command == "A10194FF82FF" -> ""
                 command == "A80" || command.matches(Regex("B[0-9A-F]0")) -> ""
                 else -> error("Unexpected $command")
             }
@@ -60,7 +68,7 @@ class ElmTp20MessagesTest {
         assertEquals(0, link.sent.count { it == "A3" })
     }
     @Test fun missingOrCorruptContinuationStopsWithoutClosingOrResending() = runBlocking {
-        for (tail in listOf("missing", "foreign", "sequence", "unadvertised", "many")) {
+        for (tail in listOf("missing", "foreign", "sequence", "unadvertised", "many", "wrong-sid", "wrong-did", "extra-on-quiet")) {
             val link = Link(tail)
             val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
             channel.open(0x1F); channel.request("1089")
@@ -68,6 +76,21 @@ class ElmTp20MessagesTest {
             assertTrue("$tail: $failure", failure is IOException)
             assertEquals(1, link.sent.count { it == "1100032204A1" })
             assertFalse(link.sent.contains("A80"))
+        }
+    }
+    @Test fun finalAckKeepsControlPacketsAndPeerCloseDoesNotDiscardCompleteReply() = runBlocking {
+        for (tail in listOf("keepalive-on-quiet", "closed-on-quiet")) {
+            val link = Link(tail)
+            val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
+            channel.open(0x1F); channel.request("1089")
+            val messages = channel.requestMessages("2204A1")
+            assertEquals(listOf(0x19, 1), Wire.installed04A1Messages(messages).map { it.id })
+            if (tail == "keepalive-on-quiet") assertEquals("A10194FF82FF", link.sent.last())
+            else {
+                val count = link.sent.size
+                channel.close()
+                assertEquals(count, link.sent.size)
+            }
         }
     }
     @Test fun singleDtcRequestNeverAcceptsAdvertisedMultiReply() = runBlocking {

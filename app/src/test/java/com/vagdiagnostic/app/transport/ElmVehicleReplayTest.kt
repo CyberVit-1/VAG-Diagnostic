@@ -52,7 +52,10 @@ class ElmVehicleReplayTest {
         val link = Replay(fixture)
         val engine = ElmEngine(link, { _, _, _, _ -> })
         val units = linkedMapOf<String, ControlUnit>()
-        val outcome = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> }, readGatewayIdentity = metadata)
+        // Additional identity/presence procedure has no recorded vehicle exchange.
+        // Its production-enabled path is verified separately with scripted traffic.
+        val outcome = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+            readGatewayIdentity = metadata, discoverAdditionalUnits = false)
         assertTrue(outcome.note, outcome.listConfirmed)
         assertEquals(18, units.size)
         assertEquals(15, units.values.count { it.state == ReadState.COMPLETE })

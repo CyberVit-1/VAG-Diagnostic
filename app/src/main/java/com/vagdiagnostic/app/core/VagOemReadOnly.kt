@@ -64,6 +64,8 @@ object VagOemReadOnly {
         val observations: List<List<Int>> = emptyList(), val routeConflict: Boolean = false,
         val mappedRoute: Route? = null)
     data class Faults(val values: List<Dtc>, val service: String)
+    class ServiceRejected(val service: Int, val nrc: Int) :
+        IllegalStateException("Сервис %02X: NRC %02X".format(service, nrc))
 
     fun bytes(hex: String): List<Int> {
         require(hex.length % 2 == 0 && hex.all { it in "0123456789abcdefABCDEF" }) { "Неверный HEX" }
@@ -73,7 +75,7 @@ object VagOemReadOnly {
     fun positive(reply: List<Int>, service: Int): List<Int> {
         if (reply.size == 3 && reply[0] == 0x7F) {
             require(reply[1] == service) { "Отказ другому сервису" }
-            error("Сервис %02X: NRC %02X".format(service, reply[2]))
+            throw ServiceRejected(service, reply[2])
         }
         require(reply.isNotEmpty() && reply[0] == service + 0x40) { "Нет положительного ответа %02X".format(service) }
         return reply.drop(1)
@@ -168,10 +170,13 @@ object VagOemReadOnly {
         }
         return Faults(values, if (powertrain) "1800FF00" else "1802FF00")
     }
-    fun udsFaults(reply: List<Int>): Faults = when (val result = VagUdsReadOnly.decodeDtcByStatusMask("OEM", reply.map { it.toByte() }.toByteArray())) {
+    fun udsFaults(reply: List<Int>): Faults {
+        positive(reply, 0x19)
+        return when (val result = VagUdsReadOnly.decodeDtcByStatusMask("OEM", reply.map { it.toByte() }.toByteArray())) {
         is VagUdsReadOnly.DtcReply.Positive -> Faults(result.faults.map {
             Dtc(it.raw24, it.raw24, DtcKind.OEM, statusText = it.statusDescription())
         }, "19028D")
         else -> error("Неподтверждённый ответ UDS DTC: $result")
+        }
     }
 }

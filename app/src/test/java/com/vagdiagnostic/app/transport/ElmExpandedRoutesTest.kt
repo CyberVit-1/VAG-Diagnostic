@@ -60,7 +60,7 @@ class ElmExpandedRoutesTest {
                 cmd.endsWith("C000100003011") -> {
                     destination = cmd.take(2).toInt(16)
                     sequence = 0
-                    if (destination in setOf(0x21, 5, 7, 0x2A, 0x2C)) "NO DATA"
+                    if (destination in setOf(0x21, 5, 7, 0x2A, 0x2C, 0x33)) "NO DATA"
                     else "%03X00D00003000701".format(0x200 or destination)
                 }
                 cmd == "A00194FF82FF" -> "300A10F94FF82FF"
@@ -83,6 +83,7 @@ class ElmExpandedRoutesTest {
                 cmd.startsWith("1") -> {
                     val payload = when (val request = cmd.drop(6)) {
                         "1089" -> "5089"
+                        "1A9B" -> "7F1A31"
                         "1A9F" -> if (lostListReply) "NO DATA" else "7F1A11"
                         "2204A1" -> if (missingList) "7F2231" else list()
                         "1800FF00" -> "5800"
