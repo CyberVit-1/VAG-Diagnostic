@@ -49,8 +49,33 @@ class VagOemReadOnlyTest {
         assertEquals("P0299", dtc.code)
         assertEquals(DtcKind.OEM, dtc.kind)
         assertTrue(dtc.statusText!!.contains("08"))
-        for (bad in listOf("", "5801", "58011234", "7F1812", "7F1878"))
+        for (bad in listOf("", "5801", "580112", "7F1812", "7F1878"))
             assertTrue(bad, runCatching { VagOemReadOnly.kwpFaults(VagOemReadOnly.bytes(bad), true) }.isFailure)
+    }
+    @Test fun legacyInstallationLengthAppliesAcrossApplicationMessages() {
+        val replies = listOf("5A9F090100", "5A000119000005").map(VagOemReadOnly::bytes)
+        assertEquals(listOf(1, 0x19), VagOemReadOnly.installedKwpMessages(replies).map { it.id })
+        for (last in listOf("5A0001190000", "5A00011900000500", "7F1A11", "5A")) {
+            assertTrue(last, runCatching {
+                VagOemReadOnly.installedKwpMessages(listOf(replies.first(), VagOemReadOnly.bytes(last)))
+            }.isFailure)
+        }
+    }
+    @Test fun kwpMessagesPreserveAllRecordsAndDifferentStatuses() {
+        val replies = listOf("5801051924", "5801051824FF", "58051924", "5801051908").map(VagOemReadOnly::bytes)
+        val result = VagOemReadOnly.kwpFaultMessages(replies, false)
+        assertEquals(listOf("01305", "01304", "01305"), result.values.map { it.code })
+        assertEquals(listOf("051924", "051824", "051908"), result.values.map { it.raw })
+        assertTrue(VagOemReadOnly.kwpFaultMessages(listOf(VagOemReadOnly.bytes("5800")), false).values.isEmpty())
+    }
+    @Test fun noValidPrefixCanHideAFailedOrIncompleteDtcMessage() {
+        val first = VagOemReadOnly.bytes("5801051924")
+        for (bad in listOf("58", "5802", "5802051824", "58010518247E", "7F1811", "7F1878")) {
+            assertTrue(bad, runCatching {
+                VagOemReadOnly.kwpFaultMessages(listOf(first, VagOemReadOnly.bytes(bad)), false)
+            }.isFailure)
+        }
+        assertTrue(runCatching { VagOemReadOnly.kwpFaultMessages(emptyList(), false) }.isFailure)
     }
     @Test fun udsRetains24BitCodeAndAvailableMask() {
         val dtc = VagOemReadOnly.udsFaults(VagOemReadOnly.bytes("59028D12345608")).values.single()

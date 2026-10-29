@@ -74,9 +74,9 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
     /** Only recovered read/session/identification requests; no arbitrary payload entry point. */
     suspend fun request(command: String): List<Int> = requestPackets(command, false).single()
 
-    /** Only list/identification services may advertise multiple application packets. */
+    /** Recovered list, identification and DTC services can advertise multiple packets. */
     suspend fun requestMessages(command: String): List<List<Int>> {
-        require(command in setOf("2204A1", "1A9B"))
+        require(command in setOf("1A9F", "2204A1", "1A9B", "1800FF00", "1802FF00"))
         return requestPackets(command, true)
     }
 

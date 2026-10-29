@@ -36,6 +36,9 @@ object ElmVagScan {
                 val session = channel.request("1089")
                 check(session.take(2) == listOf(0x50, 0x89)) { "Нет подтверждения KWP-сессии 1089" }
                 action(channel)
+            } catch (cancel: CancellationException) {
+                healthy = false
+                throw cancel
             } catch (failure: IOException) {
                 healthy = false
                 throw failure
@@ -56,9 +59,9 @@ object ElmVagScan {
             withTp(gateway) { channel ->
                 protocol = Protocol.TP20
                 event("VAG_GATEWAY_CONNECTED", "TP2.0 destination=1F; VAG=19; read session confirmed", "CONFIRMED")
-                val reply = channel.request("1A9F")
-                gatewayRejectsService1A = reply == listOf(0x7F, 0x1A, 0x11)
-                installed = VagOemReadOnly.installedKwp(reply)
+                val replies = channel.requestMessages("1A9F")
+                gatewayRejectsService1A = replies == listOf(listOf(0x7F, 0x1A, 0x11))
+                installed = VagOemReadOnly.installedKwpMessages(replies)
             }
         } catch (cancel: CancellationException) { throw cancel }
         catch (io: IOException) { throw io }
@@ -84,7 +87,8 @@ object ElmVagScan {
                     // Only the recovered legacy 04A1 format is enabled in this 1K
                     // profile; part-number-dependent MQB bitmaps are not guessed.
                     installed = VagOemReadOnly.installed04A1(channel.read("2204A1"))
-                } catch (io: IOException) { healthy = false; throw io }
+                } catch (cancel: CancellationException) { healthy = false; throw cancel }
+                catch (io: IOException) { healthy = false; throw io }
                 finally { if (healthy && currentCoroutineContext().isActive) channel.close() }
             } catch (cancel: CancellationException) { throw cancel }
             catch (io: IOException) { throw io }
@@ -119,7 +123,8 @@ object ElmVagScan {
                     try {
                         channel.open(gateway)
                         identity = VagEcuIdentification.udsPartNumber(channel.read("22F187"))
-                    } catch (io: IOException) { healthy = false; throw io }
+                    } catch (cancel: CancellationException) { healthy = false; throw cancel }
+                    catch (io: IOException) { healthy = false; throw io }
                     finally { if (healthy && currentCoroutineContext().isActive) channel.close() }
                 }
                 event("VAG_GATEWAY_IDENTITY", identity?.summary() ?: "Идентификация не поддержана или формат не распознан",
@@ -181,7 +186,8 @@ object ElmVagScan {
                     withTp(route) { channel ->
                         confirmedConnection()
                         val powertrain = id == 1 || id == 2
-                        result = VagOemReadOnly.kwpFaults(channel.request(if (powertrain) "1800FF00" else "1802FF00"), powertrain)
+                        result = VagOemReadOnly.kwpFaultMessages(
+                            channel.requestMessages(if (powertrain) "1800FF00" else "1802FF00"), powertrain)
                     }
                     return requireNotNull(result)
                 }
@@ -196,7 +202,7 @@ object ElmVagScan {
                             channel.open(path)
                             confirmedConnection()
                             return VagOemReadOnly.udsFaults(channel.read("19028D"))
-                        } catch (cancel: CancellationException) { throw cancel }
+                        } catch (cancel: CancellationException) { healthy = false; throw cancel }
                         catch (io: IOException) { healthy = false; throw io }
                         catch (failure: RuntimeException) {
                             lastFailure = failure

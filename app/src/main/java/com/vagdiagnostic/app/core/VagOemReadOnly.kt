@@ -78,10 +78,15 @@ object VagOemReadOnly {
     }
     /** Legacy installation list: 5A 9F, length including length byte,
      * four-byte records [VAG ID, reserved, reserved, status]. */
-    fun installedKwp(reply: List<Int>): List<Installed> {
-        val body = positive(reply, 0x1A)
+    fun installedKwp(reply: List<Int>): List<Installed> = installedKwpMessages(listOf(reply))
+
+    fun installedKwpMessages(replies: List<List<Int>>): List<Installed> {
+        require(replies.isNotEmpty()) { "Нет сообщений списка 1A9F" }
+        val body = positive(replies.first(), 0x1A)
         require(body.firstOrNull() == 0x9F) { "Нет echo 9F" }
-        val data = body.drop(1)
+        val data = body.drop(1) + replies.drop(1).flatMap {
+            positive(it, 0x1A).also { part -> require(part.isNotEmpty()) { "Пустое продолжение 1A9F" } }
+        }
         require(data.isNotEmpty() && data[0] == data.size && (data.size - 1) % 4 == 0) { "Неполный список 1A9F" }
         return installedRecords(data.drop(1), 3)
     }
@@ -127,10 +132,34 @@ object VagOemReadOnly {
         }
         return entries.values.toList()
     }
-    fun kwpFaults(reply: List<Int>, powertrain: Boolean): Faults {
-        val body = positive(reply, 0x18)
-        require(body.isNotEmpty() && body.size == 1 + body[0] * 3) { "Неполный список KWP DTC" }
-        val values = body.drop(1).chunked(3).map {
+    fun kwpFaults(reply: List<Int>, powertrain: Boolean): Faults =
+        kwpFaultMessages(listOf(reply), powertrain)
+
+    /** Each advertised application message is a complete service response.
+     * Accept counted, counted/padded and uncounted record layouts; never
+     * salvage a valid prefix from a malformed message or skip a failed one.
+     */
+    fun kwpFaultMessages(replies: List<List<Int>>, powertrain: Boolean): Faults {
+        require(replies.isNotEmpty()) { "Нет сообщений KWP DTC" }
+        val records = replies.flatMap { reply ->
+            val body = positive(reply, 0x18)
+            require(body.isNotEmpty()) { "Пустое сообщение KWP DTC" }
+            val data = when (body.size % 3) {
+                0 -> body
+                1 -> {
+                    require(body[0] == (body.size - 1) / 3) { "Неполный список KWP DTC" }
+                    body.drop(1)
+                }
+                else -> {
+                    require(body.last() in listOf(0, 0xFF) && body[0] == (body.size - 2) / 3) {
+                        "Неверная длина или заполнение KWP DTC"
+                    }
+                    body.drop(1).dropLast(1)
+                }
+            }
+            data.chunked(3)
+        }.distinct()
+        val values = records.map {
             val raw = hex(it)
             val code = if (powertrain) ObdDecoder.codeOf(it[0], it[1]) else "%05d".format((it[0] shl 8) or it[1])
             Dtc(raw, code, DtcKind.OEM, statusText = "KWP: статус 0x%02X (без предположений о значении битов)".format(it[2]))

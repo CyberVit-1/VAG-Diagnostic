@@ -8,7 +8,7 @@ import org.junit.Test
 
 /** Explicit synthetic multi-application TP packets, with continuous sequence. */
 class ElmTp20MessagesTest {
-    private class Link(val tail: String = "normal") : ElmLink {
+    private class Link(val tail: String = "normal", val dtc: Boolean = false) : ElmLink {
         override val label = "Synthetic multi-message stream"
         val sent = mutableListOf<String>()
         private val bytes = ArrayDeque<Int>()
@@ -24,10 +24,15 @@ class ElmTp20MessagesTest {
                 command == "1FC000100003011" -> "21F00D00003000701"
                 command == "A00194FF82FF" -> "300A10F94FF82FF"
                 command == "1000021089" -> "300B1\r3001000025089"
+                dtc && command == "1100041802FF00" -> "300B2\r3001180055801051924"
                 command == "1100032204A1" || command == "1100041802FF00" ->
                     "300B2\r3002180076204A1191F\r300120100"
                 tail == "many" && command.matches(Regex("B[0-9A-F]")) ->
                     "300%02X80056201010100".format(0x10 or command[1].digitToInt(16))
+                dtc && command == "B2" -> when (tail) {
+                    "badDtc" -> "300120003580205"
+                    else -> "3001200055801051824"
+                }
                 command == "B3" -> when (tail) {
                     "missing" -> "300A10F94FF82FF"
                     "foreign" -> "3011300056201010100"
@@ -71,6 +76,20 @@ class ElmTp20MessagesTest {
         channel.open(0x1F); channel.request("1089")
         assertTrue(runCatching { channel.request("1802FF00") }.exceptionOrNull() is IOException)
         assertFalse(link.sent.contains("B3"))
+    }
+    @Test fun dtcReadCollectsAllAdvertisedApplicationMessages() = runBlocking {
+        for (tail in listOf("normal", "badDtc")) {
+            val link = Link(tail, dtc = true)
+            val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
+            channel.open(0x1F); channel.request("1089")
+            val replies = channel.requestMessages("1802FF00")
+            val parsed = runCatching { Wire.kwpFaultMessages(replies, false) }
+            if (tail == "normal") assertEquals(listOf("01305", "01304"), parsed.getOrThrow().values.map { it.code })
+            else assertTrue(parsed.isFailure)
+            assertTrue(link.sent.contains("B2"))
+            assertEquals("B30", link.sent.last())
+            assertEquals(1, link.sent.count { it == "1100041802FF00" })
+        }
     }
 }
 

@@ -149,6 +149,26 @@ class ElmVagScanTest {
         assertEquals("1000021089", link.sent.last())
         assertFalse(link.sent.contains("ATSH710"))
     }
+    @Test fun explicitCancellationFromCheckpointStopsBothProtocolsImmediately() = runBlocking {
+        for (uds in listOf(false, true)) {
+            val tpLink = Link()
+            val udsLink = UdsLink()
+            val engine = ElmEngine(if (uds) udsLink else tpLink, { _, _, _, _ -> })
+            engine.connect()
+            var commandsAtCancel: List<String>? = null
+            val failure = runCatching {
+                ElmVagScan.scan(engine, { unit ->
+                    if (unit.source == "RESPONSE") {
+                        commandsAtCancel = (if (uds) udsLink.sent else tpLink.sent).toList()
+                        throw CancellationException("Checkpoint cancelled scan")
+                    }
+                }, { _, _, _ -> })
+            }.exceptionOrNull()
+            assertTrue(failure.toString(), failure is CancellationException)
+            assertNotNull(commandsAtCancel)
+            assertEquals(commandsAtCancel, if (uds) udsLink.sent else tpLink.sent)
+        }
+    }
     @Test fun slowPersistenceCannotDelayTpAcknowledgmentsAndJournalIsFlushed() = runBlocking {
         var now = 0L
         val link = Link(clock = { now })
