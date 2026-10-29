@@ -59,6 +59,7 @@ data class DashboardState(
     val carConnected: Boolean = false,
     val protocol: String = "Не определён",
     val adapterName: String = "—",
+    val vehicleVin: String? = null,
     val error: String = "",
     val scanWarning: String = "",
     val isoTpReadiness: String = "",
@@ -193,6 +194,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 else db.scans().update(record)
             }
             _state.value = _state.value.copy(isScanning = true, isBusy = true, units = emptyList(),
+                vehicleVin = null,
                 current = "Обнаружение ответчиков OBD-II", error = "", scanWarning = "", isoTpReadiness = "",
                 completedModes = 0, lastScanInterrupted = false)
             val units = linkedMapOf<String, ControlUnit>()
@@ -281,6 +283,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         val check = if (supported.responders.isNotEmpty()) {
                             val frames = ElmFrames.parse("0902", readOnlyCommand("0902", 13500))
                             vinResponse = frames
+                            _state.value = _state.value.copy(vehicleVin = ObdMode09Readiness.vinForDisplay(frames, supported.responders))
                             ObdMode09Readiness.assessVin(frames, supported.responders)
                         } else null
                         val resultText = if (check == null) {
@@ -305,7 +308,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                 id in session.current.observedCanResponderIds
                         }
                         // Only a structurally validated VIN contributes the
-                        // two-character chassis marker; never log/persist VIN.
+                        // two-character chassis marker. Full VIN is display-only;
+                        // never copy it to summary events or saved scan results.
                         // Unknown platforms do not trigger TP2.0 CAN traffic.
                         val tp20Profile = confirmedPhysicalEcu?.let { ecu ->
                             VagTp20Gateway.knownCandidate(
@@ -510,7 +514,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val content = StringBuilder("VAG Diagnostic ${BuildConfig.VERSION_NAME} / Сырой журнал (VIN замаскирован)\n")
         val entries = db.journal().latest(10000).reversed()
         entries.forEach { e ->
-            content.append("${e.timestamp} | ${e.connection} | ${e.command} | ${e.elapsedMs}ms | ${e.outcome}\n")
+            content.append(DiagnosticLogRedactor.redact("${e.timestamp} | ${e.connection} | ${e.command} | ${e.elapsedMs}ms | ${e.outcome}")).append("\n")
             content.append(DiagnosticLogRedactor.redact(e.raw, e.command)).append("\n")
         }
         if (entries.size == 10000) content.append("\nДостигнут предел экспорта 10000 записей\n")

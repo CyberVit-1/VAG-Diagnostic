@@ -37,4 +37,14 @@ class DiagnosticLogRedactorTest {
         val summary = "Mode 09: verified ECUs=1; no VIN displayed"
         assertEquals(summary, DiagnosticLogRedactor.redact(summary, "OBD09_ISOTP_READINESS"))
     }
+    @Test fun displayValueAndItsHexPayloadNeverReachExport() {
+        // Synthetic example, independent of all recorded vehicle journals.
+        val value = "123456789ABCDEFGH"
+        val hex = value.map { "%02X".format(it.code) }.joinToString("")
+        val text = DiagnosticLogRedactor.redact("VIN: $value") + "\n" +
+            DiagnosticLogRedactor.redact("490201$hex", "0902")
+        assertFalse(text.contains(value))
+        assertFalse(text.contains(hex))
+        assertFalse(text.contains("490201"))
+    }
 }

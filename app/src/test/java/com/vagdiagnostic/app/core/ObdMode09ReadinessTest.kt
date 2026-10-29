@@ -3,6 +3,7 @@ package com.vagdiagnostic.app.core
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ObdMode09ReadinessTest {
@@ -59,5 +60,28 @@ class ObdMode09ReadinessTest {
     @Test fun doesNotRequireAllObdEcusToSupportVin() {
         val frames = ElmFrames.parse("0900", "7E806490040000000\r7E906490000000000\r>")
         assertEquals(setOf("7E8"), ObdMode09Readiness.supportedVinEcus(frames, ecus).responders)
+    }
+    private fun syntheticReply(value: String, ecu: String = "7E8"): String {
+        val payload = listOf(0x49, 2, 1) + value.map { it.code }
+        val hex = payload.joinToString("") { "%02X".format(it) }
+        return ecu + "10%02X".format(payload.size) + hex.take(12) + "\r" +
+            hex.drop(12).chunked(14).mapIndexed { index, chunk -> ecu + "2%X".format(index + 1) + chunk }.joinToString("\r")
+    }
+    @Test fun localDisplayReturnsOnlyAValidatedConsistentVin() {
+        // Deliberately synthetic identifier; never substitute recorded vehicle data.
+        val value = "123456789ABCDEFGH"
+        val frames = ElmFrames.parse("0902", syntheticReply(value) + "\r" + syntheticReply(value, "7E9"))
+        assertEquals(value, ObdMode09Readiness.vinForDisplay(frames, ecus))
+        assertFalse(ObdMode09Readiness.assessVin(frames, ecus).journalSummary().contains(value))
+        val conflicting = ElmFrames.parse("0902", syntheticReply(value) + "\r" + syntheticReply("223456789ABCDEFGH", "7E9"))
+        assertNull(ObdMode09Readiness.vinForDisplay(conflicting, ecus))
+        assertNull(ObdMode09Readiness.vinForDisplay(frames, emptySet()))
+    }
+    @Test fun invalidAndPartialVinValuesNeverReachDisplay() {
+        for (value in listOf("123456789ABCDEFGI", "123456789ABCDEFGO", "123456789ABCDEFGQ", "123456789ABCDEFG")) {
+            val frames = ElmFrames.parse("0902", syntheticReply(value))
+            assertNull(ObdMode09Readiness.vinForDisplay(frames, setOf("7E8")))
+        }
+        assertNull(ObdMode09Readiness.vinForDisplay(ElmFrames.parse("0902", "NO DATA"), setOf("7E8")))
     }
 }

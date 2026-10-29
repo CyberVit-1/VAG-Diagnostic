@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -37,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.Role
@@ -144,6 +146,16 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
 
 @Composable private fun Home(status: DashboardState, navigate: (Int) -> Unit, start: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("VIN автомобиля", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                val vin = status.vehicleVin
+                if (vin != null) SelectionContainer {
+                    Text(vin, style = MaterialTheme.typography.bodyLarge, fontFamily = FontFamily.Monospace)
+                } else Text("VIN появится после подтверждённого ответа при диагностике.", style = MaterialTheme.typography.bodySmall)
+                Text("В экспортируемом журнале VIN скрыт.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
             Column(Modifier.fillMaxWidth().padding(22.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Text("Диагностика без догадок", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
@@ -191,6 +203,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 Text("Адаптер: ${if (status.adapterConnected) "Подключён" else "Нет соединения"}")
                 Text("Автомобиль: ${if (status.carConnected) "OBD-II связь подтверждена" else "Не подтверждена"}")
                 Text("Протокол: ${ElmProtocolDescription.describe(status.protocol)}")
+                status.vehicleVin?.let { vin -> SelectionContainer { Text("VIN: $vin") } }
             }
         }
         Text("Тип адаптера", fontWeight = FontWeight.SemiBold)

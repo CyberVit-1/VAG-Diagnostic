@@ -3,7 +3,8 @@ package com.vagdiagnostic.app.core
 /**
  * Legislated read-only OBD-II Mode 09 capability check, transport independent.
  * This does NOT infer any VAG Gateway route or prove addressed ISO-TP.
- * VIN characters never leave this decoder; only structural evidence is returned.
+ * Structural summaries contain no VIN. A separate validated accessor is used
+ * only for the local vehicle display, never for journal summaries or exports.
  */
 object ObdMode09Readiness {
     data class Support(val responders: Set<String>, val issues: List<String>)
@@ -39,7 +40,7 @@ object ObdMode09Readiness {
         fun journalSummary(): String =
             "Mode09 PID02 structurally verified: ${verified.size}/${supported.size}; " +
                 "verified ECU IDs: ${verified.sorted().joinToString(",")}; " +
-                "issues: ${issues.joinToString(" | ").ifBlank { "none" }}; VIN not displayed"
+                "issues: ${issues.joinToString(" | ").ifBlank { "none" }}; VIN omitted from summary"
     }
 
     fun assessVin(frames: FrameParse, supportedEcus: Set<String>): Check {
@@ -58,7 +59,7 @@ object ObdMode09Readiness {
             // CAN OBD-II Mode09 02: SID 49, PID 02, frame number 01,
             // followed by exactly seventeen VIN ASCII symbols.
             if (data.size != 20 || data[1] != 0x02 || data[2] != 0x01 ||
-                !data.drop(3).all { it in 0x30..0x39 || it in 0x41..0x5A }
+                !data.drop(3).all { it in 0x30..0x39 || (it in 0x41..0x5A && it !in listOf(0x49, 0x4F, 0x51)) }
             ) {
                 issues += "Mode09: неполный либо недостоверный ответ VIN от $ecu"
             } else verified += ecu
@@ -68,5 +69,16 @@ object ObdMode09Readiness {
                 issues += "Mode09: ECU $ecu не подтвердил полный ответ 0902"
         }
         return Check(supportedEcus, verified, issues)
+    }
+
+    /** Multiple responding ECUs must agree; partial, invalid or conflicting
+     * values are never substituted with a previous vehicle's identifier. */
+    fun vinForDisplay(frames: FrameParse, supportedEcus: Set<String>): String? {
+        val check = assessVin(frames, supportedEcus)
+        val values = check.verified.map { ecu ->
+            frames.messagesFor(0x49).getValue(ecu).single().drop(3)
+                .map { (it.toInt() and 255).toChar() }.joinToString("")
+        }.distinct()
+        return values.singleOrNull()
     }
 }

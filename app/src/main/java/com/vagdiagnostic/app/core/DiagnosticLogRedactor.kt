@@ -7,8 +7,8 @@ package com.vagdiagnostic.app.core
  * A 7-byte CAN response therefore often has 17 hex characters: such a frame
  * must not be replaced merely because it also matches the length of a VIN.
  *
- * This intentionally does NOT hide raw diagnostic CAN bytes, which may carry
- * sensitive payloads: always review a log before sharing it publicly.
+ * Ordinary CAN evidence is preserved. VIN-bearing requests hide the entire
+ * response, including all ISO-TP fragments and hex-encoded ASCII characters.
  */
 object DiagnosticLogRedactor {
     private val vinToken = Regex("\\b[A-HJ-NPR-Z0-9]{17}\\b", RegexOption.IGNORE_CASE)
