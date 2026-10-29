@@ -12,7 +12,8 @@ class VagOemReadOnlyTest {
     }
     @Test fun expandedRoutesAreClosedAndAddedOnlyForGatewayListedModules() {
         val expected = mapOf(0x04 to 0x13, 0x25 to 0x14, 0x62 to 0x24, 0x72 to 0x25, 0x56 to 0x52)
-        assertEquals(19, VagOemReadOnly.routes.size)
+        assertEquals(35, VagOemReadOnly.routes.size)
+        assertEquals(14, VagOemReadOnly.routes.values.count { !it.installedOnly })
         for ((id, tp) in expected) {
             assertEquals(tp, VagOemReadOnly.routes.getValue(id).tp)
             assertTrue(VagOemReadOnly.routes.getValue(id).installedOnly)

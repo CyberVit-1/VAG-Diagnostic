@@ -25,6 +25,7 @@ object ElmVagScan {
     ): Outcome {
         var protocol: Protocol? = null
         var installed: List<VagOemReadOnly.Installed>? = null
+        var gatewayRejectsService1A = false
         val issues = mutableListOf<String>()
         val gateway = VagOemReadOnly.gateway
         suspend fun withTp(route: VagOemReadOnly.Route, action: suspend (ElmTp20Channel) -> Unit) {
@@ -56,6 +57,7 @@ object ElmVagScan {
                 protocol = Protocol.TP20
                 event("VAG_GATEWAY_CONNECTED", "TP2.0 destination=1F; VAG=19; read session confirmed", "CONFIRMED")
                 val reply = channel.request("1A9F")
+                gatewayRejectsService1A = reply == listOf(0x7F, 0x1A, 0x11)
                 installed = VagOemReadOnly.installedKwp(reply)
             }
         } catch (cancel: CancellationException) { throw cancel }
@@ -66,7 +68,7 @@ object ElmVagScan {
         // A live TP2.0 gateway may expose the UDS-style 04A1 list over that same
         // transport. Do not mistake a service ID for a transport or VAG address.
         if (protocol == Protocol.TP20 && installed == null) {
-            try { withTp(gateway) { installed = VagOemReadOnly.installed04A1(it.request("2204A1")) } }
+            try { withTp(gateway) { installed = VagOemReadOnly.installed04A1Messages(it.requestMessages("2204A1")) } }
             catch (cancel: CancellationException) { throw cancel }
             catch (io: IOException) { throw io }
             catch (failure: RuntimeException) { issues += "Список 04A1/TP2.0: ${failure.message}" }
@@ -100,7 +102,17 @@ object ElmVagScan {
             event("VAG_GATEWAY_IDENTITY_BEGIN", "Чтение номера Gateway", "READING")
             try {
                 if (protocol == Protocol.TP20) {
-                    withTp(gateway) { identity = VagEcuIdentification.kwp(it.request("1A9B")) }
+                    withTp(gateway) { channel ->
+                        if (gatewayRejectsService1A) {
+                            identity = VagEcuIdentification.udsPartNumber(channel.request("22F187"))
+                        } else {
+                            val replies = channel.requestMessages("1A9B")
+                            identity = VagEcuIdentification.kwp(replies.first())
+                            if (replies.size == 1 && replies.first() in listOf(
+                                    listOf(0x7F, 0x1A, 0x11), listOf(0x7F, 0x1A, 0x12), listOf(0x7F, 0x1A, 0x31)))
+                                identity = VagEcuIdentification.udsPartNumber(channel.request("22F187"))
+                        }
+                    }
                 } else {
                     val channel = Uds(engine)
                     var healthy = true
@@ -144,7 +156,14 @@ object ElmVagScan {
                 onUnit(unit.copy(state = ReadState.NOT_QUERIED, note = "Gateway сообщил блок, но проверенного маршрута в профиле нет"))
                 continue
             }
-            val advertisedTp = installed?.firstOrNull { it.id == id }?.tpDestination
+            val listEntry = installed?.firstOrNull { it.id == id }
+            if (listEntry?.routeConflict == true) {
+                failed = true
+                onUnit(unit.copy(note = "Gateway сообщил конфликтующие маршруты; опрос пропущен"))
+                event("VAG_ROUTE_CONFLICT", route.key, "UNSUPPORTED")
+                continue
+            }
+            val advertisedTp = listEntry?.tpDestination
             if (advertisedTp != null && route.tp != null && advertisedTp != route.tp) {
                 failed = true
                 val note = "Адрес из списка Gateway не совпал с известным маршрутом; опрос пропущен"

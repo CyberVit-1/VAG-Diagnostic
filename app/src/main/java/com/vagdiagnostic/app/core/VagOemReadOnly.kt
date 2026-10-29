@@ -37,11 +37,30 @@ object VagOemReadOnly {
         Route(0x25, "Иммобилайзер", 0x14, 0x711, installedOnly = true),
         Route(0x62, "Задняя левая дверь", 0x24, null, installedOnly = true),
         Route(0x72, "Задняя правая дверь", 0x25, null, installedOnly = true),
-        Route(0x56, "Магнитола", 0x52, 0x718, installedOnly = true)
+        Route(0x56, "Магнитола", 0x52, 0x718, installedOnly = true),
+        // Fixed routes are eligible only when the Gateway reports the display ID.
+        // A TP destination disagreement still prevents polling this route.
+        Route(0x18, "Дополнительный отопитель", 0x2F, 0x76A, installedOnly = true),
+        Route(0x22, "Полный привод", 0x0A, 0x70F, installedOnly = true),
+        Route(0x28, "Задняя климатическая установка", 0x45, 0x71A, installedOnly = true),
+        Route(0x34, "Регулирование дорожного просвета", 0x04, 0x755, installedOnly = true),
+        Route(0x36, "Сиденье водителя", 0x26, 0x74C, installedOnly = true),
+        Route(0x37, "Навигация", 0x5B, 0x76C, installedOnly = true),
+        Route(0x3C, "Контроль смены полосы", 0x1C, 0x74E, installedOnly = true),
+        Route(0x47, "Аудиосистема", 0x53, 0x76F, installedOnly = true),
+        Route(0x55, "Корректор фар", 0x06, 0x754, installedOnly = true),
+        Route(0x57, "Телевизионный тюнер", 0x57, 0x76D, installedOnly = true),
+        Route(0x5F, "Информационная электроника", 0x4D, 0x773, installedOnly = true),
+        Route(0x65, "Контроль давления в шинах", 0x29, 0x70B, installedOnly = true),
+        Route(0x69, "Прицеп", 0x43, 0x747, installedOnly = true),
+        Route(0x6D, "Электроника багажника", 0x34, 0x723, installedOnly = true),
+        Route(0x75, "Телематика", 0x55, 0x767, installedOnly = true),
+        Route(0x77, "Телефон", 0x5A, 0x76B, installedOnly = true)
     ).associateBy { it.id }
     val gateway get() = routes.getValue(0x19)
     data class Installed(val id: Int, val rawStatus: Int, val hasFaultFlag: Boolean,
-        val tpDestination: Int? = null, val extraStatus: Int? = null)
+        val tpDestination: Int? = null, val extraStatus: Int? = null,
+        val observations: List<List<Int>> = emptyList(), val routeConflict: Boolean = false)
     data class Faults(val values: List<Dtc>, val service: String)
 
     fun bytes(hex: String): List<Int> {
@@ -77,13 +96,36 @@ object VagOemReadOnly {
         // Its flags offset differs from the legacy 1A9F layout.
         return installedRecords(body.drop(2), 2)
     }
-    private fun installedRecords(data: List<Int>, flagsIndex: Int): List<Installed> {
-        val entries = data.chunked(4).filter { it[flagsIndex] != 0 }.map {
-            Installed(it[0], it[flagsIndex], it[flagsIndex] and 4 != 0,
-                if (flagsIndex == 2) it[1] else null, if (flagsIndex == 2) it[3] else null)
+    /** First packet echoes the DID; subsequent packets contain SID + complete records. */
+    fun installed04A1Messages(replies: List<List<Int>>): List<Installed> {
+        require(replies.isNotEmpty()) { "Нет сообщений списка 04A1" }
+        val first = positive(replies.first(), 0x22)
+        require(first.take(2) == listOf(4, 0xA1)) { "Нет echo 04A1" }
+        val records = first.drop(2).toMutableList()
+        require(records.size % 4 == 0) { "Неполное первое сообщение 04A1" }
+        for (reply in replies.drop(1)) {
+            val body = positive(reply, 0x22)
+            require(body.isNotEmpty() && body.size % 4 == 0) { "Неполное продолжение 04A1" }
+            records += body
         }
-        require(entries.all { it.id in 1..255 } && entries.map { it.id }.distinct().size == entries.size) { "Неверные/повторные ID в списке" }
-        return entries
+        require(records.isNotEmpty()) { "Пустой список 04A1" }
+        return installedRecords(records, 2)
+    }
+    private fun installedRecords(data: List<Int>, flagsIndex: Int): List<Installed> {
+        val entries = linkedMapOf<Int, Installed>()
+        for (record in data.chunked(4).filter { it[flagsIndex] != 0 }) {
+            require(record[0] in 1..255) { "Неверный ID в списке" }
+            val id = record[0]
+            val previous = entries[id]
+            val destination = if (flagsIndex == 2) record[1] else null
+            entries[id] = Installed(id, previous?.rawStatus ?: record[flagsIndex],
+                previous?.hasFaultFlag == true || record[flagsIndex] and 4 != 0,
+                previous?.tpDestination ?: destination,
+                previous?.extraStatus ?: if (flagsIndex == 2) record[3] else null,
+                (previous?.observations ?: emptyList()) + listOf(record.toList()),
+                previous?.routeConflict == true || (previous != null && previous.tpDestination != destination))
+        }
+        return entries.values.toList()
     }
     fun kwpFaults(reply: List<Int>, powertrain: Boolean): Faults {
         val body = positive(reply, 0x18)

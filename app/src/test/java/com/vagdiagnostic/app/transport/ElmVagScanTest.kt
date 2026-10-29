@@ -51,7 +51,7 @@ class ElmVagScanTest {
         }
     }
     private class Link(val failRead: Boolean = false, val wrongSequence: Boolean = false, val keepalive: Boolean = false,
-        val longList: Boolean = false,
+        val longList: Boolean = false, val rejectService1A: Boolean = false,
         val clock: () -> Long = { 0L }, val identityReply: String = "7F1A11", val failIdentity: Boolean = false) : ElmLink {
         override val label = "Scripted ELM"
         val sent = mutableListOf<String>()
@@ -90,9 +90,10 @@ class ElmVagScanTest {
                     val request = cmd.drop(6)
                     val reply = when (request) {
                         "1089" -> "5089"
+                        "22F187" -> "7F2231"
                         "1A9B" -> if (failIdentity) throw IOException("identity stream lost") else identityReply
-                        "1A9F" -> if (longList) "7F1A11" else "5A9F090100000119000001"
-                        "2204A1" -> "6204A1" + (1..65).joinToString("") { "%02X%02X0100".format(it, it) }
+                        "1A9F" -> if (longList || rejectService1A) "7F1A11" else "5A9F090100000119000001"
+                        "2204A1" -> if (rejectService1A) "6204A1191F010001010100" else "6204A1" + (1..65).joinToString("") { "%02X%02X0100".format(it, it) }
                         "1800FF00" -> "5801029908"
                         "1802FF00" -> "5800"
                         else -> error("Unexpected service $request")
@@ -263,7 +264,7 @@ class ElmVagScanTest {
     }
     @Test fun gatewayIdentificationIsIndependentFromDtcAndList() = runBlocking {
         val reply = "5A9B" + ("1K0907530K  " + "0178").toByteArray().joinToString("") { "%02X".format(it) } + "00".repeat(10)
-        for (identity in listOf(reply, "7F1A11", "5A9B010203")) {
+        for (identity in listOf(reply, "7F1A11", "7F1A33", "5A9B010203")) {
             val link = Link(identityReply = identity)
             val engine = ElmEngine(link, { _, _, _, _ -> })
             engine.connect()
@@ -276,7 +277,19 @@ class ElmVagScanTest {
             val metadata = events.single { it.first == "VAG_GATEWAY_IDENTITY" }.second
             assertEquals(identity == reply, metadata.contains("1K0907530K"))
             if (identity == reply) assertTrue(outcome.note.contains("0178"))
+            assertEquals(identity == "7F1A11", link.sent.any { it.endsWith("22F187") })
         }
+    }
+    @Test fun gatewayServiceCapabilityIsIndependentOfItsTransport() = runBlocking {
+        val link = Link(rejectService1A = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val result = ElmVagScan.scan(engine, {}, { _, _, _ -> }, readGatewayIdentity = true)
+        assertTrue(result.note, result.listConfirmed)
+        assertEquals(ElmVagScan.Protocol.TP20, result.protocol)
+        assertTrue(link.sent.any { it.endsWith("22F187") })
+        assertFalse(link.sent.any { it.endsWith("1A9B") })
+        assertEquals(1, link.sent.count { it.endsWith("1A9F") })
     }
     @Test fun identityIoStopsWithoutSendingMoreCommandsOnBrokenStream() = runBlocking {
         val link = Link(failIdentity = true)

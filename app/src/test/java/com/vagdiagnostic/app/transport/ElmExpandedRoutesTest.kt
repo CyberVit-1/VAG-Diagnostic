@@ -10,7 +10,7 @@ import java.util.ArrayDeque
 /** Synthetic replies verify the routing contract, never physical compatibility. */
 class ElmExpandedRoutesTest {
     private class Link(val missingList: Boolean = false, val wrong29: Boolean = false,
-        val fail29: Boolean = false, val mismatchedList: Boolean = false) : ElmLink {
+        val fail29: Boolean = false, val mismatchedList: Boolean = false, val lostListReply: Boolean = false) : ElmLink {
         override val label = "Expanded-route fixture"
         val sent = mutableListOf<String>()
         val incoming = ArrayDeque<Int>()
@@ -78,8 +78,8 @@ class ElmExpandedRoutesTest {
                 cmd.startsWith("1") -> {
                     val payload = when (val request = cmd.drop(6)) {
                         "1089" -> "5089"
-                        "1A9F" -> if (missingList) "NO DATA" else "7F1A11"
-                        "2204A1" -> if (missingList) "NO DATA" else list()
+                        "1A9F" -> if (lostListReply) "NO DATA" else "7F1A11"
+                        "2204A1" -> if (missingList) "7F2231" else list()
                         "1800FF00" -> "5800"
                         "1802FF00" -> if (destination == 0x1F) "5802051924051824" else "5800"
                         else -> error(request)
@@ -120,6 +120,14 @@ class ElmExpandedRoutesTest {
         assertEquals(14, units.size)
         for (tp in listOf("13", "14", "24", "25", "52")) assertFalse(link.sent.contains(tp + "C000100003011"))
         assertFalse(link.sent.contains("ATSP7"))
+    }
+    @Test fun lostApplicationReplyDoesNotStartListFallbackOrCandidates() = runBlocking {
+        val link = Link(lostListReply = true)
+        val units = linkedMapOf<String, ControlUnit>()
+        assertTrue(runCatching { scan(link, units) }.exceptionOrNull() is IOException)
+        assertTrue(units.isEmpty())
+        assertTrue(link.sent.last().endsWith("1A9F"))
+        assertFalse(link.sent.any { it.endsWith("2204A1") || it == "A80" || it == "1003" })
     }
     @Test fun conflictingAdvertisedTpAddressIsNeitherGuessedNorUsed() = runBlocking {
         val link = Link(mismatchedList = true)

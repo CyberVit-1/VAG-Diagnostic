@@ -79,7 +79,7 @@ class ElmTp20RecoveryTest {
         val link = Link(tail = "missing")
         val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
         channel.open(9); channel.request("1089")
-        assertTrue(runCatching { channel.request("1802FF00") }.exceptionOrNull() is IllegalStateException)
+        assertTrue(runCatching { channel.request("1802FF00") }.exceptionOrNull() is IOException)
         assertEquals(8, link.polls)
         assertEquals(1, link.sent.count { it == "1100041802FF00" })
     }
@@ -92,7 +92,7 @@ class ElmTp20RecoveryTest {
             when (tail) {
                 "io" -> assertTrue(error is IOException)
                 "cancel" -> assertTrue(error is CancellationException)
-                else -> assertTrue(error is IllegalStateException)
+                else -> assertTrue(error is IOException)
             }
             assertEquals(1, link.polls)
             assertEquals("A3", link.sent.last())

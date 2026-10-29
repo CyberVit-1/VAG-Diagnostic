@@ -72,8 +72,16 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
     }
 
     /** Only recovered read/session/identification requests; no arbitrary payload entry point. */
-    suspend fun request(command: String): List<Int> {
-        require(command in setOf("1089", "1A9F", "2204A1", "1800FF00", "1802FF00", "19028D", "1A9B"))
+    suspend fun request(command: String): List<Int> = requestPackets(command, false).single()
+
+    /** Only list/identification services may advertise multiple application packets. */
+    suspend fun requestMessages(command: String): List<List<Int>> {
+        require(command in setOf("2204A1", "1A9B"))
+        return requestPackets(command, true)
+    }
+
+    private suspend fun requestPackets(command: String, allowMultiple: Boolean): List<List<Int>> {
+        require(command in setOf("1089", "1A9F", "2204A1", "1800FF00", "1802FF00", "19028D", "1A9B", "22F187"))
         check(active)
         coroutineContext.ensureActive()
         val bytes = Wire.bytes(command)
@@ -81,22 +89,27 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
         delay(gapMs)
         val sentSeq = sendSeq
         val wire = "%02X%04X".format(0x10 or sentSeq, bytes.size) + command
-        val queue = ArrayDeque(exchange(wire))
+        val queue = ArrayDeque<List<Int>>()
         sendSeq = (sendSeq + 1) and 15
         val result = mutableListOf<Int>()
         var expected = -1
+        var moreMessages = false
+        val messages = mutableListOf<List<Int>>()
+        var totalBytes = 0
+        var awaitingContinuation = false
         var acknowledged = false
         var polls = 0
         var lastDataNanos = clockNanos()
         var pendingReplies = 0
         var count = 0
         try {
+            queue.addAll(exchange(wire))
             while (true) {
                 coroutineContext.ensureActive()
-                if (pendingReplies > 0 && (clockNanos() - transactionStarted) / 1_000_000 >= 20000)
+                if ((pendingReplies > 0 || awaitingContinuation) && (clockNanos() - transactionStarted) / 1_000_000 >= 20000)
                     throw IOException("Не получен финальный TP2.0 ответ после ResponsePending за общий срок")
                 if (++count > 256) {
-                    if (pendingReplies > 0) throw IOException("Превышен предел кадров незавершённого TP2.0 ответа")
+                    if (pendingReplies > 0 || awaitingContinuation) throw IOException("Превышен предел кадров незавершённого TP2.0 ответа")
                     error("Слишком много кадров TP2.0")
                 }
                 if (queue.isEmpty()) {
@@ -107,7 +120,7 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
                     val maxIdleMs = if (pendingReplies > 0) 5250 else 1500
                     val waitAllowed = polls < maxPolls && (clockNanos() - lastDataNanos) / 1_000_000 < maxIdleMs
                     polls++
-                    if (!waitAllowed && pendingReplies > 0)
+                    if (!waitAllowed && (pendingReplies > 0 || awaitingContinuation))
                         throw IOException("Не получен финальный TP2.0 ответ после ResponsePending")
                     check(waitAllowed) {
                         "Неполный ответ TP2.0: получено ${result.size}, ожидается ${if (expected < 0) "начало ответа" else expected.toString()}"
@@ -135,8 +148,13 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
                         receiveSeq = (receiveSeq + 1) and 15
                         val data = if (expected < 0) {
                             check(frame.size >= 3) { "Нет длины TP2.0" }
-                            expected = (frame[1] shl 8) or frame[2]
-                            check(expected in 1..4096) { "Неверная длина TP2.0" }
+                            check(frame[1] and 0x70 == 0) { "Неизвестные флаги длины TP2.0" }
+                            moreMessages = frame[1] and 0x80 != 0
+                            // Reject before ACK: an unrequested multi-reply transaction
+                            // must not be mistaken for a complete single DTC reply.
+                            if (moreMessages && !allowMultiple) throw IOException("Неожиданный составной TP2.0 ответ")
+                            expected = ((frame[1] and 0x0F) shl 8) or frame[2]
+                            check(expected in 1..4095) { "Неверная длина TP2.0" }
                             frame.drop(3)
                         } else frame.drop(1)
                         check(result.size + data.size <= expected) { "Лишние данные TP2.0" }
@@ -147,7 +165,7 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
                         if (op == 0x00 || op == 0x10) {
                             delay(gapMs)
                             // Odd 0 is ELM expected-response limit, not a CAN data byte.
-                            if (last) quiet("%02X0".format(0xB0 or receiveSeq))
+                            if (last && !moreMessages) quiet("%02X0".format(0xB0 or receiveSeq))
                             else queue.addAll(exchange("%02X".format(0xB0 or receiveSeq)))
                         }
                         if (last) {
@@ -162,8 +180,20 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
                                 polls = 0
                                 continue
                             }
+                            totalBytes += result.size
+                            if (messages.size >= 16 || totalBytes > 16384)
+                                throw IOException("Превышен предел составного TP2.0 ответа")
+                            messages += result.toList()
+                            if (moreMessages) {
+                                if (messages.size == 16) throw IOException("Слишком много сообщений TP2.0")
+                                awaitingContinuation = true
+                                result.clear()
+                                expected = -1
+                                polls = 0
+                                continue
+                            }
                             check(queue.none { it.firstOrNull()?.and(0xF0) in listOf(0, 0x10, 0x20, 0x30) }) { "Неожиданный второй ответ TP2.0" }
-                            return result
+                            return messages
                         }
                     }
                     else -> error("Неожиданный кадр TP2.0: ${Wire.hex(frame)}")
@@ -172,8 +202,9 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (failure: RuntimeException) {
-            if (pendingReplies > 0) throw IOException("Повреждён незавершённый TP2.0 ответ после ResponsePending", failure)
-            throw failure
+            // A sent request with invalid/missing framing has no trustworthy
+            // transaction boundary. Do not close/reopen or try another protocol.
+            throw IOException("Неполный или повреждённый TP2.0 обмен", failure)
         }
     }
 
