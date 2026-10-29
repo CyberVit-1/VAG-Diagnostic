@@ -1,4 +1,16 @@
-# VAG Diagnostic 0.2.4 (raw CAN ELM protocol B для Gateway TP2.0)
+# VAG Diagnostic
+
+Текущая внутренняя версия: **0.3.5 / 21**, feature/initial-android-build, draft PR#1. [Android CI](https://github.com/CyberVit-1/VAG-Diagnostic/actions/runs/40860386707) успешна; подробности и ограничения — [RELEASE_035.md](RELEASE_035.md), [CONNECTION_COVERAGE.md](CONNECTION_COVERAGE.md).
+
+Последний физический результат0.3.4:18подтверждённых ID,15полных чтений. Полного охвата ещё нет. Цель — обнаружить установленные ECU и прочитать их DTC; неполный ответ не означает отсутствие неисправностей. Сейчас автомобильный тест не требуется: продолжается восстановление полного read-only механизма подключения и обнаружения.
+
+Актуальное продолжение: [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md), [CHECKPOINT_NEW_CHAT.md](CHECKPOINT_NEW_CHAT.md), обязательные правила [AGENTS.md](AGENTS.md). Постоянный package com.vagdiagnostic.app, Room v1; перед сменой подписи/переустановкой обязательно сохранить и проверить внешниеTXT. Они не являются полной копией историиRoom.
+
+## Архив этапов разработки
+
+Ниже сохранена историческая документация0.2.4 и ранних стадий; её версии, протоколB и прежние инструкции испытания не описывают текущий кандидат. При расхождениях использовать актуальные источники выше.
+
+### VAG Diagnostic 0.2.4 (raw CAN ELM protocol B для Gateway TP2.0)
 
 **Исходный Android-проект**, Kotlin + Compose + Material 3, read-only OBD-II. Это экспериментальная база для испытаний на автомобиле, а не готовая подтверждённая VAG Auto-Scan программа.
 
