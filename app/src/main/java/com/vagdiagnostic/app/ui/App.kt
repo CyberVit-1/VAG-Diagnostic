@@ -412,7 +412,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
             }
         }
         Text("Версия ${com.vagdiagnostic.app.BuildConfig.VERSION_NAME} · Только чтение", style = MaterialTheme.typography.bodyMedium)
-        Text("Через Wi-Fi в 0.3.1 подтверждены список Gateway и чтение DTC 12 блоков. Расширенные маршруты этой версии требуют испытания. Пока включён профиль VW 1K. Запись и сброс DTC отсутствуют. BLE: Nordic UART, аппаратно не проверен.",
+        Text("В испытании 0.3.3 через Wi-Fi прочитаны 15 из 18 блоков. Профили: Volkswagen 1K; Audi 8P, Škoda 1Z и SEAT 1P — программно проверены, на автомобиле ещё не испытаны. Идентификация Gateway этой версии требует проверки. Запись и сброс DTC отсутствуют. BLE: Nordic UART, аппаратно не проверен.",
             style = MaterialTheme.typography.bodySmall)
     }
 }

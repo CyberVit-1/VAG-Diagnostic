@@ -1,6 +1,8 @@
 package com.vagdiagnostic.app.transport
 
 import com.vagdiagnostic.app.core.VagOemReadOnly as Wire
+import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlin.coroutines.coroutineContext
@@ -9,7 +11,7 @@ import kotlin.coroutines.coroutineContext
  * Caller owns a disposable engine and always restores standard OBD afterwards.
  * No arbitrary CAN addresses, retransmission after transport failure or writes.
  */
-class ElmTp20Channel(private val engine: ElmEngine) {
+class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -> Long = System::nanoTime) {
     private var tx = 0
     private var rx = 0
     private var sendSeq = 0
@@ -75,6 +77,7 @@ class ElmTp20Channel(private val engine: ElmEngine) {
         check(active)
         coroutineContext.ensureActive()
         val bytes = Wire.bytes(command)
+        val transactionStarted = clockNanos()
         delay(gapMs)
         val sentSeq = sendSeq
         val wire = "%02X%04X".format(0x10 or sentSeq, bytes.size) + command
@@ -84,64 +87,96 @@ class ElmTp20Channel(private val engine: ElmEngine) {
         var expected = -1
         var acknowledged = false
         var polls = 0
-        var lastDataNanos = System.nanoTime()
+        var lastDataNanos = clockNanos()
+        var pendingReplies = 0
         var count = 0
-        while (true) {
-            coroutineContext.ensureActive()
-            check(++count <= 256) { "Слишком много кадров TP2.0" }
-            if (queue.isEmpty()) {
-                // A transport ACK is not the application reply. Allow a bounded
-                // receive period using channel keepalives, never retransmitting
-                // the diagnostic request. Individual command/IO timeouts still abort.
-                check(polls++ < 8 && (System.nanoTime() - lastDataNanos) / 1_000_000 < 1500) {
-                    "Неполный ответ TP2.0: получено ${result.size}, ожидается ${if (expected < 0) "начало ответа" else expected.toString()}"
+        try {
+            while (true) {
+                coroutineContext.ensureActive()
+                if (pendingReplies > 0 && (clockNanos() - transactionStarted) / 1_000_000 >= 20000)
+                    throw IOException("Не получен финальный TP2.0 ответ после ResponsePending за общий срок")
+                if (++count > 256) {
+                    if (pendingReplies > 0) throw IOException("Превышен предел кадров незавершённого TP2.0 ответа")
+                    error("Слишком много кадров TP2.0")
                 }
-                delay(gapMs)
-                queue.addAll(exchange("A3", allowEmpty = true))
-                continue
-            }
-            val frame = queue.removeFirst()
-            check(frame.isNotEmpty())
-            val op = frame[0] and 0xF0
-            when {
-                op == 0xB0 -> {
-                    check(frame.size == 1 && frame[0] and 15 == sendSeq) { "Неверный ACK TP2.0" }
-                    acknowledged = true
-                }
-                op == 0x90 -> error("Отрицательное подтверждение TP2.0; запрос не повторяется")
-                frame[0] == 0xA8 -> error("ECU закрыл канал TP2.0")
-                frame[0] == 0xA3 -> queue.addAll(exchange(Wire.hex(peerParameters), allowEmpty = true))
-                frame[0] == 0xA1 -> check(frame.size == 6) { "Неверный keepalive A1" }
-                op in listOf(0x00, 0x10, 0x20, 0x30) -> {
-                    check(acknowledged) { "Данные до подтверждения запроса TP2.0" }
-                    check(frame[0] and 15 == receiveSeq) { "Пропущен/перепутан TP2.0 sequence" }
-                    receiveSeq = (receiveSeq + 1) and 15
-                    val data = if (expected < 0) {
-                        check(frame.size >= 3) { "Нет длины TP2.0" }
-                        expected = (frame[1] shl 8) or frame[2]
-                        check(expected in 1..4096) { "Неверная длина TP2.0" }
-                        frame.drop(3)
-                    } else frame.drop(1)
-                    check(result.size + data.size <= expected) { "Лишние данные TP2.0" }
-                    result += data
-                    lastDataNanos = System.nanoTime()
-                    val last = op == 0x10 || op == 0x30
-                    if (last) check(result.size == expected) { "Обрезанный TP2.0 пакет" }
-                    if (op == 0x00 || op == 0x10) {
-                        delay(gapMs)
-                        // Odd 0 is ELM expected-response limit, not a CAN data byte.
-                        if (last) quiet("%02X0".format(0xB0 or receiveSeq))
-                        else queue.addAll(exchange("%02X".format(0xB0 or receiveSeq)))
+                if (queue.isEmpty()) {
+                    // A transport ACK is not the application reply. Allow a bounded
+                    // receive period using channel keepalives, never retransmitting
+                    // the diagnostic request. Individual command/IO timeouts still abort.
+                    val maxPolls = if (pendingReplies > 0) 64 else 8
+                    val maxIdleMs = if (pendingReplies > 0) 5250 else 1500
+                    val waitAllowed = polls < maxPolls && (clockNanos() - lastDataNanos) / 1_000_000 < maxIdleMs
+                    polls++
+                    if (!waitAllowed && pendingReplies > 0)
+                        throw IOException("Не получен финальный TP2.0 ответ после ResponsePending")
+                    check(waitAllowed) {
+                        "Неполный ответ TP2.0: получено ${result.size}, ожидается ${if (expected < 0) "начало ответа" else expected.toString()}"
                     }
-                    if (last) {
-                        check(queue.none { it.firstOrNull()?.and(0xF0) in listOf(0, 0x10, 0x20, 0x30) }) { "Неожиданный второй ответ TP2.0" }
-                        return result
-                    }
+                    // Avoid exhausting a count limit in a tight loop on fast adapters.
+                    delay(if (pendingReplies > 0) gapMs.coerceAtLeast(50) else gapMs)
+                    queue.addAll(exchange("A3", allowEmpty = true))
+                    continue
                 }
-                else -> error("Неожиданный кадр TP2.0: ${Wire.hex(frame)}")
+                val frame = queue.removeFirst()
+                check(frame.isNotEmpty())
+                val op = frame[0] and 0xF0
+                when {
+                    op == 0xB0 -> {
+                        check(frame.size == 1 && frame[0] and 15 == sendSeq) { "Неверный ACK TP2.0" }
+                        acknowledged = true
+                    }
+                    op == 0x90 -> error("Отрицательное подтверждение TP2.0; запрос не повторяется")
+                    frame[0] == 0xA8 -> error("ECU закрыл канал TP2.0")
+                    frame[0] == 0xA3 -> queue.addAll(exchange(Wire.hex(peerParameters), allowEmpty = true))
+                    frame[0] == 0xA1 -> check(frame.size == 6) { "Неверный keepalive A1" }
+                    op in listOf(0x00, 0x10, 0x20, 0x30) -> {
+                        check(acknowledged) { "Данные до подтверждения запроса TP2.0" }
+                        check(frame[0] and 15 == receiveSeq) { "Пропущен/перепутан TP2.0 sequence" }
+                        receiveSeq = (receiveSeq + 1) and 15
+                        val data = if (expected < 0) {
+                            check(frame.size >= 3) { "Нет длины TP2.0" }
+                            expected = (frame[1] shl 8) or frame[2]
+                            check(expected in 1..4096) { "Неверная длина TP2.0" }
+                            frame.drop(3)
+                        } else frame.drop(1)
+                        check(result.size + data.size <= expected) { "Лишние данные TP2.0" }
+                        result += data
+                        lastDataNanos = clockNanos()
+                        val last = op == 0x10 || op == 0x30
+                        if (last) check(result.size == expected) { "Обрезанный TP2.0 пакет" }
+                        if (op == 0x00 || op == 0x10) {
+                            delay(gapMs)
+                            // Odd 0 is ELM expected-response limit, not a CAN data byte.
+                            if (last) quiet("%02X0".format(0xB0 or receiveSeq))
+                            else queue.addAll(exchange("%02X".format(0xB0 or receiveSeq)))
+                        }
+                        if (last) {
+                            if (result.size == 3 && result[0] == 0x7F && result[2] == 0x78) {
+                                if (result[1] != bytes[0] || ++pendingReplies > 8)
+                                    throw IOException("Неверный или повторяющийся TP2.0 ResponsePending")
+                                // ACK the pending packet, then receive a new application
+                                // packet with the next TP sequence; never repeat the request
+                                // or close the session before its final result.
+                                result.clear()
+                                expected = -1
+                                polls = 0
+                                continue
+                            }
+                            check(queue.none { it.firstOrNull()?.and(0xF0) in listOf(0, 0x10, 0x20, 0x30) }) { "Неожиданный второй ответ TP2.0" }
+                            return result
+                        }
+                    }
+                    else -> error("Неожиданный кадр TP2.0: ${Wire.hex(frame)}")
+                }
             }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (failure: RuntimeException) {
+            if (pendingReplies > 0) throw IOException("Повреждён незавершённый TP2.0 ответ после ResponsePending", failure)
+            throw failure
         }
     }
+
     suspend fun close() {
         if (!active) return
         active = false

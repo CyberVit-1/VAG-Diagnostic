@@ -17,13 +17,16 @@ object VagTp20Gateway {
     const val SETUP_CAN_ID = 0x200
     const val GATEWAY_REPLY_CAN_ID = SETUP_CAN_ID + GATEWAY_TP_DESTINATION
 
-    /** 1K is a documented legacy CAN/VAG chassis; others require explicit profiles. */
-    data class Profile(val chassis: String, val source: String)
-    fun knownCandidate(chassis: String?): Profile? =
-        if (chassis == "1K") Profile(
-            chassis = "1K",
-            source = "Ross-Tech Golf Mk5/1K chassis + public VW TP2.0 channel setup"
-        ) else null
+    /** Closed legacy-CAN families. Selection is not vehicle validation. */
+    data class Profile(val chassis: String, val source: String,
+        val brand: String = "Volkswagen", val allowCandidateFallback: Boolean = false)
+    private val profiles = mapOf(
+        "1K" to Profile("1K", "Ross-Tech Golf 1K CAN/Gateway + legacy TP2.0", "Volkswagen", true),
+        "8P" to Profile("8P", "Ross-Tech Audi A3 8P CAN/Gateway", "Audi"),
+        "1Z" to Profile("1Z", "Ross-Tech Octavia 1Z CAN/Gateway", "Škoda"),
+        "1P" to Profile("1P", "Ross-Tech CAN diagnostic chassis list: Leon 1P", "SEAT")
+    )
+    fun knownCandidate(chassis: String?): Profile? = profiles[chassis]
 
     /** RX ID invalid (ECU chooses), tester RX ID 0x300, KWP application 0x01. */
     fun channelRequest(): String = "1FC00010000301"
@@ -109,13 +112,18 @@ object VagTp20Gateway {
         if (bytes.size != 20 || bytes[1] != 0x02 || bytes[2] != 0x01) return null
         val chars = bytes.drop(3)
         if (chars.size != 17 || !chars.all {
-            it in 0x30..0x39 || it in 0x41..0x5A
+            it in 0x30..0x39 || (it in 0x41..0x5A && it !in listOf(0x49, 0x4F, 0x51))
         }) return null
-        // Limit this 1K profile to a Volkswagen VIN manufacturer prefix.
-        // Unknown WMI/chassis combinations never enable experimental TP2.0.
+        // WMI and chassis must match together, not just a familiar marker.
         val wmi = chars.take(3).map { it.toChar() }.joinToString("")
-        if (wmi !in setOf("WVW", "3VW")) return null
-        // Character positions seven and eight, 1-based, form chassis code.
-        return "" + chars[6].toChar() + chars[7].toChar()
+        val chassis = "" + chars[6].toChar() + chars[7].toChar()
+        val allowed = when (wmi) {
+            "WVW", "3VW" -> setOf("1K")
+            "WAU" -> setOf("8P")
+            "TMB" -> setOf("1Z")
+            "VSS" -> setOf("1P")
+            else -> emptySet()
+        }
+        return chassis.takeIf { it in allowed }
     }
 }

@@ -354,6 +354,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                         current = "VAG: подключение, список блоков и чтение DTC"
                                     )
                                     try {
+                                        db.journal().insert(JournalEntity(timestamp = System.currentTimeMillis(), connection = cfg.type,
+                                            command = "VAG_PLATFORM_PROFILE", raw = "${tp20Profile.brand}/${tp20Profile.chassis}; ${tp20Profile.source}; кандидат, применимость проверяется ответами Gateway",
+                                            elapsedMs = 0, outcome = "SELECTED"))
                                         val gateway = ElmVagScan.scan(disposable,
                                             onUnit = { unit ->
                                                 units[unit.address] = unit
@@ -361,10 +364,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                                 checkpoint(units.values.toList(), 3, true)
                                             },
                                             event = { command, detail, outcome ->
+                                                if (command == "VAG_GATEWAY_IDENTITY_BEGIN")
+                                                    _state.value = _state.value.copy(current = "VAG: идентификация Gateway")
                                                 db.journal().insert(JournalEntity(
                                                     timestamp = System.currentTimeMillis(), connection = cfg.type,
                                                     command = command, raw = detail, elapsedMs = 0, outcome = outcome))
-                                            })
+                                            }, allowCandidateFallback = tp20Profile.allowCandidateFallback,
+                                            readGatewayIdentity = true)
                                         if (!gateway.complete) incompleteModes = true
                                         _state.value = _state.value.copy(
                                             isoTpReadiness = _state.value.isoTpReadiness + "; " + gateway.note)

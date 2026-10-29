@@ -19,7 +19,9 @@ object ElmVagScan {
 
     suspend fun scan(engine: ElmEngine,
         onUnit: suspend (ControlUnit) -> Unit,
-        event: suspend (String, String, String) -> Unit
+        event: suspend (String, String, String) -> Unit,
+        allowCandidateFallback: Boolean = true,
+        readGatewayIdentity: Boolean = false
     ): Outcome {
         var protocol: Protocol? = null
         var installed: List<VagOemReadOnly.Installed>? = null
@@ -90,12 +92,45 @@ object ElmVagScan {
             event("VAG_GATEWAY_DISCOVERY", issues.joinToString("; "), "INCONCLUSIVE")
             return Outcome(null, false, false, "Gateway не подтвердил TP2.0 или UDS; ${issues.joinToString("; ")}")
         }
+        // Identification has its own short-lived session; a negative or
+        // unknown identification does not change a confirmed installation list.
+        var identity: VagEcuIdentification.Identity? = null
+        suspend fun collectIdentity() {
+            if (!readGatewayIdentity) return
+            event("VAG_GATEWAY_IDENTITY_BEGIN", "Чтение номера Gateway", "READING")
+            try {
+                if (protocol == Protocol.TP20) {
+                    withTp(gateway) { identity = VagEcuIdentification.kwp(it.request("1A9B")) }
+                } else {
+                    val channel = Uds(engine)
+                    var healthy = true
+                    try {
+                        channel.open(gateway)
+                        identity = VagEcuIdentification.udsPartNumber(channel.read("22F187"))
+                    } catch (io: IOException) { healthy = false; throw io }
+                    finally { if (healthy && currentCoroutineContext().isActive) channel.close() }
+                }
+                event("VAG_GATEWAY_IDENTITY", identity?.summary() ?: "Идентификация не поддержана или формат не распознан",
+                    if (identity != null) "PARSED" else "UNSUPPORTED")
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (io: IOException) { throw io }
+            catch (failure: RuntimeException) {
+                event("VAG_GATEWAY_IDENTITY", "Идентификация не подтверждена: ${failure.message}", "INCONCLUSIVE")
+            }
+        }
         val listConfirmed = installed != null
+        if (!listConfirmed && !allowCandidateFallback) {
+            collectIdentity()
+            event("VAG_INSTALLATION_LIST", "Формат списка не подтверждён; кандидаты для этой платформы не опрашиваются", "UNSUPPORTED")
+            return Outcome(protocol, false, false, "Gateway ответил; список для этой платформы не подтверждён" +
+                (identity?.let { "; " + it.summary() } ?: ""))
+        }
         event("VAG_INSTALLATION_LIST", if (listConfirmed) "Подтверждены ID: " + installed!!.joinToString { "%02X".format(it.id) }
             else "Список не получен; ограниченная очередь известных адресов профиля, не список установленных блоков", if (listConfirmed) "CONFIRMED" else "INCONCLUSIVE")
         val ids = if (listConfirmed) (listOf(0x19) + installed!!.map { it.id }).distinct()
             else VagOemReadOnly.routes.values.filterNot { it.installedOnly }.map { it.id }
         var failed = !listConfirmed
+        var gatewayUnit: ControlUnit? = null
         for (id in ids) {
             currentCoroutineContext().ensureActive()
             val route = VagOemReadOnly.routes[id]
@@ -166,6 +201,7 @@ object ElmVagScan {
                 } else udsRead()
                 unit = unit.copy(state = ReadState.COMPLETE, dtcs = result.values, answeredModes = setOf(DtcKind.OEM),
                     note = "${result.service}: положительный полный ответ; статус OEM сохранён", source = "RESPONSE")
+                if (id == 0x19) gatewayUnit = unit
                 onUnit(unit)
                 event("VAG_DTC_%02X".format(id), "${result.service}; DTC=${result.values.size}", "PARSED")
             } catch (cancel: CancellationException) { throw cancel }
@@ -178,13 +214,20 @@ object ElmVagScan {
                 failed = true
                 unit = unit.copy(state = if (unit.source == "RESPONSE") ReadState.PARTIAL else ReadState.NO_RESPONSE,
                     note = "DTC не подтверждены: ${failure.message}")
+                if (id == 0x19) gatewayUnit = unit
                 onUnit(unit)
                 event("VAG_DTC_%02X".format(id), unit.note, "INCOMPLETE")
             }
         }
-        return Outcome(protocol, listConfirmed, !failed, "VAG ${protocol.name}; " +
-            if (listConfirmed) "список Gateway получен; опрос ${if (failed) "неполный" else "завершён"}"
-            else "список Gateway недоступен; опрошены только кандидаты профиля")
+        // DTC results have already been checkpointed before optional metadata.
+        collectIdentity()
+        val savedGateway = gatewayUnit
+        if (identity != null && savedGateway != null)
+            onUnit(savedGateway.copy(note = savedGateway.note + "; " + identity!!.summary()))
+        val summary = if (listConfirmed) "список Gateway получен; опрос ${if (failed) "неполный" else "завершён"}"
+            else "список Gateway недоступен; опрошены только кандидаты профиля"
+        return Outcome(protocol, listConfirmed, !failed, "VAG ${protocol.name}; " + summary +
+            (identity?.let { "; " + it.summary() } ?: ""))
     }
 
     private class Uds(private val engine: ElmEngine) {
@@ -235,7 +278,7 @@ object ElmVagScan {
             if (reply.take(2) != listOf(0x50, 1)) throw IOException("ECU не подтвердил возврат в штатную UDS-сессию")
         }
         suspend fun read(command: String): List<Int> {
-            require(command in setOf("1003", "1001", "2204A1", "19028D"))
+            require(command in setOf("1003", "1001", "2204A1", "19028D", "22F187"))
             val target = requireNotNull(route)
             val result = withTimeoutOrNull(20000) {
                     val rx = requireNotNull(target.udsRx)

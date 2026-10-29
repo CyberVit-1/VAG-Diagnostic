@@ -140,4 +140,27 @@ class ElmExpandedRoutesTest {
     }
     private fun List<String>.indexOf(value: String, from: Int): Int =
         (from until size).firstOrNull { this[it] == value } ?: -1
+    @Test fun additionalPlatformsNeverSweepCandidatesWithoutInstallationList() = runBlocking {
+        val link = Link(missingList = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val units = mutableListOf<ControlUnit>()
+        val result = ElmVagScan.scan(engine, { units += it }, { _, _, _ -> }, allowCandidateFallback = false)
+        assertFalse(result.complete)
+        assertFalse(result.listConfirmed)
+        assertTrue(units.isEmpty())
+        assertTrue(link.sent.filter { it.endsWith("C000100003011") }.all { it.startsWith("1F") })
+        assertFalse(link.sent.any { it.endsWith("1800FF00") || it.endsWith("1802FF00") || it == "19028D" })
+    }
+    @Test fun additionalPlatformsUseOnlyReportedKnownRoutesAfterConfirmedList() = runBlocking {
+        val link = Link()
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> }, allowCandidateFallback = false)
+        assertTrue(result.note, result.complete)
+        assertEquals(18, units.size)
+        assertFalse(link.sent.any { it.startsWith("19C000") || it.startsWith("99C000") })
+    }
+
 }
