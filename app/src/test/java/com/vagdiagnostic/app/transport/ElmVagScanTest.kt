@@ -10,7 +10,8 @@ import java.util.ArrayDeque
 
 /** Scripted transport contract, never a vehicle-confirmed result. */
 class ElmVagScanTest {
-    private class UdsLink(val wrongId: Boolean = false, val pending: Int = 0, val identityReply: String = "7F2231") : ElmLink {
+    private class UdsLink(val wrongId: Boolean = false, val pending: Int = 0, val identityReply: String = "7F2231",
+        val presenceReply: String = "7E00", val sessionReply: String = "5003") : ElmLink {
         override val label = "Scripted UDS link"
         val sent = mutableListOf<String>()
         private val queue = ArrayDeque<Int>()
@@ -32,7 +33,10 @@ class ElmVagScanTest {
                 command == "ATDPN" -> "6"
                 command.startsWith("AT") -> "OK"
                 command == "1FC000100003011" -> "NO DATA"
-                command == "1003" -> id + "025003"
+                command == "3E00" -> if (presenceReply == "NO DATA") "NO DATA" else
+                    id + "%02X".format(presenceReply.length / 2) + presenceReply
+                command == "1003" -> if (sessionReply == "NO DATA") "NO DATA" else
+                    id + "%02X".format(sessionReply.length / 2) + sessionReply
                 command == "1001" -> id + "025001"
                 command == "2204A1" -> id + "076204A1191F0100"
                 command == "22F187" -> if (identityReply.length / 2 <= 7)
@@ -197,6 +201,29 @@ class ElmVagScanTest {
         val result = ElmVagScan.scan(engine, {}, { _, _, _ -> })
         assertTrue(result.note, result.complete)
         assertEquals(1, link.sent.count { it == "19028D" })
+    }
+    @Test fun udsPresenceIsIndependentOfExtendedSessionAcceptance() = runBlocking {
+        for (presence in listOf("7E00", "7F3E11")) for (session in listOf("NO DATA", "7F1012", "5003")) {
+            val link = UdsLink(presenceReply = presence, sessionReply = session)
+            val engine = ElmEngine(link, { _, _, _, _ -> })
+            val result = ElmVagScan.scan(engine, {}, { _, _, _ -> })
+            assertTrue("$presence/$session: ${result.note}", result.complete)
+            assertTrue(link.sent.indexOf("3E00") < link.sent.indexOf("1003"))
+            assertTrue(link.sent.contains("19028D"))
+            assertEquals(session == "5003", link.sent.contains("1001"))
+        }
+    }
+    @Test fun missingOrAmbiguousPresenceNeverAdvancesToSessionOrDtc() = runBlocking {
+        for (presence in listOf("NO DATA", "7F1011", "7E01", "7F3E78")) {
+            val link = UdsLink(presenceReply = presence)
+            val engine = ElmEngine(link, { _, _, _, _ -> })
+            val result = runCatching { ElmVagScan.scan(engine, {}, { _, _, _ -> }) }
+            if (presence == "NO DATA") assertFalse(result.getOrThrow().complete)
+            else assertTrue(result.exceptionOrNull() is IOException)
+            assertFalse(link.sent.contains("1003"))
+            assertFalse(link.sent.contains("19028D"))
+            assertFalse(link.sent.contains("1001"))
+        }
     }
     @Test fun synthetic263ByteListSurvivesRepeatedKeepaliveAndSequenceWrap() = runBlocking {
         val link = Link(keepalive = true, longList = true)

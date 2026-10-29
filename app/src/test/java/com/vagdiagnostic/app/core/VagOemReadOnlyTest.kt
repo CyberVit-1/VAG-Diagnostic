@@ -12,7 +12,7 @@ class VagOemReadOnlyTest {
     }
     @Test fun expandedRoutesAreClosedAndAddedOnlyForGatewayListedModules() {
         val expected = mapOf(0x04 to 0x13, 0x25 to 0x14, 0x62 to 0x24, 0x72 to 0x25, 0x56 to 0x52)
-        assertEquals(35, VagOemReadOnly.routes.size)
+        assertEquals(159, VagOemReadOnly.routes.size)
         assertEquals(14, VagOemReadOnly.routes.values.count { !it.installedOnly })
         for ((id, tp) in expected) {
             assertEquals(tp, VagOemReadOnly.routes.getValue(id).tp)
@@ -20,7 +20,24 @@ class VagOemReadOnlyTest {
         }
         assertNull(VagOemReadOnly.routes.getValue(0x62).udsTx)
         assertNull(VagOemReadOnly.routes.getValue(0x72).udsTx)
-        assertFalse(VagOemReadOnly.routes.containsKey(0x7F))
+        assertFalse(VagOemReadOnly.routes.containsKey(0))
+        assertTrue(VagOemReadOnly.routes.values.filter { it.id !in setOf(0x19, 1, 2, 3, 8, 9, 0x15, 0x16, 0x17, 0x42, 0x44, 0x46, 0x52, 0x53) }.all { it.installedOnly })
+    }
+    @Test fun additionalListedModulesUseTheirOwnRouteNamespace() {
+        val routes = VagOemReadOnly.routes
+        assertEquals(0x15, routes.getValue(0x11).tp)
+        assertEquals(0x7E2, routes.getValue(0x11).udsTx)
+        assertEquals(0x7EA, routes.getValue(0x11).udsRx)
+        assertEquals(0x33, routes.getValue(0x61).tp)
+        assertEquals(0x17FE009C, routes.getValue(0x61).udsRx)
+        assertEquals(0x18060009, routes.getValue(0x7E).udsRx)
+        assertEquals(0x2D, routes.getValue(0x76).tp)
+        assertNull(routes.getValue(0x76).udsTx)
+        assertTrue(routes.values.all { it.id in 1..255 && (it.tp != null || it.udsTx != null) })
+        assertTrue(routes.values.filter { it.udsTx != null }.all {
+            val rx = requireNotNull(it.udsRx)
+            if (it.is29Bit) rx in 0x800..0x1FFFFFFF else rx in 1..0x7FF
+        })
     }
     @Test fun comfort29BitPairAndListGateAreExplicit() {
         val route = VagOemReadOnly.routes.getValue(0x46)

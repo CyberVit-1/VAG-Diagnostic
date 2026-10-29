@@ -66,6 +66,11 @@ class ElmExpandedRoutesTest {
                 cmd == "A00194FF82FF" -> "300A10F94FF82FF"
                 cmd == "A80" || (cmd.startsWith("B") && cmd.length == 3) -> ""
                 cmd.startsWith("B") -> frames.removeFirst()
+                cmd == "3E00" -> {
+                    if (protocol == "7" && fail29) throw IOException("fixture stream failure")
+                    if (tx == "70D") "NO DATA"
+                    else (if (protocol == "7" && wrong29) "17FE008A" else filter) + "027E00"
+                }
                 cmd == "1003" -> {
                     if (protocol == "7" && fail29) throw IOException("fixture stream failure")
                     if (tx == "70D") "NO DATA"
@@ -141,7 +146,7 @@ class ElmExpandedRoutesTest {
         for (link in listOf(Link(wrong29 = true), Link(fail29 = true))) {
             val units = linkedMapOf<String, ControlUnit>()
             try { scan(link, units); fail("Expected strict 29-bit failure") } catch (_: IOException) {}
-            assertEquals("1003", link.sent.last())
+            assertEquals("3E00", link.sent.last())
             assertEquals(ReadState.NO_RESPONSE, units.getValue("VAG-46").state)
             assertFalse(link.sent.contains("22C000100003011"))
         }

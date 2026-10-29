@@ -83,7 +83,7 @@ object ElmVagScan {
                 try {
                     channel.open(gateway)
                     protocol = Protocol.UDS
-                    event("VAG_GATEWAY_CONNECTED", "UDS 710/77A; VAG=19; session confirmed", "CONFIRMED")
+                    event("VAG_GATEWAY_CONNECTED", "UDS 710/77A; VAG=19; ECU presence confirmed", "CONFIRMED")
                     // Only the recovered legacy 04A1 format is enabled in this 1K
                     // profile; part-number-dependent MQB bitmaps are not guessed.
                     installed = VagOemReadOnly.installed04A1(channel.read("2204A1"))
@@ -178,7 +178,7 @@ object ElmVagScan {
             }
             try {
                 suspend fun confirmedConnection() {
-                    unit = unit.copy(source = "RESPONSE", note = "Сессия ECU подтверждена; чтение DTC")
+                    unit = unit.copy(source = "RESPONSE", note = "Ответ ECU подтверждён; чтение DTC")
                     onUnit(unit)
                 }
                 suspend fun tpRead(): VagOemReadOnly.Faults {
@@ -287,10 +287,14 @@ object ElmVagScan {
             }
             ok("ATCFC1")
             route = target
-            val reply = read("1003")
-            check(reply.size >= 2 && reply.take(2) == listOf(0x50, 3)) { "Нет подтверждения UDS-сессии 1003" }
-            active = true
-            if (reply.size >= 6) {
+            // Presence is independent of extended-session support. A complete
+            // matching negative reply also proves that the addressed ECU answered.
+            val presence = read("3E00")
+            check(presence == listOf(0x7E, 0) ||
+                (presence.size == 3 && presence.take(2) == listOf(0x7F, 0x3E))) { "Нет подтверждения присутствия UDS ECU" }
+            val reply = readOrNoData("1003", allowNoData = true)
+            active = reply?.take(2) == listOf(0x50, 3)
+            if (active && reply != null && reply.size >= 6) {
                 val star = ((reply[4] shl 8) or reply[5]) * 10L
                 check(star in 1..5750) { "UDS P2* вне поддержанного диапазона" }
                 pendingMs = star + 250
@@ -302,8 +306,10 @@ object ElmVagScan {
             val reply = read("1001")
             if (reply.take(2) != listOf(0x50, 1)) throw IOException("ECU не подтвердил возврат в штатную UDS-сессию")
         }
-        suspend fun read(command: String): List<Int> {
-            require(command in setOf("1003", "1001", "2204A1", "19028D", "22F187"))
+        suspend fun read(command: String): List<Int> = requireNotNull(readOrNoData(command, false))
+
+        private suspend fun readOrNoData(command: String, allowNoData: Boolean): List<Int>? {
+            require(command in setOf("3E00", "1003", "1001", "2204A1", "19028D", "22F187"))
             val target = requireNotNull(route)
             val result = withTimeoutOrNull(20000) {
                     val rx = requireNotNull(target.udsRx)
@@ -311,8 +317,10 @@ object ElmVagScan {
                     var pending = 0
                     while (true) {
                         currentCoroutineContext().ensureActive()
-                        if (raw.trim().uppercase() == "NO DATA" && pending == 0)
+                        if (raw.trim().uppercase() == "NO DATA" && pending == 0) {
+                            if (allowNoData) return@withTimeoutOrNull emptyList<Int>()
                             error("ELM завершил UDS $command без ответа")
+                        }
                         val decoded = try { VagUdsTransaction.decode(raw, rx, command) }
                             catch (bad: IllegalArgumentException) { throw IOException(bad.message, bad) }
                         pending += decoded.pendingCount
@@ -328,7 +336,7 @@ object ElmVagScan {
                 engine.close()
                 throw IOException("Превышен общий срок ожидания UDS $command")
             }
-            return result
+            return result.ifEmpty { null }
         }
     }
 }

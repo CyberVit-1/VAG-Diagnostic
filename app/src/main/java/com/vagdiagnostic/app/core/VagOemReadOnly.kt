@@ -8,7 +8,7 @@ object VagOemReadOnly {
     data class Route(val id: Int, val name: String, val tp: Int?, val udsTx: Int?,
         val installedOnly: Boolean = false, val udsAlternatives: List<Int> = emptyList()) {
         val udsRx: Int? get() = udsTx?.let {
-            when { it > 0x7FF -> it + 0x20000; it in 0x7E0..0x7E7 -> it + 8; else -> it + 0x6A }
+            when { it > 0x7FF -> it + 0x20000; it > 0x794 -> it + 8; else -> it + 0x6A }
         }
         val is29Bit: Boolean get() = udsTx?.let { it > 0x7FF } == true
         val key: String get() = "VAG-%02X".format(id)
@@ -17,7 +17,7 @@ object VagOemReadOnly {
                 copy(udsTx = it, udsAlternatives = emptyList())
             }
     }
-    val routes = listOf(
+    private val initialRoutes = listOf(
         Route(0x19, "CAN Gateway", 0x1F, 0x710),
         Route(0x01, "Двигатель", 0x01, 0x7E0),
         Route(0x02, "Коробка передач", 0x02, 0x7E1),
@@ -57,6 +57,7 @@ object VagOemReadOnly {
         Route(0x75, "Телематика", 0x55, 0x767, installedOnly = true),
         Route(0x77, "Телефон", 0x5A, 0x76B, installedOnly = true)
     ).associateBy { it.id }
+    val routes = initialRoutes + VagOemRouteCatalog.routes.filterNot { it.id in initialRoutes }.associateBy { it.id }
     val gateway get() = routes.getValue(0x19)
     data class Installed(val id: Int, val rawStatus: Int, val hasFaultFlag: Boolean,
         val tpDestination: Int? = null, val extraStatus: Int? = null,

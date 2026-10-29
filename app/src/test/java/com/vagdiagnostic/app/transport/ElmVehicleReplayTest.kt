@@ -8,7 +8,8 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /** Recorded OEM exchanges, excluding VIN, timestamps and adapter endpoint.
- * New metadata command substitution is explicitly synthetic, not vehicle evidence. */
+ * New presence exchange and metadata substitutions are explicitly synthetic,
+ * not vehicle evidence. Original fixture files remain unchanged. */
 class ElmVehicleReplayTest {
     private data class Row(val command: String, val raw: String)
     private class Replay(val rows: List<Row>, val failAt: Int? = null) : ElmLink {
@@ -35,14 +36,14 @@ class ElmVehicleReplayTest {
             Row(parts[0], String(Base64.getDecoder().decode(parts[1]), Charsets.UTF_8))
         }.toList() }
 
-    @Test fun recorded033FullQueueAndObdRestoration() = runBlocking {
+    @Test fun recorded033DtcQueueWithSyntheticPresenceAndObdRestoration() = runBlocking {
         replay("033", false)
     }
     @Test fun recorded034WithExplicitSyntheticMetadataSubstitution() = runBlocking {
         replay("034", true)
     }
     private suspend fun replay(version: String, metadata: Boolean) {
-        val fixture = rows(version).map {
+        val fixture = withSyntheticPresence(rows(version)).map {
             when {
                 metadata && it.command == "1100021A9B" -> it.copy(command = "11000322F187", raw = it.raw.replace("7F1A11", "7F2231"))
                 else -> it
@@ -66,8 +67,21 @@ class ElmVehicleReplayTest {
         assertFalse(link.sent.any { it.contains("1A9B") } && metadata)
     }
 
+    private fun withSyntheticPresence(original: List<Row>): List<Row> {
+        var rx = ""
+        return original.flatMap { row ->
+            if (row.command.startsWith("ATCRA")) rx = row.command.removePrefix("ATCRA")
+            if (row.command != "1003") listOf(row)
+            else if (row.raw.trim() == "NO DATA") listOf(row.copy(command = "3E00"))
+            else {
+                check(row.raw.contains("5003")) { "Unknown recorded session response" }
+                listOf(Row("3E00", rx + "027E00"), row)
+            }
+        }
+    }
+
     @Test fun recordedQueueDisconnectPreservesEarlierDtcAndStopsTraffic() = runBlocking {
-        val fixture = rows("034")
+        val fixture = withSyntheticPresence(rows("034"))
         val stop = fixture.indexOfFirst { it.command == "24C000100003011" } + 1
         assertTrue(stop > 0)
         val link = Replay(fixture, stop)
