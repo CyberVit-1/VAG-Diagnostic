@@ -11,7 +11,7 @@ import org.junit.Test
 /** Synthetic fallback responses, not a vehicle recording. */
 class ElmVagCandidateDiscoveryTest {
     private class Link(val corruptAt: Int? = null, val cancelAt: Int? = null,
-        val gatewayAvailable: Boolean = true) : ElmLink {
+        val gatewayAvailable: Boolean = true, val activeFilter: Boolean = false) : ElmLink {
         override val label = "Synthetic fixed-catalog fallback"
         val sent = mutableListOf<String>()
         val addressed = mutableListOf<Pair<Int?, String>>()
@@ -56,6 +56,8 @@ class ElmVagCandidateDiscoveryTest {
                     else -> "7F2231"
                 })
                 cmd == "222A26" -> payload("7F2231")
+                cmd == "22539B" && activeFilter -> payload("62539B0101")
+                cmd in setOf("22F197", "22F189", "22F19E", "220174", "22539B") -> payload("7F2231")
                 cmd == "19028D" -> payload(if (id == 0xFFFF) "59028D12345608" else "59028D")
                 else -> error("Unexpected $id/$cmd")
             }
@@ -77,6 +79,17 @@ class ElmVagCandidateDiscoveryTest {
         assertTrue(link.sent.contains("ATFCSH17FC0077"))
         assertFalse(link.sent.contains("ATSH718")) // No additional radio address.
         assertEquals(1, link.addressed.count { it == (0xFFFF to "19028D") })
+    }
+    @Test fun activeFilterDoesNotHideRespondingFallbackEcus() = runBlocking {
+        val link = Link(activeFilter = true)
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> }, allowCandidateFallback = true)
+        assertFalse(result.complete)
+        assertEquals(189, units.size)
+        assertEquals(setOf("VAG-19", "VAG-09", "VAG-FFFF"), units.values.filter { it.source != "CANDIDATE" }.map { it.address }.toSet())
+        assertEquals("123456", units.getValue("VAG-FFFF").dtcs.single().code)
+        assertTrue(result.note.contains("фильтр"))
+        assertFalse(link.sent.any { it.startsWith("2E") || it.startsWith("27") || it.startsWith("29") })
     }
     @Test fun unverifiedManufacturerCannotStartCatalogFallback() = runBlocking {
         val link = Link()

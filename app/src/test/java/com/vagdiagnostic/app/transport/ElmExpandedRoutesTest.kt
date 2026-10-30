@@ -78,6 +78,7 @@ class ElmExpandedRoutesTest {
                 }
                 cmd == "1001" -> filter + "065001003201F4"
                 cmd == "22F187" -> "NO DATA"
+                cmd in setOf("22F197", "22F189", "22F19E", "220174") -> filter + "037F2231"
                 cmd == "19028D" -> if (protocol == "7")
                     filter + "100B590219123456\r" + filter + "2108654321040000"
                     else filter + "03590219"
@@ -86,6 +87,7 @@ class ElmExpandedRoutesTest {
                         "1089" -> "5089"
                         "1A9B" -> "7F1A31"
                         "22F187" -> "7F2231"
+                        "22F197", "22F189", "22F19E" -> "7F2231"
                         "31B80000" -> if (destination in setOf(1, 2)) "71B80118" else "7F3111"
                         "1A9F" -> if (lostListReply) "NO DATA" else "7F1A11"
                         "2204A1" -> if (missingList) "7F2231" else list()

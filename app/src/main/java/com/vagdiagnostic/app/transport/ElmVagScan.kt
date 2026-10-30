@@ -4,6 +4,7 @@ import com.vagdiagnostic.app.core.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.NonCancellable
@@ -40,6 +41,9 @@ object ElmVagScan {
         val confirmedProtocols = mutableMapOf<Int, Protocol>()
         val identities = mutableMapOf<Int, VagEcuIdentification.Identity?>()
         val identityAttempts = mutableSetOf<Int>()
+        val udsInfoOverTp = mutableSetOf<Int>()
+        val detailsAttempts = mutableSetOf<Int>()
+        val details = mutableMapOf<Int, Map<VagUdsInfo.Field, VagUdsInfo.Value>>()
         val absentTp = mutableSetOf<Int>()
         val absentUds = mutableSetOf<Int>()
         val saeAttempts = mutableSetOf<Int>()
@@ -48,6 +52,7 @@ object ElmVagScan {
         var centralPart: String? = null
         val candidateFallbackPermitted = allowCandidateFallback
         var discoveryReconnectNeeded = false
+        var diagnosticAccess: VagDiagnosticAccess.Status? = null
         var currentEngine = engine
         var channelRecoveries = 0
         suspend fun restoreConnection(key: String, cause: Throwable) {
@@ -100,18 +105,37 @@ object ElmVagScan {
         suspend fun tpIdentity(id: Int, channel: ElmTp20Channel): VagEcuIdentification.Identity? {
             if (id in identityAttempts) return identities[id]
             identityAttempts += id
-            val value = if (id == 0x19 && gatewayRejectsService1A)
+            val value = if (id == 0x19 && gatewayRejectsService1A) {
+                udsInfoOverTp += id
                 VagEcuIdentification.udsPartNumber(channel.request("22F187"))
+            }
             else {
                 val replies = channel.requestMessages("1A9B")
                 val kwp = VagEcuIdentification.kwpMessages(replies)
                 if (replies.size == 1 && replies.first() in listOf(
-                        listOf(0x7F, 0x1A, 0x10), listOf(0x7F, 0x1A, 0x11), listOf(0x7F, 0x1A, 0x12)))
-                    VagEcuIdentification.udsPartNumber(channel.request("22F187")) else kwp
+                        listOf(0x7F, 0x1A, 0x10), listOf(0x7F, 0x1A, 0x11), listOf(0x7F, 0x1A, 0x12))) {
+                    udsInfoOverTp += id
+                    VagEcuIdentification.udsPartNumber(channel.request("22F187"))
+                } else kwp
             }
             identities[id] = value
             if (id == 0x19) { identity = value; gatewayIdentityAttempted = true }
             return value
+        }
+        suspend fun collectDetails(id: Int, fields: List<VagUdsInfo.Field>, read: suspend (String) -> List<Int>?) {
+            if (!detailsAttempts.add(id)) return
+            val result = try { VagUdsInfo.collect(fields, onValue = { field, value ->
+                // A later timeout/cancellation must not discard earlier complete fields.
+                val saved = details[id].orEmpty() + (field to value)
+                details[id] = saved
+                identities[id]?.let { identities[id] = VagUdsInfo.merge(it, saved) }
+                if (id == 0x19) identity = identities[id]
+                event("VAG_ECU_INFO_%02X_%s".format(id, field.name), value.state.name,
+                    if (value.state == VagUdsInfo.State.PRESENT) "PARSED" else "INCOMPLETE")
+            }, read = read) }
+                catch (bad: IllegalArgumentException) { throw IOException("Неверная идентификация ECU: ${bad.message}", bad) }
+            event("VAG_ECU_INFO_%02X".format(id), result.entries.joinToString { "${it.key.name}: ${it.value.state}" },
+                if (result.values.all { it.state == VagUdsInfo.State.PRESENT }) "PARSED" else "INCOMPLETE")
         }
         try {
             withTp(gateway) { channel ->
@@ -161,6 +185,10 @@ object ElmVagScan {
                     identityAttempts += 0x19
                     event("VAG_GATEWAY_IDENTITY", identity?.summary() ?: "Номер детали не подтверждён",
                         if (identity != null) "PARSED" else "UNSUPPORTED")
+                    diagnosticAccess = channel.readDiagnosticAccess()
+                    event("VAG_DIAGNOSTIC_ACCESS", diagnosticAccess?.let {
+                        "Gateway: функция=${it.functionCode}; диагностический фильтр=" + if (it.active) "активен" else "неактивен"
+                    } ?: "Статус диагностического фильтра не подтверждён", if (diagnosticAccess != null) "PARSED" else "INCONCLUSIVE")
                     val part = identity?.partNumber
                     if (part != null && VagInstallationBitmap.supports(0x19, part)) {
                         if (VagInstallationBitmap.formatFor(0x19, part) == "mk8") {
@@ -241,8 +269,11 @@ object ElmVagScan {
             collectIdentity()
             event("VAG_INSTALLATION_LIST", "Формат списка не подтверждён; кандидаты для этой платформы не опрашиваются", "UNSUPPORTED")
             return Outcome(protocol, false, false, "Gateway ответил; список для этой платформы не подтверждён" +
+                (if (listLimitations.isNotEmpty()) "; " + listLimitations.joinToString("; ") else "") +
                 (identity?.let { "; " + it.summary() } ?: ""))
         }
+        // Filter status alone does not prove that read services are blocked.
+        // Keep the verified manufacturer's fixed discovery scope unchanged.
         val candidateRoutes = if (listConfirmed) emptyMap() else VagOemCandidateCatalog.routes
         event("VAG_INSTALLATION_LIST", if (listConfirmed) "Подтверждены ID: " + installed!!.joinToString { "%02X".format(it.id) }
             else "Список не получен; фиксированный каталог ${candidateRoutes.size} кандидатов, наличие требует ответа ECU", if (listConfirmed) "CONFIRMED" else "INCONCLUSIVE")
@@ -415,13 +446,14 @@ object ElmVagScan {
                     unit = unit.copy(source = "RESPONSE", note = "Ответ ECU подтверждён; чтение DTC")
                     onUnit(unit)
                 }
-                suspend fun tpRead(): VagOemReadOnly.Faults {
+                suspend fun tpReadOnce(): VagOemReadOnly.Faults {
                     var result: VagOemReadOnly.Faults? = null
                     withTp(route) { channel ->
                         confirmedConnection(Protocol.TP20)
                         val powertrain = if (identifyEcus) {
                             try {
                                 tpIdentity(id, channel)
+                                if (id in udsInfoOverTp) collectDetails(id, VagUdsInfo.scanFields) { channel.request(it) }
                                 if (saeAttempts.add(id)) saeSupport[id] = VagKwpCapabilities.supportsSaeDtc(channel.request(VagKwpCapabilities.REQUEST))
                             } catch (missing: ElmTp20Channel.NoApplicationResponse) {
                                 throw OptionalReadUnavailable(missing)
@@ -434,6 +466,17 @@ object ElmVagScan {
                     }
                     return requireNotNull(result)
                 }
+                suspend fun tpRead(): VagOemReadOnly.Faults = try { tpReadOnce() }
+                    catch (missing: ElmTp20Channel.NoChannelResponse) {
+                        // Only a complete NO DATA setup on the listed CAN engine
+                        // permits this single retry. Never replay after a broken stream.
+                        if (!identifyEcus || id != 0x01 || listEntry == null ||
+                            VagConnectionPolicy.isUdsOnlyChassis(centralPart)) throw missing
+                        event("VAG_ENGINE_CONNECTION_RETRY", "01: нет ответа CHANNEL SETUP; один повтор через 2000 мс", "RETRYING")
+                        delay(2000)
+                        currentCoroutineContext().ensureActive()
+                        tpReadOnce()
+                    }
                 suspend fun udsRead(): VagOemReadOnly.Faults {
                     val paths = route.udsPaths(listConfirmed)
                     check(paths.isNotEmpty()) { "Нет проверенного UDS-маршрута" }
@@ -448,6 +491,9 @@ object ElmVagScan {
                             if (identifyEcus && id !in identityAttempts) {
                                 identityAttempts += id
                                 identities[id] = channel.identifyPart()
+                            }
+                            if (identifyEcus) collectDetails(id, VagUdsInfo.scanFields + VagUdsInfo.Field.ACCESS_STATUS) {
+                                channel.readOptionalInfo(it)
                             }
                             return VagOemReadOnly.udsFaults(channel.read("19028D")).also { completedFaults = it }
                         } catch (cancel: CancellationException) { healthy = false; throw cancel }
@@ -514,7 +560,7 @@ object ElmVagScan {
             }
             catch (optional: OptionalReadUnavailable) {
                 val retries = optionalRetries.getOrDefault(id, 0)
-                if (retries >= 2) throw IOException("Исчерпан предел дополнительного чтения ${route.key}", optional)
+                if (retries >= 3) throw IOException("Исчерпан предел дополнительного чтения ${route.key}", optional)
                 optionalRetries[id] = retries + 1
                 queue += id
                 onUnit(unit.copy(state = ReadState.PARTIAL, note = optional.message.orEmpty(), source = "RESPONSE"))
@@ -544,6 +590,7 @@ object ElmVagScan {
             else "список Gateway недоступен; проверены кандидаты фиксированного каталога"
         return Outcome(protocol, listConfirmed, !failed, "VAG ${protocol?.name ?: "Gateway не ответил"}; " + summary +
             (if (listLimitations.isNotEmpty()) "; " + listLimitations.joinToString("; ") else "") +
+            (if (diagnosticAccess?.active == true) "; На Gateway активен диагностический фильтр; возможные ограничения оцениваются по ответам ECU" else "") +
             (identity?.let { "; " + it.summary() } ?: ""))
     }
 
@@ -616,9 +663,19 @@ object ElmVagScan {
             (if (command == "22F187") cachedPartReply else null) ?: requireNotNull(readOrNoData(command, false))
         suspend fun identifyPart(): VagEcuIdentification.Identity? =
             (cachedPartReply ?: readOrNoData("22F187", true))?.let { VagEcuIdentification.udsPartNumber(it) }
+        suspend fun readOptionalInfo(command: String): List<Int>? {
+            require(command in VagUdsInfo.Field.entries.map { it.request })
+            return readOrNoData(command, true)
+        }
+        suspend fun readDiagnosticAccess(): VagDiagnosticAccess.Status? {
+            require(route?.id == 0x19)
+            return try { VagDiagnosticAccess.decode(readOrNoData(VagDiagnosticAccess.REQUEST, true)) }
+                catch (bad: IllegalArgumentException) { throw IOException("Некорректный статус доступа: ${bad.message}", bad) }
+        }
 
         private suspend fun readOrNoData(command: String, allowNoData: Boolean): List<Int>? {
-            require(command in setOf("3E00", "1003", "1001", "2204A1", "222A26", "19028D", "22F187"))
+            require(command in setOf("3E00", "1003", "1001", "2204A1", "222A26", "19028D", "22F187", VagDiagnosticAccess.REQUEST) ||
+                command in VagUdsInfo.Field.entries.map { it.request })
             val target = requireNotNull(route)
             val result = withTimeoutOrNull(20000) {
                     val rx = requireNotNull(target.udsRx)

@@ -102,7 +102,8 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
     }
 
     private suspend fun requestPackets(command: String, allowMultiple: Boolean): List<List<Int>> {
-        require(command in setOf("1089", "1A9F", "2204A1", "1800FF00", "1802FF00", "19028D", "1A9B", "22F187", "31B80000"))
+        require(command in setOf("1089", "1A9F", "2204A1", "1800FF00", "1802FF00", "19028D", "1A9B", "22F187", "31B80000") ||
+            command in com.vagdiagnostic.app.core.VagUdsInfo.scanFields.map { it.request })
         check(active)
         coroutineContext.ensureActive()
         val bytes = Wire.bytes(command)
@@ -228,7 +229,7 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
                             if (messages.isEmpty() && result.firstOrNull() != 0x7F) {
                                 val echo = when (command) {
                                     "1089", "1A9F", "1A9B", "19028D", "31B80000" -> bytes.drop(1).take(1)
-                                    "2204A1", "22F187" -> bytes.drop(1).take(2)
+                                    "2204A1", "22F187", "22F197", "22F189", "22F19E" -> bytes.drop(1).take(2)
                                     else -> emptyList()
                                 }
                                 check(result.drop(1).take(echo.size) == echo) { "TP2.0 ответ другой подфункции или DID" }

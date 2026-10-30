@@ -3,7 +3,8 @@ package com.vagdiagnostic.app.core
 /** A small, validated subset of identification, never VIN/serial/coding data. */
 object VagEcuIdentification {
     data class Identity(val partNumber: String, val softwareVersion: String?, val request: String,
-        val component: String? = null, val subsystems: List<Identity> = emptyList()) {
+        val component: String? = null, val subsystems: List<Identity> = emptyList(),
+        val asam: String? = null, val asamRevision: String? = null) {
         fun summary(): String = "Gateway: $partNumber" + (softwareVersion?.let { "; ПО $it" } ?: "")
     }
     private fun text(bytes: List<Int>): String? {
