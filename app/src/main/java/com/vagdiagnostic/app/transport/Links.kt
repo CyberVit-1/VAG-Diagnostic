@@ -30,6 +30,7 @@ class WifiTcpLink(private val context: Context, private val host: String, privat
             cm.getNetworkCapabilities(net)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
         } ?: error("Сеть Wi-Fi адаптера не обнаружена")
         val newSocket = wifi.socketFactory.createSocket()
+        socket = newSocket // A concurrent Stop must be able to abort connect().
         try {
             newSocket.tcpNoDelay = true
             newSocket.soTimeout = 550
@@ -37,7 +38,7 @@ class WifiTcpLink(private val context: Context, private val host: String, privat
             input = newSocket.getInputStream()
             output = newSocket.getOutputStream()
             socket = newSocket
-        } catch (error: Exception) { newSocket.close(); throw error }
+        } catch (error: Exception) { newSocket.close(); if (socket === newSocket) socket = null; throw error }
     }
     override suspend fun write(bytes: ByteArray) = withContext(Dispatchers.IO) {
         if (socket?.isConnected != true || socket?.isClosed != false)

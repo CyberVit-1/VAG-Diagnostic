@@ -85,6 +85,8 @@ class ElmExpandedRoutesTest {
                     val payload = when (val request = cmd.drop(6)) {
                         "1089" -> "5089"
                         "1A9B" -> "7F1A31"
+                        "22F187" -> "7F2231"
+                        "31B80000" -> if (destination in setOf(1, 2)) "71B80118" else "7F3111"
                         "1A9F" -> if (lostListReply) "NO DATA" else "7F1A11"
                         "2204A1" -> if (missingList) "7F2231" else list()
                         "1800FF00" -> "5800"

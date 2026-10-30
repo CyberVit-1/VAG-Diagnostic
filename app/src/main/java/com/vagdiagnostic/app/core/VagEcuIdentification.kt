@@ -2,7 +2,8 @@ package com.vagdiagnostic.app.core
 
 /** A small, validated subset of identification, never VIN/serial/coding data. */
 object VagEcuIdentification {
-    data class Identity(val partNumber: String, val softwareVersion: String?, val request: String) {
+    data class Identity(val partNumber: String, val softwareVersion: String?, val request: String,
+        val component: String? = null, val subsystems: List<Identity> = emptyList()) {
         fun summary(): String = "Gateway: $partNumber" + (softwareVersion?.let { "; ПО $it" } ?: "")
     }
     private fun text(bytes: List<Int>): String? {
@@ -22,7 +23,16 @@ object VagEcuIdentification {
         if (body.size < 26) return null
         val number = part(body.take(12)) ?: return null
         val software = text(body.drop(12).take(4))
-        return Identity(number, software, "1A9B")
+        return Identity(number, software, "1A9B", component = text(body.drop(26).take(16)))
+    }
+    /** Additional complete1A9B messages describe subsystems, not extra logical
+     * diagnostic addresses. Never count these as independently scanned ECUs. */
+    fun kwpMessages(replies: List<List<Int>>): Identity? {
+        require(replies.isNotEmpty()) { "Нет сообщений идентификации ECU" }
+        val main = kwp(replies.first()) ?: return null
+        val children = replies.drop(1).mapNotNull { kwp(it) }
+            .distinctBy { Triple(it.partNumber, it.softwareVersion, it.component) }
+        return main.copy(subsystems = children)
     }
     fun udsPartNumber(reply: List<Int>): Identity? {
         if (reply.size == 3 && reply.take(2) == listOf(0x7F, 0x22)) return null

@@ -102,7 +102,7 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
     }
 
     private suspend fun requestPackets(command: String, allowMultiple: Boolean): List<List<Int>> {
-        require(command in setOf("1089", "1A9F", "2204A1", "1800FF00", "1802FF00", "19028D", "1A9B", "22F187"))
+        require(command in setOf("1089", "1A9F", "2204A1", "1800FF00", "1802FF00", "19028D", "1A9B", "22F187", "31B80000"))
         check(active)
         coroutineContext.ensureActive()
         val bytes = Wire.bytes(command)
@@ -227,7 +227,7 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
                                 (result.size == 3 && result.take(2) == listOf(0x7F, bytes[0]))) { "TP2.0 ответ другому сервису" }
                             if (messages.isEmpty() && result.firstOrNull() != 0x7F) {
                                 val echo = when (command) {
-                                    "1089", "1A9F", "1A9B", "19028D" -> bytes.drop(1).take(1)
+                                    "1089", "1A9F", "1A9B", "19028D", "31B80000" -> bytes.drop(1).take(1)
                                     "2204A1", "22F187" -> bytes.drop(1).take(2)
                                     else -> emptyList()
                                 }

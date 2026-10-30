@@ -5,6 +5,18 @@ import org.junit.Test
 
 class VagEcuIdentificationTest {
     private fun ascii(s: String) = s.map { it.code }
+    @Test fun mainAndSubsystemIdentitiesKeepBoundedComponentFieldsWithoutInventingAddresses() {
+        fun body(part: String, component: String) = listOf(0x5A, 0x9B) + ascii(part.padEnd(12) + "0001") +
+            List(10) { 0 } + ascii(component)
+        val main = body("1K0937087", "BCM PQ35        IGNORED")
+        val child = body("1K0955559", "SUBSYSTEM")
+        val parsed = requireNotNull(VagEcuIdentification.kwpMessages(listOf(main, child, child)))
+        assertEquals("BCM PQ35", parsed.component)
+        assertEquals(1, parsed.subsystems.size)
+        assertEquals("1K0955559", parsed.subsystems.single().partNumber)
+        assertFalse(parsed.summary().contains("IGNORED"))
+        assertTrue(runCatching { VagEcuIdentification.kwpMessages(listOf(main, listOf(0x5A, 0x9F))) }.isFailure)
+    }
     @Test fun fixedMainModuleFieldsOnlyAndNoCodingOrSerialInSummary() {
         val reply = listOf(0x5A, 0x9B) + ascii("1K0907530K  " + "0178") + List(10) { 0 } + ascii("OTHER DATA")
         val identity = requireNotNull(VagEcuIdentification.kwp(reply))

@@ -325,11 +325,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             connectedSettings = null
                             var disposable: ElmEngine? = null
                             try {
-                                disposable = createEngine(cfg)
-                                engine = disposable
-                                disposable.connect()
+                                val diagnosticEngine = createEngine(cfg)
+                                disposable = diagnosticEngine
+                                engine = diagnosticEngine
+                                diagnosticEngine.connect()
                                 val addressed = ElmAddressedObdProbe.runOnDisposableEngine(
-                                    disposable, confirmedPhysicalEcu
+                                    diagnosticEngine, confirmedPhysicalEcu
                                 )
                                 _state.value = _state.value.copy(
                                     isoTpReadiness = resultText + "; " +
@@ -358,7 +359,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                         db.journal().insert(JournalEntity(timestamp = System.currentTimeMillis(), connection = cfg.type,
                                             command = "VAG_PLATFORM_PROFILE", raw = "${tp20Profile.brand}/${tp20Profile.chassis}; ${tp20Profile.source}; кандидат, применимость проверяется ответами Gateway",
                                             elapsedMs = 0, outcome = "SELECTED"))
-                                        val gateway = ElmVagScan.scan(disposable,
+                                        val gateway = ElmVagScan.scan(diagnosticEngine,
                                             onUnit = { unit ->
                                                 units[unit.address] = unit
                                                 _state.value = _state.value.copy(units = units.values.toList(), current = unit.name)
@@ -371,7 +372,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                                     timestamp = System.currentTimeMillis(), connection = cfg.type,
                                                     command = command, raw = detail, elapsedMs = 0, outcome = outcome))
                                             }, allowCandidateFallback = tp20Profile.allowCandidateFallback,
-                                            readGatewayIdentity = true)
+                                            readGatewayIdentity = true,
+                                            recreateEngine = { createEngine(cfg).also { replacement ->
+                                                disposable = replacement
+                                                engine = replacement
+                                            } })
                                         if (!gateway.complete) incompleteModes = true
                                         _state.value = _state.value.copy(
                                             isoTpReadiness = _state.value.isoTpReadiness + "; " + gateway.note)
