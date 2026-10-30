@@ -1,0 +1,142 @@
+package com.vagdiagnostic.app.core
+
+/** Fixed byte-layout and ASAM rules for additional UDS DTC records.
+ * These facts describe raw bit fields; no physical-unit interpretation or DTC
+ * construction is performed here. Unmatched schemas remain opaque. */
+internal object VagUdsRecordLayouts {
+    data class Spec(val group: Int, val offset: Int, val mask: Long, val width: Int)
+    private val groups = listOf(
+        setOf("*"),
+        setOf("EV_TCMDL800041_001", "EV_TCMDQ500021_001", "EV_TCMDQ500021_A01"),
+        setOf("EV_MUCNSMQB37w_001", "EV_MUCNSMQB_001", "EV_MUEIGPMQB_001", "EV_MUEIMQB37w_001", "EV_MUEI_001", "EV_MUICASIVIPart_001", "EV_MUICASIVIPart_002", "EV_MUICASIVIPart_003", "EV_MUICASSAFEPart_001", "EV_MUICASSAFEPart_002", "EV_MUOIMQB37w_001", "EV_MUOIMQB37w_002", "EV_MUOIMQB_001", "EV_MUOIMQB_002", "EV_MUREGIO_001", "EV_MUTI_001"),
+        setOf("EV_GatewICAS1MEB_005", "EV_GatewMQB2020_004", "EV_GatewMQB2020_005", "EV_GatewMQB2020_006"),
+        setOf("EV_BCM37w_006"),
+        setOf("EV_BCM37w_006", "EV_BCM37w_007"),
+        setOf("EV_GatewICAS1MEBUNECE_001", "EV_GatewICAS1MEB_005", "EV_GatewMQB2020_004", "EV_GatewMQB2020_005", "EV_GatewMQB2020_006"),
+        setOf("EV_MUEIMQB37w_001", "EV_MUEI_001", "EV_MUREGIO_001", "EV_MUTI_001"),
+        setOf("EV_GatewICAS1MEBUNECE_001"),
+        setOf("EV_GatewICAS1MEBUNECE_001", "EV_GatewICAS1MEB_005", "EV_GatewMQB2020_004", "EV_GatewMQB2020_005", "EV_GatewMQB2020_006", "EV_GatewPKOUDS_001", "EV_GatewPKOUDS_002", "EV_GatewPkoUDS_001", "EV_GatewPkoUDS_002", "EV_GatewUDS_001", "EV_GatewVW526UDS_001"),
+        setOf("EV_GatewMQB2020_004", "EV_GatewMQB2020_005", "EV_GatewMQB2020_006"),
+        setOf("EV_GatewICAS1MEB_005"),
+        setOf("EV_GatewICAS1MEBUNECE_001", "EV_GatewICAS1MEB_005"),
+        setOf("EV_BCM37w_007"),
+        setOf("EV_MUCNSMQB37w_001", "EV_MUCNSMQB_001", "EV_MUEIGPMQB_001", "EV_MUICASIVIPart_001", "EV_MUICASIVIPart_002", "EV_MUICASIVIPart_003", "EV_MUICASSAFEPart_001", "EV_MUICASSAFEPart_002", "EV_MUOIMQB37w_001", "EV_MUOIMQB37w_002", "EV_MUOIMQB_001", "EV_MUOIMQB_002"),
+        setOf("EV_ECM*"),
+        setOf("EV_TCMAL450211_001", "EV_TCMAL450211_002", "EV_TCMAL550011_001", "EV_TCMAL551111_001", "EV_TCMAL551111_002", "EV_TCMAL551112_001", "EV_TCMAL551211_001", "EV_TCMAL551211_002", "EV_TCMAL551511_002", "EV_TCMAL651211_001", "EV_TCMAL651_A01", "EV_TCMALX51011_001", "EV_TCMALX51011_002", "EV_TCMALX52011_002", "EV_TCMDL800041_001", "EV_TCMDQ200022_001", "EV_TCMDQ381061_001", "EV_TCMDQ381062_001", "EV_TCMDQ381063_001", "EV_TCMDQ400022_001", "EV_TCMDQ500021_001", "EV_TCMSQ101011_002", "EV_TCMSQ101011_004", "EV_TCMSQ101011_005", "EV_TCMSQ101011_006", "EV_TCMVL381_A01", "EV_TCMVL381_A02"),
+        setOf("EV_TCMAL450211_001", "EV_TCMAL450211_002", "EV_TCMAL550011_001", "EV_TCMAL551111_001", "EV_TCMAL551111_002", "EV_TCMAL551112_001", "EV_TCMAL551211_001", "EV_TCMAL551211_002", "EV_TCMAL551511_002", "EV_TCMAL651211_001", "EV_TCMAL651_A01", "EV_TCMALX51011_001", "EV_TCMALX51011_002", "EV_TCMALX52011_002", "EV_TCMDL501021_001", "EV_TCMDL501021_A03", "EV_TCMDL501_A02", "EV_TCMSQ101011_002", "EV_TCMSQ101011_004", "EV_TCMSQ101011_005", "EV_TCMSQ101011_006", "EV_TCMVL381_A01", "EV_TCMVL381_A02"),
+        setOf("EV_TCMAL450211_001", "EV_TCMAL450211_002", "EV_TCMAL550011_001", "EV_TCMAL551111_001", "EV_TCMAL551111_002", "EV_TCMAL551112_001", "EV_TCMAL551211_001", "EV_TCMAL551211_002", "EV_TCMAL551511_002", "EV_TCMAL651211_001", "EV_TCMAL651_A01", "EV_TCMALX51011_001", "EV_TCMALX51011_002", "EV_TCMALX52011_002", "EV_TCMDL382021_002", "EV_TCMDL501021_001", "EV_TCMDL501021_A03", "EV_TCMDL501_A02", "EV_TCMSQ101011_002", "EV_TCMSQ101011_004", "EV_TCMSQ101011_005", "EV_TCMSQ101011_006", "EV_TCMVL381_A01", "EV_TCMVL381_A02"),
+        setOf("EV_TCMAL450211_001", "EV_TCMAL450211_002", "EV_TCMAL550011_001", "EV_TCMAL551111_001", "EV_TCMAL551111_002", "EV_TCMAL551112_001", "EV_TCMAL551211_001", "EV_TCMAL551211_002", "EV_TCMAL551511_002", "EV_TCMAL651211_001", "EV_TCMAL651_A01", "EV_TCMAL991031_001", "EV_TCMAL991031_002", "EV_TCMAL991031_003", "EV_TCMALX51011_001", "EV_TCMALX51011_002", "EV_TCMALX52011_002", "EV_TCMAQ250031_001", "EV_TCMAQ250031_002", "EV_TCMAQ250031_003", "EV_TCMAQ300031_001", "EV_TCMAQ450031_001", "EV_TCMDL501021_001", "EV_TCMDL501021_A03", "EV_TCMDL501_A02", "EV_TCMDL800041_001", "EV_TCMDQ381061_001", "EV_TCMDQ381062_001", "EV_TCMDQ381063_001", "EV_TCMDQ500021_001", "EV_TCMDQ500021_A01", "EV_TCMSQ101011_002", "EV_TCMSQ101011_004", "EV_TCMSQ101011_005", "EV_TCMSQ101011_006", "EV_TCMVL381_A01", "EV_TCMVL381_A02"),
+        setOf("EV_TCMAL450211_001", "EV_TCMAL450211_002", "EV_TCMAL550011_001", "EV_TCMAL551111_001", "EV_TCMAL551111_002", "EV_TCMAL551112_001", "EV_TCMAL551211_001", "EV_TCMAL551211_002", "EV_TCMAL551511_002", "EV_TCMAL651211_001", "EV_TCMAL651_A01", "EV_TCMAL991031_001", "EV_TCMAL991031_002", "EV_TCMAL991031_003", "EV_TCMALX51011_001", "EV_TCMALX51011_002", "EV_TCMALX52011_002", "EV_TCMAQ250031_001", "EV_TCMAQ250031_002", "EV_TCMAQ250031_003", "EV_TCMAQ300031_001", "EV_TCMAQ450031_001", "EV_TCMDL501021_001", "EV_TCMDL501021_A03", "EV_TCMDL501_A02", "EV_TCMDL800041_001", "EV_TCMDL800421_001", "EV_TCMDQ500021_001", "EV_TCMDQ500021_A01", "EV_TCMSQ101011_002", "EV_TCMSQ101011_004", "EV_TCMSQ101011_005", "EV_TCMSQ101011_006", "EV_TCMVL381_A01", "EV_TCMVL381_A02"),
+        setOf("EV_TCMAL450211_001", "EV_TCMAL450211_002", "EV_TCMAL550011_001", "EV_TCMAL551111_001", "EV_TCMAL551111_002", "EV_TCMAL551112_001", "EV_TCMAL551211_001", "EV_TCMAL551211_002", "EV_TCMAL551511_002", "EV_TCMAL651211_001", "EV_TCMAL651_A01", "EV_TCMALX51011_001", "EV_TCMALX51011_002", "EV_TCMALX52011_002", "EV_TCMSQ101011_002", "EV_TCMSQ101011_004", "EV_TCMSQ101011_005", "EV_TCMSQ101011_006", "EV_TCMVL381_A01", "EV_TCMVL381_A02"),
+        setOf("EV_TCMDL800041_001", "EV_TCMDQ381061_001", "EV_TCMDQ381062_001", "EV_TCMDQ381063_001", "EV_TCMDQ500021_001"),
+        setOf("EV_TCMDL800041_001", "EV_TCMDQ381061_001", "EV_TCMDQ500021_001"),
+        setOf("EV_TCMDL800041_001", "EV_TCMDQ381062_001", "EV_TCMDQ381063_001", "EV_TCMDQ500021_001"),
+        setOf("EV_TCMDQ381062_001", "EV_TCMDQ381063_001", "EV_TCMDQ500021_001"),
+        setOf("EV_TCMDL800041_001", "EV_TCMDQ200022_001", "EV_TCMDQ381061_001", "EV_TCMDQ381062_001", "EV_TCMDQ381063_001", "EV_TCMDQ400022_001", "EV_TCMDQ500021_001"),
+        setOf("EV_TCMDL800421_001"),
+        setOf("EV_TCMDL800041_001"),
+        setOf("EV_TCMAQ250032_001", "EV_TCMAQ300032_001"),
+        setOf("EV_TCMAQ300032_001"),
+        setOf("EV_TCMDQ200022_001", "EV_TCMDQ400022_001"),
+        setOf("EV_TCMDQ200022_001", "EV_TCMDQ381061_001", "EV_TCMDQ381062_001", "EV_TCMDQ381063_001", "EV_TCMDQ400022_001"),
+        setOf("EV_TCMAQ250032_001"),
+        setOf("EV_TCMDQ381062_001", "EV_TCMDQ381063_001"),
+        setOf("EV_TCMAL991031_001", "EV_TCMAL991031_002", "EV_TCMAL991031_003", "EV_TCMAQ250031_001", "EV_TCMAQ250031_002", "EV_TCMAQ250031_003", "EV_TCMAQ300031_001", "EV_TCMAQ450031_001"),
+        setOf("EV_TCMDQ200021_001", "EV_TCMDQ250021_001", "EV_TCMDQ400021_001"),
+        setOf("EV_TCMDQ200021_001", "EV_TCMDQ400021_001"),
+        setOf("EV_TCMDQ250021_001"),
+        setOf("EV_TCMDL382021_002", "EV_TCMDQ250021_001"),
+        setOf("EV_TCMDQ381061_001"),
+        setOf("EV_TCMDL382021_002", "EV_TCMDL501021_001", "EV_TCMDL501021_A03", "EV_TCMDL501_A02"),
+        setOf("EV_TCMDL501021_001", "EV_TCMDL501021_A03", "EV_TCMDL501_A02"),
+        setOf("EV_TCMDL382021_002"),
+        setOf("EV_GatewA0Lear_001", "EV_GatewA0Lear_013", "EV_GatewA0_013", "EV_GatewContiAU33X_011", "EV_GatewContiAU33X_013", "EV_GatewConti_008", "EV_GatewConti_009", "EV_GatewConti_010", "EV_GatewConti_011", "EV_GatewConti_013", "EV_GatewEVConti_010", "EV_GatewEVConti_011", "EV_GatewEVConti_013", "EV_GatewICAS1MEBUNECE_001", "EV_GatewICAS1MEB_005", "EV_GatewLear_005", "EV_GatewLear_006", "EV_GatewLear_008", "EV_GatewLear_009", "EV_GatewLear_010", "EV_GatewLear_011", "EV_GatewLear_013", "EV_GatewNF_013", "EV_GatewPKOUDS_001", "EV_GatewPKOUDS_002", "EV_GatewPkoUDS_001", "EV_GatewPkoUDS_002", "EV_GatewUDS_001", "EV_GatewVW526UDS_001"),
+        setOf("EV_GatewA0Lear_001", "EV_GatewA0Lear_013", "EV_GatewA0_013", "EV_GatewContiAU33X_011", "EV_GatewContiAU33X_013", "EV_GatewConti_008", "EV_GatewConti_009", "EV_GatewConti_010", "EV_GatewConti_011", "EV_GatewConti_013", "EV_GatewEVConti_010", "EV_GatewEVConti_011", "EV_GatewEVConti_013", "EV_GatewLear_005", "EV_GatewLear_006", "EV_GatewLear_008", "EV_GatewLear_009", "EV_GatewLear_010", "EV_GatewLear_011", "EV_GatewLear_013", "EV_GatewNF_013"),
+        setOf("EV_GatewPKOUDS_001", "EV_GatewPKOUDS_002", "EV_GatewPkoUDS_001", "EV_GatewPkoUDS_002", "EV_GatewUDS_001", "EV_GatewVW526UDS_001"),
+        setOf("EV_RDKBERU25_003", "EV_RDKBERU30_003", "EV_RDKBERU30_005", "EV_RDKBERU30_006"),
+        setOf("EV_RDKBERU25_003", "EV_RDKBERU30_005", "EV_RDKBERU30_006"),
+        setOf("EV_RDKBERU30_003", "EV_RDKBERU30_005", "EV_RDKBERU30_006"),
+        setOf("EV_RDKBERU30_003"),
+        setOf("EV_RDKBERU25_003"),
+        setOf("EV_BCM37w_005", "EV_BCM37w_006", "EV_BCM37w_007"),
+        setOf("EV_BCM37w_005", "EV_BCM37w_006", "EV_BCM37w_007", "EV_BCMBOSCH_011", "EV_BCMBOSCH_012", "EV_BCMBOSCH_013", "EV_BCMBOSCH_014", "EV_BCMBOSCH_015", "EV_BCMBOSCH_016", "EV_BCMBOSCH_017", "EV_BCMBOSCH_018", "EV_BCMBOSCH_019", "EV_BCMBOSCH_020", "EV_BCMBOSCH_021", "EV_BCMBOSCH_022", "EV_BCMCONTI_011", "EV_BCMCONTI_012", "EV_BCMCONTI_013", "EV_BCMCONTI_014", "EV_BCMCONTI_015", "EV_BCMCONTI_016", "EV_BCMCONTI_017", "EV_BCMCONTI_018", "EV_BCMCONTI_019", "EV_BCMCONTI_020", "EV_BCMCONTI_021", "EV_BCMCONTI_022", "EV_BCMMQB_011", "EV_BCMMQB_012", "EV_BCMMQB_013", "EV_BCMMQB_014", "EV_BCMMQB_015", "EV_BCMMQB_016", "EV_BCMMQB_017", "EV_BCMMQB_018", "EV_BCMMQB_019", "EV_BCMMQB_020", "EV_BCMMQB_021", "EV_BCMMQB_022", "EV_BodyContrModul1UDSBosc_011", "EV_BodyContrModul1UDSBosc_012", "EV_BodyContrModul1UDSBosc_013", "EV_BodyContrModul1UDSBosc_014", "EV_BodyContrModul1UDSBosc_015", "EV_BodyContrModul1UDSBosc_016", "EV_BodyContrModul1UDSBosc_017", "EV_BodyContrModul1UDSBosc_018", "EV_BodyContrModul1UDSBosc_019", "EV_BodyContrModul1UDSBosc_020", "EV_BodyContrModul1UDSBosc_021", "EV_BodyContrModul1UDSBosc_022", "EV_BodyContrModul1UDSCont_011", "EV_BodyContrModul1UDSCont_012", "EV_BodyContrModul1UDSCont_013", "EV_BodyContrModul1UDSCont_014", "EV_BodyContrModul1UDSCont_015", "EV_BodyContrModul1UDSCont_016", "EV_BodyContrModul1UDSCont_017", "EV_BodyContrModul1UDSCont_018", "EV_BodyContrModul1UDSCont_019", "EV_BodyContrModul1UDSCont_020", "EV_BodyContrModul1UDSCont_021", "EV_BodyContrModul1UDSCont_022"),
+        setOf("EV_BCM37w_005", "EV_BCM37w_006", "EV_BCM37w_007", "EV_BCMA0_004", "EV_BCMA0_005", "EV_BCMA0_006", "EV_BCMA0_104", "EV_BCMA0_105", "EV_BCMA0_106", "EV_BCMA0_107", "EV_BCMA0_201", "EV_BCMA0_202", "EV_BCMA0_203", "EV_BCMA0_204", "EV_BCMA0_205", "EV_BCMA0_206", "EV_BCMA0_207", "EV_BCMA0_208", "EV_BCMA0_209", "EV_BCMBOSCH_009", "EV_BCMBOSCH_010", "EV_BCMBOSCH_011", "EV_BCMBOSCH_012", "EV_BCMBOSCH_013", "EV_BCMBOSCH_014", "EV_BCMBOSCH_015", "EV_BCMBOSCH_016", "EV_BCMBOSCH_017", "EV_BCMBOSCH_018", "EV_BCMBOSCH_019", "EV_BCMBOSCH_020", "EV_BCMBOSCH_021", "EV_BCMBOSCH_022", "EV_BCMCONTI_009", "EV_BCMCONTI_010", "EV_BCMCONTI_011", "EV_BCMCONTI_012", "EV_BCMCONTI_013", "EV_BCMCONTI_014", "EV_BCMCONTI_015", "EV_BCMCONTI_016", "EV_BCMCONTI_017", "EV_BCMCONTI_018", "EV_BCMCONTI_019", "EV_BCMCONTI_020", "EV_BCMCONTI_021", "EV_BCMCONTI_022", "EV_BCMMQB_010", "EV_BCMMQB_011", "EV_BCMMQB_012", "EV_BCMMQB_013", "EV_BCMMQB_014", "EV_BCMMQB_015", "EV_BCMMQB_016", "EV_BCMMQB_017", "EV_BCMMQB_018", "EV_BCMMQB_019", "EV_BCMMQB_020", "EV_BCMMQB_021", "EV_BCMMQB_022", "EV_BodyContrModul1UDSBosc_009", "EV_BodyContrModul1UDSBosc_010", "EV_BodyContrModul1UDSBosc_011", "EV_BodyContrModul1UDSBosc_012", "EV_BodyContrModul1UDSBosc_013", "EV_BodyContrModul1UDSBosc_014", "EV_BodyContrModul1UDSBosc_015", "EV_BodyContrModul1UDSBosc_016", "EV_BodyContrModul1UDSBosc_017", "EV_BodyContrModul1UDSBosc_018", "EV_BodyContrModul1UDSBosc_019", "EV_BodyContrModul1UDSBosc_020", "EV_BodyContrModul1UDSBosc_021", "EV_BodyContrModul1UDSBosc_022", "EV_BodyContrModul1UDSCont_009", "EV_BodyContrModul1UDSCont_010", "EV_BodyContrModul1UDSCont_011", "EV_BodyContrModul1UDSCont_012", "EV_BodyContrModul1UDSCont_013", "EV_BodyContrModul1UDSCont_014", "EV_BodyContrModul1UDSCont_015", "EV_BodyContrModul1UDSCont_016", "EV_BodyContrModul1UDSCont_017", "EV_BodyContrModul1UDSCont_018", "EV_BodyContrModul1UDSCont_019", "EV_BodyContrModul1UDSCont_020", "EV_BodyContrModul1UDSCont_021", "EV_BodyContrModul1UDSCont_022", "EV_MQBA0_004"),
+        setOf("EV_BCMA0_004", "EV_BCMA0_005", "EV_BCMA0_006", "EV_BCMA0_104", "EV_BCMA0_105", "EV_BCMA0_106", "EV_BCMA0_107", "EV_BCMA0_201", "EV_BCMA0_202", "EV_BCMA0_203", "EV_BCMA0_204", "EV_BCMA0_205", "EV_BCMA0_206", "EV_BCMA0_207", "EV_BCMA0_208", "EV_BCMA0_209", "EV_BCMBOSCH_009", "EV_BCMBOSCH_010", "EV_BCMBOSCH_011", "EV_BCMBOSCH_012", "EV_BCMBOSCH_013", "EV_BCMBOSCH_014", "EV_BCMBOSCH_015", "EV_BCMBOSCH_016", "EV_BCMBOSCH_017", "EV_BCMBOSCH_018", "EV_BCMBOSCH_019", "EV_BCMBOSCH_020", "EV_BCMBOSCH_021", "EV_BCMBOSCH_022", "EV_BCMCONTI_009", "EV_BCMCONTI_010", "EV_BCMCONTI_011", "EV_BCMCONTI_012", "EV_BCMCONTI_013", "EV_BCMCONTI_014", "EV_BCMCONTI_015", "EV_BCMCONTI_016", "EV_BCMCONTI_017", "EV_BCMCONTI_018", "EV_BCMCONTI_019", "EV_BCMCONTI_020", "EV_BCMCONTI_021", "EV_BCMCONTI_022", "EV_BCMMQB_010", "EV_BCMMQB_011", "EV_BCMMQB_012", "EV_BCMMQB_013", "EV_BCMMQB_014", "EV_BCMMQB_015", "EV_BCMMQB_016", "EV_BCMMQB_017", "EV_BCMMQB_018", "EV_BCMMQB_019", "EV_BCMMQB_020", "EV_BCMMQB_021", "EV_BCMMQB_022", "EV_BodyContrModul1UDSBosc_009", "EV_BodyContrModul1UDSBosc_010", "EV_BodyContrModul1UDSBosc_011", "EV_BodyContrModul1UDSBosc_012", "EV_BodyContrModul1UDSBosc_013", "EV_BodyContrModul1UDSBosc_014", "EV_BodyContrModul1UDSBosc_015", "EV_BodyContrModul1UDSBosc_016", "EV_BodyContrModul1UDSBosc_017", "EV_BodyContrModul1UDSBosc_018", "EV_BodyContrModul1UDSBosc_019", "EV_BodyContrModul1UDSBosc_020", "EV_BodyContrModul1UDSBosc_021", "EV_BodyContrModul1UDSBosc_022", "EV_BodyContrModul1UDSCont_009", "EV_BodyContrModul1UDSCont_010", "EV_BodyContrModul1UDSCont_011", "EV_BodyContrModul1UDSCont_012", "EV_BodyContrModul1UDSCont_013", "EV_BodyContrModul1UDSCont_014", "EV_BodyContrModul1UDSCont_015", "EV_BodyContrModul1UDSCont_016", "EV_BodyContrModul1UDSCont_017", "EV_BodyContrModul1UDSCont_018", "EV_BodyContrModul1UDSCont_019", "EV_BodyContrModul1UDSCont_020", "EV_BodyContrModul1UDSCont_021", "EV_BodyContrModul1UDSCont_022", "EV_MQBA0_004"),
+        setOf("EV_BCMA0_004", "EV_BCMA0_005", "EV_BCMA0_006", "EV_BCMA0_104", "EV_BCMA0_105", "EV_BCMA0_106", "EV_BCMA0_107", "EV_BCMA0_201", "EV_BCMA0_202", "EV_BCMA0_203", "EV_BCMA0_204", "EV_BCMA0_205", "EV_BCMA0_206", "EV_BCMA0_207", "EV_BCMA0_208", "EV_BCMA0_209", "EV_BCMBOSCH_009", "EV_BCMBOSCH_010", "EV_BCMCONTI_009", "EV_BCMCONTI_010", "EV_BCMMQB_010", "EV_BodyContrModul1UDSBosc_009", "EV_BodyContrModul1UDSBosc_010", "EV_BodyContrModul1UDSCont_009", "EV_BodyContrModul1UDSCont_010", "EV_MQBA0_004"),
+        setOf("EV_BCMBOSCH_011", "EV_BCMBOSCH_012", "EV_BCMBOSCH_013", "EV_BCMBOSCH_014", "EV_BCMBOSCH_015", "EV_BCMBOSCH_016", "EV_BCMBOSCH_017", "EV_BCMBOSCH_018", "EV_BCMBOSCH_019", "EV_BCMBOSCH_020", "EV_BCMBOSCH_021", "EV_BCMBOSCH_022", "EV_BCMCONTI_011", "EV_BCMCONTI_012", "EV_BCMCONTI_013", "EV_BCMCONTI_014", "EV_BCMCONTI_015", "EV_BCMCONTI_016", "EV_BCMCONTI_017", "EV_BCMCONTI_018", "EV_BCMCONTI_019", "EV_BCMCONTI_020", "EV_BCMCONTI_021", "EV_BCMCONTI_022", "EV_BCMMQB_011", "EV_BCMMQB_012", "EV_BCMMQB_013", "EV_BCMMQB_014", "EV_BCMMQB_015", "EV_BCMMQB_016", "EV_BCMMQB_017", "EV_BCMMQB_018", "EV_BCMMQB_019", "EV_BCMMQB_020", "EV_BCMMQB_021", "EV_BCMMQB_022", "EV_BodyContrModul1UDSBosc_011", "EV_BodyContrModul1UDSBosc_012", "EV_BodyContrModul1UDSBosc_013", "EV_BodyContrModul1UDSBosc_014", "EV_BodyContrModul1UDSBosc_015", "EV_BodyContrModul1UDSBosc_016", "EV_BodyContrModul1UDSBosc_017", "EV_BodyContrModul1UDSBosc_018", "EV_BodyContrModul1UDSBosc_019", "EV_BodyContrModul1UDSBosc_020", "EV_BodyContrModul1UDSBosc_021", "EV_BodyContrModul1UDSBosc_022", "EV_BodyContrModul1UDSCont_011", "EV_BodyContrModul1UDSCont_012", "EV_BodyContrModul1UDSCont_013", "EV_BodyContrModul1UDSCont_014", "EV_BodyContrModul1UDSCont_015", "EV_BodyContrModul1UDSCont_016", "EV_BodyContrModul1UDSCont_017", "EV_BodyContrModul1UDSCont_018", "EV_BodyContrModul1UDSCont_019", "EV_BodyContrModul1UDSCont_020", "EV_BodyContrModul1UDSCont_021", "EV_BodyContrModul1UDSCont_022")
+    )
+    // Duplicate declarations retain the first entry, as in unique insertion.
+    private val specific = mapOf(
+        0x01 to listOf(Spec(0, 0, 0xFFL, 1), Spec(0, 1, 0xFFL, 1)),
+        0x02 to listOf(Spec(0, 0, 0xFFL, 1), Spec(0, 1, 0xFFFFFFL, 3), Spec(1, 1, 0xFFFFFL, 3), Spec(0, 4, 0xFFL, 1), Spec(0, 5, 0x1FCL, 2), Spec(0, 6, 0x3C0L, 2), Spec(0, 7, 0x3EL, 1), Spec(0, 7, 0x1F0L, 2), Spec(0, 8, 0xFC0L, 2), Spec(0, 9, 0x3FL, 1)),
+        0x03 to listOf(Spec(2, 0, 0xFFL, 1), Spec(3, 0, 0x1L, 1), Spec(3, 0, 0x2L, 1), Spec(3, 0, 0x4L, 1), Spec(3, 0, 0x8L, 1), Spec(3, 0, 0x10L, 1), Spec(3, 0, 0x20L, 1), Spec(3, 0, 0xC0L, 1)),
+        0x04 to listOf(Spec(4, 0, 0xFFL, 1), Spec(2, 1, 0xC0L, 1), Spec(2, 1, 0x30L, 1), Spec(2, 1, 0xCL, 1), Spec(2, 1, 0x3L, 1), Spec(2, 2, 0xC0L, 1), Spec(2, 2, 0x30L, 1), Spec(2, 2, 0xCL, 1), Spec(2, 2, 0x3L, 1), Spec(2, 3, 0xC0L, 1), Spec(2, 3, 0x30L, 1), Spec(2, 3, 0xCL, 1), Spec(2, 3, 0x3L, 1), Spec(2, 4, 0xC0L, 1), Spec(2, 4, 0x30L, 1), Spec(2, 4, 0xCL, 1), Spec(2, 4, 0x3L, 1), Spec(2, 5, 0xC0L, 1), Spec(2, 5, 0x30L, 1), Spec(2, 5, 0xCL, 1), Spec(2, 5, 0x3L, 1), Spec(2, 6, 0xC0L, 1), Spec(2, 6, 0x30L, 1), Spec(2, 6, 0xCL, 1), Spec(2, 6, 0x3L, 1), Spec(2, 7, 0xC0L, 1), Spec(2, 7, 0x30L, 1), Spec(2, 7, 0xCL, 1), Spec(2, 7, 0x3L, 1)),
+        0x05 to listOf(Spec(5, 0, 0xFFL, 1), Spec(5, 1, 0xFFL, 1), Spec(5, 2, 0xFFL, 1), Spec(5, 3, 0xFFL, 1), Spec(5, 4, 0xFFL, 1), Spec(6, 0, 0x1L, 1), Spec(6, 0, 0x6L, 1), Spec(6, 0, 0x38L, 1), Spec(6, 1, 0x7L, 1), Spec(7, 1, 0xFFFFFFFFL, 4)),
+        0x06 to listOf(Spec(5, 0, 0xFL, 1), Spec(5, 0, 0xE0L, 1), Spec(5, 1, 0xFL, 1), Spec(5, 1, 0xE0L, 1), Spec(5, 2, 0xFL, 1), Spec(5, 2, 0xE0L, 1), Spec(5, 3, 0xFL, 1), Spec(5, 3, 0xE0L, 1), Spec(7, 1, 0xFFFFL, 2), Spec(7, 3, 0xFFFFL, 2), Spec(7, 5, 0xFFFFL, 2)),
+        0x07 to listOf(Spec(5, 0, 0x1L, 1), Spec(5, 0, 0x2L, 1), Spec(5, 0, 0x4L, 1), Spec(5, 0, 0x8L, 1), Spec(5, 0, 0x10L, 1), Spec(5, 0, 0x20L, 1), Spec(5, 0, 0x40L, 1), Spec(5, 0, 0x80L, 1), Spec(5, 1, 0x1L, 1), Spec(5, 1, 0x2L, 1), Spec(5, 1, 0x4L, 1), Spec(5, 1, 0x8L, 1), Spec(5, 1, 0x10L, 1), Spec(5, 1, 0x20L, 1), Spec(5, 1, 0x40L, 1), Spec(5, 1, 0x80L, 1), Spec(5, 2, 0x1L, 1), Spec(5, 2, 0x2L, 1), Spec(5, 2, 0x4L, 1), Spec(5, 2, 0x8L, 1), Spec(5, 2, 0x10L, 1), Spec(5, 2, 0x20L, 1), Spec(5, 2, 0x40L, 1), Spec(5, 2, 0x80L, 1), Spec(5, 3, 0x1L, 1), Spec(5, 3, 0x2L, 1), Spec(5, 3, 0x4L, 1), Spec(5, 3, 0x8L, 1), Spec(5, 3, 0x10L, 1), Spec(5, 3, 0x20L, 1), Spec(5, 3, 0xC0L, 1)),
+        0x0A to listOf(Spec(5, 1, 0xFCL, 1), Spec(8, 1, 0xFFL, 1), Spec(8, 2, 0xFFL, 1), Spec(8, 3, 0xFFL, 1)),
+        0x0B to listOf(Spec(5, 0, 0xFFL, 1), Spec(5, 1, 0xFFL, 1), Spec(5, 2, 0xFFL, 1), Spec(5, 3, 0xFFL, 1), Spec(6, 0, 0xFFL, 1), Spec(6, 1, 0xFFL, 1), Spec(6, 2, 0xFFL, 1), Spec(6, 3, 0xFFL, 1), Spec(6, 4, 0xFFL, 1), Spec(9, 5, 0xFFL, 1)),
+        0x0C to listOf(Spec(5, 1, 0xFFL, 1)),
+        0x0D to listOf(Spec(5, 0, 0xFFFFL, 2), Spec(5, 2, 0x1L, 1), Spec(5, 2, 0x2L, 1), Spec(5, 2, 0x4L, 1), Spec(5, 2, 0x8L, 1), Spec(5, 2, 0x30L, 1), Spec(5, 2, 0x40L, 1), Spec(5, 2, 0x80L, 1), Spec(5, 3, 0xFFFFL, 2), Spec(10, 0, 0x3L, 1), Spec(10, 0, 0x3CL, 1), Spec(10, 1, 0x7L, 1), Spec(10, 1, 0xF8L, 1), Spec(10, 2, 0xFFL, 1)),
+        0x0E to listOf(Spec(11, 0, 0xFFFFL, 2)),
+        0x0F to listOf(Spec(5, 0, 0xFFL, 1), Spec(12, 2, 0x3L, 1), Spec(12, 2, 0x30L, 1)),
+        0x10 to listOf(Spec(13, 0, 0xFFFFL, 2)),
+        0x13 to listOf(Spec(7, 4, 0xC0L, 1), Spec(7, 4, 0x30L, 1), Spec(7, 4, 0xCL, 1), Spec(7, 4, 0x3L, 1), Spec(7, 5, 0xC0L, 1), Spec(7, 5, 0x30L, 1), Spec(7, 5, 0xCL, 1), Spec(7, 5, 0x3L, 1), Spec(7, 6, 0xC0L, 1), Spec(7, 6, 0x30L, 1), Spec(7, 6, 0xCL, 1), Spec(7, 6, 0x3L, 1), Spec(7, 7, 0xC0L, 1), Spec(7, 7, 0x30L, 1), Spec(7, 7, 0xCL, 1), Spec(7, 7, 0x3L, 1), Spec(7, 8, 0xC0L, 1), Spec(7, 8, 0x30L, 1), Spec(7, 8, 0xCL, 1), Spec(7, 8, 0x3L, 1)),
+        0x15 to listOf(Spec(2, 1, 0xFFL, 1)),
+        0x16 to listOf(Spec(2, 1, 0xFFFFFFFFL, 4), Spec(2, 5, 0x80L, 1), Spec(2, 5, 0x40L, 1), Spec(2, 5, 0x20L, 1), Spec(2, 5, 0x10L, 1), Spec(2, 5, 0x8L, 1), Spec(2, 5, 0x4L, 1), Spec(2, 5, 0x2L, 1), Spec(2, 5, 0x1L, 1)),
+        0x17 to listOf(Spec(2, 1, 0x80L, 1), Spec(2, 1, 0x40L, 1), Spec(2, 1, 0x20L, 1), Spec(2, 1, 0x1FL, 1)),
+        0x18 to listOf(Spec(2, 0, 0xFFL, 1), Spec(2, 1, 0xFFL, 1), Spec(2, 2, 0xFFL, 1), Spec(2, 3, 0xFFL, 1)),
+        0x1E to listOf(Spec(12, 0, 0xFFFFFFFFL, 4)),
+        0x21 to listOf(Spec(2, 3, 0xFFL, 1)),
+        0x23 to listOf(Spec(11, 0, 0xFFFFFFFFL, 4), Spec(11, 16, 0xFFFFL, 2), Spec(2, 0, 0xFFL, 1), Spec(2, 1, 0xFFL, 1)),
+        0x24 to listOf(Spec(2, 1, 0xFFFFL, 2), Spec(2, 3, 0xFFFFL, 2), Spec(2, 10, 0xFFL, 1), Spec(2, 5, 0xFFL, 1), Spec(2, 6, 0xFFFFL, 2), Spec(2, 8, 0xFFL, 1), Spec(2, 9, 0xFFL, 1)),
+        0x25 to listOf(Spec(2, 0, 0xFFL, 1)),
+        0x27 to listOf(Spec(2, 0, 0xFFL, 1), Spec(2, 1, 0xFFL, 1), Spec(2, 2, 0xFFL, 1), Spec(2, 3, 0xFFL, 1), Spec(2, 6, 0xFFL, 1), Spec(2, 7, 0xFFL, 1), Spec(2, 8, 0xFFL, 1)),
+        0x28 to listOf(Spec(2, 9, 0xFFL, 1), Spec(2, 10, 0xFFFFL, 2), Spec(2, 12, 0xFFFFL, 2), Spec(2, 14, 0xFFFFL, 2), Spec(2, 16, 0xFFFFL, 2), Spec(2, 18, 0xFFFFL, 2)),
+        0x34 to listOf(Spec(11, 0, 0xFFFFFFFFL, 4), Spec(11, 43, 0xFFFFFFFFL, 4), Spec(11, 47, 0xFFFFL, 2), Spec(11, 49, 0xFFFFFFFFL, 4), Spec(11, 53, 0xFFFFFFFFL, 4), Spec(11, 57, 0xFFFFFFFFL, 4), Spec(11, 61, 0xFFFFFFFFL, 4), Spec(11, 69, 0xFFFFL, 2), Spec(11, 71, 0xFFFFFFFFL, 4), Spec(11, 75, 0xFFFFL, 2), Spec(11, 77, 0x1FCL, 2), Spec(11, 78, 0x3C0L, 2), Spec(11, 79, 0x3EL, 1), Spec(11, 79, 0x1F0L, 2), Spec(11, 80, 0xFC0L, 2), Spec(11, 81, 0x3FL, 1), Spec(11, 77, 0xFEL, 1), Spec(11, 4, 0x1FEL, 2), Spec(11, 5, 0x1FEL, 2), Spec(11, 6, 0x1FEL, 2), Spec(11, 7, 0x1FEL, 2), Spec(11, 8, 0x1FEL, 2), Spec(11, 9, 0x1FEL, 2), Spec(11, 10, 0x1FEL, 2), Spec(11, 11, 0x1FEL, 2), Spec(11, 12, 0x1FEL, 2), Spec(11, 13, 0x1FEL, 2), Spec(11, 14, 0x1FEL, 2), Spec(11, 15, 0x1FEL, 2), Spec(11, 16, 0x1FEL, 2), Spec(11, 17, 0x1FEL, 2), Spec(11, 18, 0x1FEL, 2), Spec(11, 19, 0x1FEL, 2), Spec(11, 20, 0x1FEL, 2), Spec(11, 21, 0x1FEL, 2), Spec(11, 22, 0x1FEL, 2), Spec(11, 23, 0x1FEL, 2), Spec(11, 24, 0x1FEL, 2), Spec(11, 25, 0x1FEL, 2), Spec(11, 26, 0x1FEL, 2), Spec(11, 27, 0x1FEL, 2), Spec(11, 28, 0x1FEL, 2), Spec(11, 29, 0x1FEL, 2), Spec(11, 30, 0x1FEL, 2), Spec(11, 31, 0x1FEL, 2), Spec(11, 32, 0x1FEL, 2), Spec(11, 33, 0x1FEL, 2), Spec(11, 34, 0x1FEL, 2), Spec(11, 35, 0x1FEL, 2), Spec(11, 36, 0x1FEL, 2), Spec(11, 37, 0x1FEL, 2), Spec(11, 38, 0x1FEL, 2), Spec(11, 39, 0x1FEL, 2), Spec(11, 40, 0x1FEL, 2), Spec(11, 41, 0x1FEL, 2), Spec(11, 4, 0xFEL, 1), Spec(11, 42, 0x1L, 1), Spec(2, 1, 0xFFL, 1)),
+        0x44 to listOf(Spec(2, 9, 0xFFL, 1)),
+        0x45 to listOf(Spec(2, 6, 0xFFL, 1)),
+        0x50 to listOf(Spec(2, 1, 0xFFFFFFL, 3)),
+        0x52 to listOf(Spec(14, 2, 0xFFL, 1)),
+        0x53 to listOf(Spec(7, 0, 0x80L, 1), Spec(7, 0, 0x60L, 1), Spec(7, 0, 0x1FL, 1), Spec(7, 1, 0xFFL, 1), Spec(7, 3, 0xFFL, 1), Spec(7, 4, 0xFFL, 1), Spec(7, 6, 0xFFL, 1), Spec(7, 7, 0xFFL, 1), Spec(7, 9, 0xFFL, 1), Spec(7, 10, 0xFFL, 1), Spec(7, 12, 0xFFL, 1), Spec(7, 13, 0xFFL, 1), Spec(7, 15, 0xFFL, 1), Spec(7, 16, 0xFFL, 1), Spec(7, 18, 0xFFL, 1), Spec(7, 19, 0xFFL, 1), Spec(7, 21, 0xFFL, 1), Spec(7, 22, 0xFFL, 1), Spec(7, 24, 0xFFL, 1), Spec(7, 25, 0xFFL, 1), Spec(7, 27, 0xFFL, 1), Spec(7, 28, 0xFFL, 1)),
+        0x70 to listOf(Spec(15, 0, 0xFFFFL, 2), Spec(15, 2, 0xFFL, 1), Spec(15, 3, 0xFFL, 1), Spec(15, 4, 0xFFL, 1), Spec(15, 5, 0xFFL, 1), Spec(15, 6, 0xFFL, 1), Spec(15, 7, 0xFFFFL, 2), Spec(16, 0, 0xFFFFL, 2), Spec(17, 2, 0xFFFFL, 2), Spec(18, 4, 0xFFFFL, 2), Spec(19, 6, 0xFFL, 1), Spec(19, 7, 0xFFL, 1), Spec(20, 8, 0xFFL, 1), Spec(21, 9, 0xFFL, 1), Spec(22, 2, 0xFFL, 1), Spec(22, 3, 0xFFL, 1), Spec(23, 4, 0xFFL, 1), Spec(24, 5, 0xFL, 1), Spec(25, 5, 0xF0L, 1), Spec(26, 9, 0xFFFFL, 2), Spec(27, 0, 0xFFFFL, 2), Spec(27, 7, 0xFFL, 1), Spec(27, 2, 0xFFL, 1), Spec(27, 3, 0xFFL, 1), Spec(27, 4, 0xFFL, 1), Spec(27, 5, 0xFFL, 1), Spec(27, 6, 0xFFL, 1), Spec(27, 9, 0xFFL, 1), Spec(28, 5, 0xF0L, 1), Spec(29, 15, 0xFFL, 1), Spec(30, 16, 0xFL, 1), Spec(29, 16, 0xF0L, 1), Spec(30, 17, 0xF0L, 1), Spec(29, 18, 0xFFL, 1), Spec(29, 19, 0xFFL, 1), Spec(29, 20, 0xFFL, 1), Spec(29, 21, 0xFFL, 1), Spec(31, 2, 0xFFL, 1), Spec(31, 3, 0xFFL, 1), Spec(31, 4, 0xFFL, 1), Spec(31, 5, 0xFFL, 1), Spec(31, 6, 0xFFL, 1), Spec(31, 7, 0xFL, 1), Spec(31, 7, 0xF0L, 1), Spec(32, 8, 0xFFL, 1), Spec(33, 16, 0xFL, 1), Spec(33, 17, 0x10L, 1), Spec(33, 17, 0x20L, 1), Spec(33, 17, 0x40L, 1), Spec(33, 17, 0x80L, 1), Spec(34, 4, 0xFFL, 1), Spec(35, 0, 0xFFFFL, 2), Spec(35, 2, 0xFFFFL, 2), Spec(35, 4, 0xFFFFL, 2), Spec(35, 9, 0x1L, 1), Spec(35, 9, 0x2L, 1), Spec(35, 9, 0x4L, 1), Spec(35, 9, 0x8L, 1), Spec(35, 9, 0x10L, 1), Spec(35, 9, 0x20L, 1), Spec(35, 9, 0xC0L, 1), Spec(35, 10, 0xFL, 1), Spec(35, 10, 0x70L, 1), Spec(35, 11, 0xFFFFL, 2), Spec(35, 13, 0xFFFFL, 2), Spec(35, 15, 0xFFFFL, 2), Spec(35, 17, 0xFFL, 1), Spec(35, 18, 0xFFL, 1), Spec(35, 19, 0x7L, 1), Spec(35, 19, 0x70L, 1), Spec(35, 20, 0xFFFFL, 2), Spec(36, 0, 0xFFFFL, 2), Spec(37, 2, 0xFFL, 1), Spec(37, 3, 0xFFL, 1), Spec(37, 4, 0xFFL, 1), Spec(37, 5, 0xFFL, 1), Spec(37, 8, 0xFFL, 1), Spec(37, 9, 0xFFFFL, 2), Spec(37, 6, 0xFFL, 1), Spec(37, 7, 0xFL, 1), Spec(37, 7, 0xF0L, 1), Spec(38, 3, 0xFFFFL, 2), Spec(38, 5, 0xFFFFL, 2), Spec(39, 7, 0xFFL, 1), Spec(38, 8, 0xFFL, 1), Spec(38, 9, 0xFFL, 1), Spec(38, 10, 0xFFL, 1), Spec(40, 5, 0xFL, 1), Spec(40, 5, 0xF0L, 1), Spec(41, 0, 0xFFFFL, 2), Spec(42, 9, 0xFFL, 1), Spec(43, 2, 0xFFL, 1), Spec(43, 3, 0xFFL, 1), Spec(43, 6, 0xFFL, 1), Spec(43, 8, 0xFFL, 1), Spec(43, 9, 0x7L, 1), Spec(43, 9, 0xF8L, 1), Spec(43, 10, 0xFFL, 1), Spec(43, 11, 0xFFFFL, 2), Spec(43, 13, 0xFFL, 1), Spec(43, 14, 0xFFL, 1), Spec(43, 15, 0xFFL, 1), Spec(43, 9, 0xF8L, 1), Spec(44, 0, 0xFFL, 1), Spec(45, 4, 0x80L, 1), Spec(45, 1, 0xFFFFFFL, 3), Spec(45, 4, 0x7FL, 1), Spec(46, 1, 0xFFL, 1), Spec(46, 2, 0xFFL, 1), Spec(46, 3, 0xFFL, 1), Spec(46, 4, 0x80L, 1), Spec(46, 4, 0x40L, 1), Spec(46, 4, 0x20L, 1), Spec(46, 4, 0x10L, 1), Spec(46, 4, 0x8L, 1), Spec(46, 4, 0x7L, 1)),
+        0x71 to emptyList(),
+        0x73 to listOf(Spec(47, 0, 0xFFL, 1), Spec(48, 1, 0xFFL, 1), Spec(49, 2, 0xFFL, 1), Spec(49, 3, 0xFFFFFFFFL, 4), Spec(47, 7, 0xFFL, 1), Spec(49, 8, 0xFFL, 1), Spec(49, 9, 0xFFL, 1), Spec(50, 1, 0xFFL, 1), Spec(51, 8, 0xFFL, 1)),
+        0x74 to listOf(Spec(47, 2, 0xFFFFFFFFL, 4), Spec(47, 6, 0xFFL, 1), Spec(47, 7, 0xFFL, 1)),
+        0x76 to listOf(Spec(47, 2, 0xFFL, 1), Spec(47, 3, 0xFFL, 1))
+    )
+    private val defaults = listOf(
+        Spec(52, 0, 0x1L, 1),
+        Spec(52, 0, 0x2L, 1),
+        Spec(52, 0, 0x4L, 1),
+        Spec(53, 0, 0x8L, 1),
+        Spec(52, 0, 0x10L, 1),
+        Spec(52, 0, 0x20L, 1),
+        Spec(54, 0, 0xC0L, 1),
+        Spec(52, 1, 0xFFL, 1),
+        Spec(52, 3, 0xFFL, 1),
+        Spec(52, 4, 0xFFL, 1),
+        Spec(55, 0, 0x1L, 1),
+        Spec(55, 0, 0x2L, 1),
+        Spec(55, 3, 0xFFL, 1),
+        Spec(55, 4, 0xFFL, 1),
+        Spec(56, 0, 0xCL, 1),
+        Spec(55, 1, 0x1L, 1),
+        Spec(55, 1, 0x2L, 1),
+        Spec(55, 1, 0x4L, 1),
+        Spec(55, 1, 0x8L, 1),
+        Spec(55, 1, 0x10L, 1),
+        Spec(55, 1, 0x20L, 1),
+        Spec(55, 1, 0xC0L, 1),
+        Spec(57, 0, 0x4L, 1)
+    )
+    class Selection(asamKey: String) {
+        private val matched = groups.map { patterns ->
+            asamKey in patterns || "*" in patterns || ("EV_ECM*" in patterns && asamKey.startsWith("EV_ECM"))
+        }
+        fun forRecord(id: Int): List<Spec> {
+            val source = specific[id]?.takeIf { it.isNotEmpty() } ?: defaults
+            return source.filter { matched[it.group] }
+        }
+    }
+}
