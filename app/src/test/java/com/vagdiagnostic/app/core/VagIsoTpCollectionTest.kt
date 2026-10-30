@@ -47,4 +47,20 @@ class VagIsoTpCollectionTest {
         assertTrue(c.payloads.isEmpty())
         assertEquals(setOf(0x7B4), c.invalidIds)
     }
+    @Test fun shortFinalOrIntermediateCfCannotBeCompletedByInventingAnotherFrame() {
+        for (length in listOf(8, 14)) {
+            val c = VagIsoTpCollection(setOf(0x77A, 0x7B4), "222A26")
+            c.accept("7B404622A2680\r77A10%02X622A26010203".format(length))
+            c.flowControlSent(0x77A)
+            assertTrue(runCatching { c.accept("77A2104") }.isFailure)
+            assertFalse(c.payloads.containsKey(0x77A))
+            assertEquals(listOf(0x62, 0x2A, 0x26, 0x80), c.payloads[0x7B4])
+        }
+    }
+    @Test fun extendedHeaderCannotMasqueradeAsKnownStandardId() {
+        val c = VagIsoTpCollection(setOf(0x77A), "222A26")
+        assertTrue(runCatching { c.accept("0000077A04622A2680") }.isFailure)
+        assertTrue(c.payloads.isEmpty())
+        assertEquals(setOf(0x77A), c.invalidIds)
+    }
 }

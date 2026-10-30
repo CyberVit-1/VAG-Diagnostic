@@ -249,6 +249,8 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
 
 @Composable private fun Diagnostics(status: DashboardState, start: () -> Unit, stop: () -> Unit, search: (String) -> Unit) {
     var summaryExpanded by rememberSaveable { mutableStateOf(false) }
+    var candidatesExpanded by rememberSaveable { mutableStateOf(false) }
+    val candidates = status.units.filter { it.source == "CANDIDATE" }
     var wasScanning by rememberSaveable { mutableStateOf(status.isScanning) }
     LaunchedEffect(status.isScanning) {
         if (wasScanning && !status.isScanning) summaryExpanded = false
@@ -303,7 +305,11 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
             Text("Блоки OBD-II и VAG; кандидаты отмечены отдельно", style = MaterialTheme.typography.titleSmall)
             if (status.units.isEmpty()) Text("Нет подтверждённых ответчиков. Результаты не подставляются автоматически.", style = MaterialTheme.typography.bodySmall)
         }
-        items(status.units, key = { it.address }) { unit -> EcuCard(unit, search) }
+        items(status.units.filter { it.source != "CANDIDATE" }, key = { it.address }) { unit -> EcuCard(unit, search) }
+        if (candidates.isNotEmpty()) {
+            item(key = "candidate-disclosure") { CandidateGroup(candidates.size, candidatesExpanded) { candidatesExpanded = !candidatesExpanded } }
+            if (candidatesExpanded) items(candidates, key = { it.address }) { EcuCard(it, search) }
+        }
         }
     }
 }
@@ -357,10 +363,28 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
     }
 }
 @Composable private fun UnitList(status: DashboardState, search: (String) -> Unit) {
+    var candidatesExpanded by rememberSaveable { mutableStateOf(false) }
+    val candidates = status.units.filter { it.source == "CANDIDATE" }
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("OBD-II и VAG показаны отдельно. Список Gateway и ответы ECU подтверждают наличие блоков. Кандидат профиля ещё не означает установленный блок. Отсутствие ответа не означает отсутствие неисправностей.", style = MaterialTheme.typography.bodySmall) }
         if (status.units.isEmpty()) item { Text("Сначала проведите сканирование") }
-        items(status.units, key = { it.address }) { EcuCard(it, search) }
+        items(status.units.filter { it.source != "CANDIDATE" }, key = { it.address }) { EcuCard(it, search) }
+        if (candidates.isNotEmpty()) {
+            item(key = "candidate-disclosure") { CandidateGroup(candidates.size, candidatesExpanded) { candidatesExpanded = !candidatesExpanded } }
+            if (candidatesExpanded) items(candidates, key = { it.address }) { EcuCard(it, search) }
+        }
+    }
+}
+@Composable private fun CandidateGroup(count: Int, expanded: Boolean, toggle: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        TextButton(onClick = toggle) {
+            Text("Наличие не подтверждено: $count · " + if (expanded) "Свернуть" else "Показать")
+            Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = null)
+        }
+        if (expanded) {
+            Text("Это кандидаты фиксированного каталога. Они не включены в найденные блоки; отсутствие ответа не означает отсутствие ошибок.",
+                style = MaterialTheme.typography.bodySmall)
+        }
     }
 }
 @Composable private fun EcuCard(unit: ControlUnit, search: (String) -> Unit) {

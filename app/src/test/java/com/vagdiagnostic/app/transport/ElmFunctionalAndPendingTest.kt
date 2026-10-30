@@ -122,4 +122,15 @@ class ElmFunctionalAndPendingTest {
         assertFalse(link.sent.contains("1001"))
         assertFalse(link.sent.contains("3000100000000000"))
     }
+    @Test fun functionalCancellationCannotContinueIntoFcOrAnotherRequest() = runBlocking {
+        val link = Link { cmd -> when (cmd) {
+            "023E800000000000" -> "NO DATA\r>"
+            "03222A2600000000" -> throw CancellationException("Stop")
+            else -> "OK\r>"
+        } }
+        val error = runCatching { ElmVagFunctionalList.read(ElmEngine(link, { _, _, _, _ -> }), "5WA907530") }.exceptionOrNull()
+        assertTrue(error is CancellationException)
+        assertTrue(link.closed)
+        assertEquals("03222A2600000000", link.sent.last())
+    }
 }

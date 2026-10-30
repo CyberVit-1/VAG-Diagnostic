@@ -345,6 +345,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                     outcome = if (addressed.verified) "CONFIRMED"
                                         else "INCONCLUSIVE"
                                 ))
+                                if (!addressed.physicalResponseConfirmed) {
+                                    incompleteModes = true
+                                    val note = "VAG: OEM опрос не начат; адресный ответ OBD не подтверждён"
+                                    _state.value = _state.value.copy(isoTpReadiness = _state.value.isoTpReadiness + "; " + note)
+                                    db.journal().insert(JournalEntity(timestamp = System.currentTimeMillis(), connection = cfg.type,
+                                        command = "VAG_SCAN_SKIPPED", raw = note, elapsedMs = 0, outcome = "INCOMPLETE"))
+                                }
                                 if (addressed.physicalResponseConfirmed && tp20Profile != null) {
                                     _state.value = _state.value.copy(
                                         current = "VAG: подключение, список блоков и чтение DTC"
@@ -396,6 +403,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             } catch (cancel: CancellationException) {
                                 throw cancel
                             } catch (problem: Exception) {
+                                incompleteModes = true
                                 val note = "Адресная OBD-проверка: " +
                                     (problem.message ?: problem::class.java.simpleName)
                                 _state.value = _state.value.copy(

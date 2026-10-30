@@ -62,7 +62,9 @@ class VagIsoTpCollection(val expectedIds: Set<Int>, val request: String) {
             val owner = id.toInt()
             if (owner !in expectedIds) { unknown += owner; continue }
             require(owner !in invalid) { "Ответ уже признан противоречивым" }
-            try { when (frame[0] ushr 4) {
+            try {
+                require((headerSize == 3) == (owner <= 0x7FF)) { "Не совпал тип CAN адреса" }
+                when (frame[0] ushr 4) {
                 0 -> {
                     val length = frame[0] and 15
                     require(length in 1..7 && frame.size >= length + 1 && owner !in partial) { "Неполный или неожиданный SingleFrame" }
@@ -79,7 +81,7 @@ class VagIsoTpCollection(val expectedIds: Set<Int>, val request: String) {
                 2 -> {
                     val state = requireNotNull(partial[owner]) { "ConsecutiveFrame без FirstFrame" }
                     require(state.flowSent && frame.size >= 2 && (frame[0] and 15) == state.sequence) { "Неверный sequence или CF до flow control" }
-                    require(state.length - state.data.size <= 7 || frame.size == 8) { "Короткий промежуточный ConsecutiveFrame" }
+                    require(frame.size - 1 >= minOf(7, state.length - state.data.size)) { "Короткий ConsecutiveFrame" }
                     state.sequence = (state.sequence + 1) and 15
                     state.data += frame.drop(1).take(state.length - state.data.size)
                     if (state.data.size == state.length) {

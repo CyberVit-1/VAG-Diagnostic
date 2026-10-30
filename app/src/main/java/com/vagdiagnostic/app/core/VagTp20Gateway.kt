@@ -48,8 +48,9 @@ object VagTp20Gateway {
             "VSS" -> "SEAT / CUPRA"
             else -> return null
         }
-        knownCandidate(chassisFromVerifiedMode09(frames, sourceEcu))?.let { return it }
-        return Profile(vin.substring(6, 8), "Идентификация производителя; формат списка проверяется ответом Gateway", brand)
+        knownCandidate(chassisFromVerifiedMode09(frames, sourceEcu))?.let { return it.copy(allowCandidateFallback = true) }
+        return Profile(vin.substring(6, 8), "Идентификация производителя; формат списка проверяется ответом Gateway", brand,
+            allowCandidateFallback = true)
     }
 
     /** RX ID invalid (ECU chooses), tester RX ID 0x300, KWP application 0x01. */

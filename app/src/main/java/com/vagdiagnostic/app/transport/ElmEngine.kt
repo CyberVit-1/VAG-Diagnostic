@@ -233,6 +233,7 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
             require(clean.length >= headerSize + 2 && clean.length <= headerSize + 16) { "Неверная длина отложенного CAN" }
             val id = clean.take(headerSize).toLong(16)
             require(id in 0..0x1FFFFFFF && id.toInt() in expectedIds) { "Незапрошенный CAN ID при ожидании" }
+            require((headerSize == 3) == (id <= 0x7FF)) { "Не совпал тип отложенного CAN адреса" }
             received += clean
         }
         try {

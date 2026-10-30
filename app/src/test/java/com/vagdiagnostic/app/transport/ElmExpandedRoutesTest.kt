@@ -122,11 +122,13 @@ class ElmExpandedRoutesTest {
         assertTrue(link.sent.indexOf("ATFCSM0", link.sent.indexOf("ATSP7")) in link.sent.indexOf("ATSP7") until next11)
         assertFalse(link.sent.any { it == "04" || it.startsWith("27") || it.startsWith("2E") })
     }
-    @Test fun addedRoutesAnd29BitAlternativeRequireInstallationList() = runBlocking {
+    @Test fun unverifiedPlatformCannotUseCatalogWhenInstallationListIsMissing() = runBlocking {
         val link = Link(missingList = true)
         val units = linkedMapOf<String, ControlUnit>()
-        assertFalse(scan(link, units).listConfirmed)
-        assertEquals(14, units.size)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        assertFalse(ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> }, allowCandidateFallback = false).listConfirmed)
+        assertTrue(units.isEmpty())
         for (tp in listOf("13", "14", "24", "25", "52")) assertFalse(link.sent.contains(tp + "C000100003011"))
         assertFalse(link.sent.contains("ATSP7"))
     }

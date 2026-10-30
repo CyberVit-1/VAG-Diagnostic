@@ -18,7 +18,7 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
     class NoChannelResponse : IllegalStateException("ECU не ответил на CHANNEL SETUP")
     /** Explicit peer close after ACK, before any application response. The
      * caller must reset the transport before another diagnostic transaction. */
-    class PeerClosedChannel : IOException("ECU закрыл TP2.0 канал до ответа DTC")
+    class PeerClosedChannel : IOException("ECU закрыл TP2.0 канал до прикладного ответа")
     private var tx = 0
     private var rx = 0
     private var sendSeq = 0

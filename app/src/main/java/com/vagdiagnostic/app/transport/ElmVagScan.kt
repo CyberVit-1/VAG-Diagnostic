@@ -17,11 +17,12 @@ object ElmVagScan {
     enum class Protocol { TP20, UDS }
     data class Outcome(val protocol: Protocol?, val listConfirmed: Boolean, val complete: Boolean, val note: String)
     private class OptionalReadUnavailable(cause: Throwable) : IllegalStateException("Дополнительная информация не получена; DTC требуют нового канала", cause)
+    private class UdsNoResponse : IllegalStateException("ECU не ответил на 3E00, 1003 и F187")
 
     suspend fun scan(engine: ElmEngine,
         onUnit: suspend (ControlUnit) -> Unit,
         event: suspend (String, String, String) -> Unit,
-        allowCandidateFallback: Boolean = true,
+        allowCandidateFallback: Boolean = false,
         readGatewayIdentity: Boolean = false,
         discoverAdditionalUnits: Boolean = true,
         identifyEcus: Boolean = true,
@@ -40,11 +41,12 @@ object ElmVagScan {
         val identities = mutableMapOf<Int, VagEcuIdentification.Identity?>()
         val identityAttempts = mutableSetOf<Int>()
         val absentTp = mutableSetOf<Int>()
+        val absentUds = mutableSetOf<Int>()
         val saeAttempts = mutableSetOf<Int>()
         val saeSupport = mutableMapOf<Int, Boolean?>()
         val optionalRetries = mutableMapOf<Int, Int>()
         var centralPart: String? = null
-        var candidateFallbackPermitted = allowCandidateFallback
+        val candidateFallbackPermitted = allowCandidateFallback
         var discoveryReconnectNeeded = false
         var currentEngine = engine
         var channelRecoveries = 0
@@ -123,7 +125,12 @@ object ElmVagScan {
                 installed = VagOemReadOnly.installedKwpMessages(replies)
             }
         } catch (cancel: CancellationException) { throw cancel }
+        catch (closed: ElmTp20Channel.PeerClosedChannel) {
+            issues += "Gateway TP2.0: ${closed.message}"
+            restoreClosedChannel(gateway.key, closed)
+        }
         catch (io: IOException) { throw io }
+        catch (failure: ElmTp20Channel.NoChannelResponse) { absentTp += 0x19; issues += "Gateway TP2.0: ${failure.message}" }
         catch (failure: IllegalStateException) { issues += "Gateway TP2.0: ${failure.message}" }
         catch (failure: IllegalArgumentException) { issues += "Список TP2.0: ${failure.message}" }
 
@@ -156,7 +163,6 @@ object ElmVagScan {
                         if (identity != null) "PARSED" else "UNSUPPORTED")
                     val part = identity?.partNumber
                     if (part != null && VagInstallationBitmap.supports(0x19, part)) {
-                        candidateFallbackPermitted = false
                         if (VagInstallationBitmap.formatFor(0x19, part) == "mk8") {
                             val collected = ElmVagFunctionalList.read(currentEngine, part)
                             installed = collected.installed.takeIf { it.isNotEmpty() }
@@ -185,17 +191,19 @@ object ElmVagScan {
                 finally { if (healthy && currentCoroutineContext().isActive) channel.close() }
             } catch (cancel: CancellationException) { throw cancel }
             catch (io: IOException) { throw io }
+            catch (failure: UdsNoResponse) { absentUds += 0x19; issues += "Gateway UDS: ${failure.message}" }
             catch (failure: RuntimeException) { issues += "Gateway UDS: ${failure.message}" }
         }
         if (discoveryReconnectNeeded) restoreConnection("Сбор списка ECU", IOException("Функциональный обмен не завершён"))
         if (protocol == null) {
             event("VAG_GATEWAY_DISCOVERY", issues.joinToString("; "), "INCONCLUSIVE")
-            return Outcome(null, false, false, "Gateway не подтвердил TP2.0 или UDS; ${issues.joinToString("; ")}")
+            if (!candidateFallbackPermitted)
+                return Outcome(null, false, false, "Gateway не подтвердил TP2.0 или UDS; ${issues.joinToString("; ")}")
         }
         // Identification has its own short-lived session; a negative or
         // unknown identification does not change a confirmed installation list.
         suspend fun collectIdentity() {
-            if (!readGatewayIdentity || gatewayIdentityAttempted) return
+            if (!readGatewayIdentity || gatewayIdentityAttempted || protocol == null) return
             event("VAG_GATEWAY_IDENTITY_BEGIN", "Чтение номера Gateway", "READING")
             try {
                 if (protocol == Protocol.TP20) {
@@ -235,17 +243,18 @@ object ElmVagScan {
             return Outcome(protocol, false, false, "Gateway ответил; список для этой платформы не подтверждён" +
                 (identity?.let { "; " + it.summary() } ?: ""))
         }
+        val candidateRoutes = if (listConfirmed) emptyMap() else VagOemCandidateCatalog.routes
         event("VAG_INSTALLATION_LIST", if (listConfirmed) "Подтверждены ID: " + installed!!.joinToString { "%02X".format(it.id) }
-            else "Список не получен; ограниченная очередь известных адресов профиля, не список установленных блоков", if (listConfirmed) "CONFIRMED" else "INCONCLUSIVE")
+            else "Список не получен; фиксированный каталог ${candidateRoutes.size} кандидатов, наличие требует ответа ECU", if (listConfirmed) "CONFIRMED" else "INCONCLUSIVE")
         val ids = if (listConfirmed) (listOf(0x19) + installed!!.map { it.id }).distinct()
-            else VagOemReadOnly.routes.values.filterNot { it.installedOnly }.map { it.id }
+            else candidateRoutes.keys.toList()
         var failed = !listConfirmed || listLimitations.isNotEmpty()
         var gatewayUnit: ControlUnit? = null
         val queue = ids.toMutableList()
         var next = 0
         var supplementalAttempted = false
         val retriedAfterClose = mutableSetOf<Int>()
-        if (identifyEcus && 0x09 in ids) {
+        if (identifyEcus) {
             val centralEntry = installed?.firstOrNull { it.id == 0x09 }
             val central = centralEntry?.mappedRoute ?: VagOemReadOnly.routes.getValue(0x09)
             val routeValid = centralEntry?.routeConflict != true &&
@@ -261,6 +270,9 @@ object ElmVagScan {
                 catch (closed: ElmTp20Channel.PeerClosedChannel) { restoreClosedChannel(central.key, closed) }
                 catch (io: IOException) { throw io }
                 catch (_: ElmTp20Channel.NoChannelResponse) { absentTp += 0x09; tryUds = true }
+                catch (_: ElmTp20Channel.NoApplicationResponse) {
+                    if (0x09 !in confirmedProtocols) { absentTp += 0x09; tryUds = true }
+                }
                 catch (_: IllegalStateException) { }
                 if (tryUds && central.udsTx != null) {
                     val channel = Uds(currentEngine)
@@ -274,18 +286,23 @@ object ElmVagScan {
                         centralPart = value?.partNumber
                     } catch (cancel: CancellationException) { healthy = false; throw cancel }
                     catch (io: IOException) { healthy = false; throw io }
+                    catch (_: UdsNoResponse) { absentUds += 0x09 }
                     catch (_: IllegalStateException) { }
                     finally { if (healthy && currentCoroutineContext().isActive) channel.close() }
                 }
                 event("VAG_CHASSIS_IDENTITY", centralPart?.let { "09: $it" } ?: "09: номер детали не подтверждён", if (centralPart != null) "PARSED" else "INCONCLUSIVE")
+                if (0x09 in confirmedProtocols && 0x09 !in queue) {
+                    queue += 0x09
+                    event("VAG_ADDITIONAL_DISCOVERY", "09: ответ фиксированного ECU подтверждён вне исходного списка", "RESPONSE")
+                }
             }
         }
         suspend fun discoverAdditional() {
             // This is a fixed legacy procedure, not a sweep of the route catalog.
             // Determine the chassis from ECU09's own identity, never from VIN or
             // the Gateway part. An unconfirmed central ECU cannot select it.
-            if (!discoverAdditionalUnits || !listConfirmed || 0x61 in queue || 0x09 !in ids) return
-            val centralProtocol = confirmedProtocols[0x09] ?: return
+            if (!discoverAdditionalUnits || !listConfirmed || 0x61 in queue) return
+            val centralProtocol = confirmedProtocols[0x09]
             val central = installed?.firstOrNull { it.id == 0x09 }?.mappedRoute
                 ?: VagOemReadOnly.routes.getValue(0x09)
             try {
@@ -296,7 +313,7 @@ object ElmVagScan {
                     if (replies.size == 1 && replies.first() in listOf(
                             listOf(0x7F, 0x1A, 0x10), listOf(0x7F, 0x1A, 0x11), listOf(0x7F, 0x1A, 0x12)))
                         centralPart = VagEcuIdentification.udsPartNumber(channel.request("22F187"))?.partNumber
-                } else {
+                } else if (centralProtocol == Protocol.UDS) {
                     val channel = Uds(currentEngine)
                     var healthy = true
                     try {
@@ -353,9 +370,9 @@ object ElmVagScan {
             val id = queue[next++]
             currentCoroutineContext().ensureActive()
             val listEntry = installed?.firstOrNull { it.id == id }
-            val route = listEntry?.mappedRoute ?: VagOemReadOnly.routes[id]
+            val route = listEntry?.mappedRoute ?: if (listConfirmed) VagOemReadOnly.routes[id] else candidateRoutes[id]
             val responseConfirmed = id in confirmedProtocols
-            val declared = id in ids && (listConfirmed || id == 0x19)
+            val declared = listConfirmed && id in ids
             var unit = ControlUnit("VAG-%02X".format(id), route?.name ?: "Блок VAG",
                 ReadState.NOT_QUERIED, note = if (declared) "Подтверждён списком ECU " +
                     (listEntry?.listOwners ?: setOf(0x19)).joinToString { "%02X".format(it) } + "; чтение DTC ещё не выполнено"
@@ -421,6 +438,7 @@ object ElmVagScan {
                     val paths = route.udsPaths(listConfirmed)
                     check(paths.isNotEmpty()) { "Нет проверенного UDS-маршрута" }
                     var lastFailure: RuntimeException? = null
+                    var onlyNoResponse = true
                     for ((index, path) in paths.withIndex()) {
                         val channel = Uds(currentEngine)
                         var healthy = true
@@ -437,17 +455,19 @@ object ElmVagScan {
                         catch (failure: RuntimeException) {
                             if (failure is VagOemReadOnly.ServiceRejected) throw failure
                             lastFailure = failure
+                            if (failure !is UdsNoResponse) onlyNoResponse = false
                             if (index < paths.lastIndex) event("VAG_ECU_ADDRESS_FALLBACK",
                                 "${route.key}: завершённый отказ ${path.udsTx?.toString(16)}; ${failure.message}", "INCONCLUSIVE")
                         } finally { if (healthy && currentCoroutineContext().isActive) channel.close() }
                     }
+                    if (onlyNoResponse) absentUds += id
                     throw requireNotNull(lastFailure)
                 }
                 val state = VagConnectionPolicy.State(route.tp != null, route.udsTx != null,
                     udsOnlyChassis = identifyEcus && VagConnectionPolicy.isUdsOnlyChassis(centralPart),
                     connectedTp = confirmedProtocols[id] == Protocol.TP20,
                     connectedUds = confirmedProtocols[id] == Protocol.UDS,
-                    tpNoResponse = id in absentTp)
+                    tpNoResponse = id in absentTp, udsNoResponse = id in absentUds)
                 val preferTp = if (identifyEcus) VagConnectionPolicy.mustConnectToTp(state)
                     else route.tp != null && ((confirmedProtocols[id] ?: protocol) == Protocol.TP20 || route.udsTx == null)
                 val result = if (preferTp) {
@@ -520,9 +540,9 @@ object ElmVagScan {
         val savedGateway = gatewayUnit
         if (identity != null && savedGateway != null)
             onUnit(savedGateway.copy(note = savedGateway.note + "; " + identity!!.summary()))
-        val summary = if (listConfirmed) "список Gateway получен; опрос ${if (failed) "неполный" else "завершён"}"
-            else "список Gateway недоступен; опрошены только кандидаты профиля"
-        return Outcome(protocol, listConfirmed, !failed, "VAG ${protocol.name}; " + summary +
+        val summary = if (listConfirmed) "список установленных ECU получен; опрос ${if (failed) "неполный" else "завершён"}"
+            else "список Gateway недоступен; проверены кандидаты фиксированного каталога"
+        return Outcome(protocol, listConfirmed, !failed, "VAG ${protocol?.name ?: "Gateway не ответил"}; " + summary +
             (if (listLimitations.isNotEmpty()) "; " + listLimitations.joinToString("; ") else "") +
             (identity?.let { "; " + it.summary() } ?: ""))
     }
@@ -537,7 +557,7 @@ object ElmVagScan {
             val rx = requireNotNull(target.udsRx)
             suspend fun ok(cmd: String) {
                 val raw = engine.command(cmd).uppercase().replace(cmd, "").filterNot { it.isWhitespace() }
-                check(raw == "OK") { "ELM отклонил $cmd" }
+                if (raw != "OK") throw IOException("ELM отклонил $cmd")
             }
             val protocol = if (target.is29Bit) "7" else "6"
             // Keep automatic FC disabled until the new ID/filter/mode is ready.
@@ -549,7 +569,7 @@ object ElmVagScan {
                 ok("ATCRA%08X".format(rx))
                 // The non-OBD 29-bit route needs its exact FC transmit ID.
                 ok("ATFCSH%08X".format(tx)); ok("ATFCSD300010"); ok("ATFCSM1")
-                check(engine.command("ATDPN").trim().uppercase() in setOf("7", "A7")) { "ELM не подтвердил CAN 7" }
+                if (engine.command("ATDPN").trim().uppercase() !in setOf("7", "A7")) throw IOException("ELM не подтвердил CAN 7")
             } else {
                 if (engine.needsFlowControlReset) {
                     try { ok("ATFCSM0") }
@@ -572,17 +592,17 @@ object ElmVagScan {
             // Presence is independent of extended-session support. A complete
             // matching negative reply also proves that the addressed ECU answered.
             val presence = readOrNoData("3E00", allowNoData = true)
-            check(presence == null || presence == listOf(0x7E, 0) ||
-                (presence.size == 3 && presence.take(2) == listOf(0x7F, 0x3E))) { "Нет подтверждения присутствия UDS ECU" }
+            if (!(presence == null || presence == listOf(0x7E, 0) ||
+                (presence.size == 3 && presence.take(2) == listOf(0x7F, 0x3E)))) throw IOException("Нет подтверждения присутствия UDS ECU")
             val reply = readOrNoData("1003", allowNoData = true)
             active = reply?.take(2) == listOf(0x50, 3)
             if (presence == null && reply == null) {
                 cachedPartReply = readOrNoData("22F187", allowNoData = true)
-                check(cachedPartReply != null) { "ECU не ответил на 3E00, 1003 и F187" }
+                        if (cachedPartReply == null) throw UdsNoResponse()
             }
             if (active && reply != null && reply.size >= 6) {
                 val star = ((reply[4] shl 8) or reply[5]) * 10L
-                check(star in 1..5750) { "UDS P2* вне поддержанного диапазона" }
+                if (star !in 1..5750) throw IOException("UDS P2* вне поддержанного диапазона")
                 pendingMs = star + 250
             }
         }

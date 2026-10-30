@@ -65,13 +65,13 @@ class VagTp20GatewayTest {
     }
     private fun syntheticIdentity(wmi: String, chassis: String): ByteArray =
         byteArrayOf(0x49, 2, 1) + (wmi + "AAA" + chassis + "AAAAAAAAA").map { it.code.toByte() }.toByteArray()
-    @Test fun otherVagChassisRequireGatewayListInsteadOfLegacyCandidateQueue() {
+    @Test fun verifiedManufacturerAllowsFixedCatalogFallbackForOtherVagChassis() {
         for ((wmi, chassis) in listOf("WVW" to "AU", "WAU" to "4G", "TMB" to "NE", "VSS" to "KL")) {
             // Synthetic identifiers only; no recorded vehicle VIN in fixtures.
             val frames = FrameParse(mapOf("7E8" to listOf(syntheticIdentity(wmi, chassis))), emptyList())
             val profile = requireNotNull(VagTp20Gateway.profileFromVerifiedMode09(frames, "7E8", setOf("7E8")))
             assertEquals(chassis, profile.chassis)
-            assertFalse(profile.allowCandidateFallback)
+            assertTrue(profile.allowCandidateFallback)
             assertFalse(profile.source.contains(wmi + "AAA"))
         }
     }
