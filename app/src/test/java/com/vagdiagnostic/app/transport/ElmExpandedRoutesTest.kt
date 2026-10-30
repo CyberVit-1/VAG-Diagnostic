@@ -93,7 +93,7 @@ class ElmExpandedRoutesTest {
                         "2204A1" -> if (missingList) "7F2231" else list()
                         "1800FF00" -> "5800"
                         "1802FF00" -> if (destination == 0x1F) "5802051924051824" else "5800"
-                        else -> error(request)
+                        else -> if (request.matches(Regex("120004[0-9A-F]{4}"))) "7F1231" else error(request)
                     }
                     if (payload == "NO DATA") payload else
                         "300B%X\r".format((cmd.take(2).toInt(16) + 1) and 15) + packet(payload)
@@ -116,8 +116,10 @@ class ElmExpandedRoutesTest {
         assertEquals(18, units.size)
         assertTrue(units.values.all { it.state == ReadState.COMPLETE })
         for (tp in listOf("13", "14", "24", "25", "52")) assertTrue(link.sent.contains(tp + "C000100003011"))
-        assertTrue(link.sent.containsAll(listOf("ATCRA777", "ATSP7", "ATCP17", "ATSHFC008B", "ATCRA17FE008B",
+        assertTrue(link.sent.containsAll(listOf("ATSP7", "ATCP17", "ATSHFC008B", "ATCRA17FE008B",
             "ATFCSH17FC008B", "ATFCSD300010", "ATFCSM1")))
+        assertFalse(link.sent.contains("ATSH70D"))
+        assertFalse(link.sent.contains("ATSH718"))
         assertEquals(2, units.getValue("VAG-46").dtcs.size)
         assertTrue(link.sent.indexOf("ATFCSM1") < link.sent.indexOf("1003", link.sent.indexOf("ATSP7")))
         val next11 = link.sent.indexOf("ATSH70C")

@@ -446,6 +446,22 @@ object ElmVagScan {
                     unit = unit.copy(source = "RESPONSE", note = "Ответ ECU подтверждён; чтение DTC")
                     onUnit(unit)
                 }
+                suspend fun readDtcDetails(selected: VagDtcDetails.Protocol, faults: VagOemReadOnly.Faults,
+                    read: suspend (VagDtcDetails.Request) -> List<Int>?) {
+                    for (fault in faults.values.distinctBy { it.raw.take(if (selected == VagDtcDetails.Protocol.KWP) 4 else 6) }) {
+                        currentCoroutineContext().ensureActive()
+                        val request = VagDtcDetails.request(selected, fault)
+                        val reply = try { VagDtcDetails.decode(request, read(request)) }
+                            catch (missing: ElmTp20Channel.NoApplicationResponse) {
+                                event("VAG_DTC_DETAILS_%02X".format(id), "${fault.code}: нет дополнительного ответа; основной DTC сохранён", "INCOMPLETE")
+                                break
+                            } catch (bad: IllegalArgumentException) {
+                                throw IOException("Некорректный ответ дополнительных записей DTC: ${bad.message}", bad)
+                            }
+                        event("VAG_DTC_DETAILS_%02X".format(id), "${fault.code}: ${reply.state}" + (reply.nrc?.let { "; NRC 0x%02X".format(it) } ?: "") + "; расшифровка дополнительных записей не подтверждена",
+                            if (reply.state == VagDtcDetails.State.RAW_RESPONSE) "RAW_ONLY" else "INCOMPLETE")
+                    }
+                }
                 suspend fun tpReadOnce(): VagOemReadOnly.Faults {
                     var result: VagOemReadOnly.Faults? = null
                     withTp(route) { channel ->
@@ -463,6 +479,8 @@ object ElmVagScan {
                         result = VagOemReadOnly.kwpFaultMessages(
                             channel.requestMessages(if (powertrain) "1800FF00" else "1802FF00"), powertrain)
                         completedFaults = result
+                        publishFaults(requireNotNull(result))
+                        if (identifyEcus) readDtcDetails(VagDtcDetails.Protocol.KWP, requireNotNull(result)) { channel.requestDetails(it) }
                     }
                     return requireNotNull(result)
                 }
@@ -495,7 +513,27 @@ object ElmVagScan {
                             if (identifyEcus) collectDetails(id, VagUdsInfo.scanFields + VagUdsInfo.Field.ACCESS_STATUS) {
                                 channel.readOptionalInfo(it)
                             }
-                            return VagOemReadOnly.udsFaults(channel.read("19028D")).also { completedFaults = it }
+                            val faults = VagOemReadOnly.udsFaults(channel.read("19028D"))
+                            completedFaults = faults
+                            publishFaults(faults)
+                            if (identifyEcus && faults.values.isNotEmpty()) {
+                                // This DTC enrichment requires ASAM and revision. A
+                                // failed optional preflight is not a cached success.
+                                if (details[id]?.get(VagUdsInfo.Field.ASAM)?.state != VagUdsInfo.State.PRESENT) {
+                                    val asam = try { VagUdsInfo.decode(VagUdsInfo.Field.ASAM, channel.readOptionalInfo("22F19E")) }
+                                        catch (bad: IllegalArgumentException) { throw IOException("Неверная идентификация ASAM", bad) }
+                                    details[id] = details[id].orEmpty() + (VagUdsInfo.Field.ASAM to asam)
+                                }
+                            }
+                            if (identifyEcus && faults.values.isNotEmpty() && details[id]?.get(VagUdsInfo.Field.ASAM)?.state == VagUdsInfo.State.PRESENT) {
+                                val revision = try { VagUdsInfo.decode(VagUdsInfo.Field.ASAM_REVISION, channel.readOptionalInfo("22F1A2")) }
+                                    catch (bad: IllegalArgumentException) { throw IOException("Неверная ревизия ASAM", bad) }
+                                details[id] = details[id].orEmpty() + (VagUdsInfo.Field.ASAM_REVISION to revision)
+                                if (revision.state == VagUdsInfo.State.PRESENT)
+                                    readDtcDetails(VagDtcDetails.Protocol.UDS, faults) { channel.readDtcDetails(it) }
+                                else event("VAG_DTC_DETAILS_%02X".format(id), "Ревизия ASAM не подтверждена; основной DTC сохранён", "INCOMPLETE")
+                            }
+                            return faults
                         } catch (cancel: CancellationException) { healthy = false; throw cancel }
                         catch (io: IOException) { healthy = false; throw io }
                         catch (failure: RuntimeException) {
@@ -535,7 +573,7 @@ object ElmVagScan {
                     check(!identifyEcus || VagConnectionPolicy.mustConnectToUds(state, id in absentTp)) { "Нет доступного подтверждаемого протокола ECU" }
                     udsRead()
                 }
-                publishFaults(result)
+                if (!faultsPublished) publishFaults(result)
             } catch (cancel: CancellationException) {
                 completedFaults?.takeIf { !faultsPublished }?.let { result ->
                     withContext(NonCancellable) { publishFaults(result) }
@@ -543,10 +581,16 @@ object ElmVagScan {
                 throw cancel
             }
             catch (closed: ElmTp20Channel.PeerClosedChannel) {
-                onUnit(unit.copy(state = ReadState.PARTIAL,
-                    note = "ECU закрыл канал до DTC; остальные блоки будут опрошены", source = "RESPONSE"))
-                restoreClosedChannel(route.key, closed)
-                if (retriedAfterClose.add(id)) queue += id else failed = true
+                if (completedFaults != null) {
+                    if (!faultsPublished) publishFaults(requireNotNull(completedFaults))
+                    event("VAG_DTC_DETAILS_%02X".format(id), "ECU закрыл канал после основного DTC; дополнительные записи не подтверждены", "INCOMPLETE")
+                    restoreClosedChannel(route.key, closed)
+                } else {
+                    onUnit(unit.copy(state = ReadState.PARTIAL,
+                        note = "ECU закрыл канал до DTC; остальные блоки будут опрошены", source = "RESPONSE"))
+                    restoreClosedChannel(route.key, closed)
+                    if (retriedAfterClose.add(id)) queue += id else failed = true
+                }
             }
             catch (io: IOException) {
                 completedFaults?.takeIf { !faultsPublished }?.let { result ->
@@ -554,7 +598,7 @@ object ElmVagScan {
                 }
                 onUnit(unit.copy(state = if (completedFaults != null) ReadState.COMPLETE else
                     if (unit.source == "RESPONSE") ReadState.PARTIAL else ReadState.NO_RESPONSE,
-                    note = if (completedFaults != null) "Память DTC прочитана; сбой завершения соединения: ${io.message}"
+                    note = if (completedFaults != null) "Память DTC прочитана; дальнейший обмен прерван: ${io.message}"
                         else "Соединение потеряно; DTC не подтверждены: ${io.message}"))
                 throw IOException("${route.key}: ${io.message}", io)
             }
@@ -667,6 +711,10 @@ object ElmVagScan {
             require(command in VagUdsInfo.Field.entries.map { it.request })
             return readOrNoData(command, true)
         }
+        suspend fun readDtcDetails(request: VagDtcDetails.Request): List<Int>? {
+            require(request.protocol == VagDtcDetails.Protocol.UDS)
+            return readOrNoData(request.command, true)
+        }
         suspend fun readDiagnosticAccess(): VagDiagnosticAccess.Status? {
             require(route?.id == 0x19)
             return try { VagDiagnosticAccess.decode(readOrNoData(VagDiagnosticAccess.REQUEST, true)) }
@@ -674,7 +722,7 @@ object ElmVagScan {
         }
 
         private suspend fun readOrNoData(command: String, allowNoData: Boolean): List<Int>? {
-            require(command in setOf("3E00", "1003", "1001", "2204A1", "222A26", "19028D", "22F187", VagDiagnosticAccess.REQUEST) ||
+            require(Regex("1906[0-9A-F]{6}FF").matches(command) || command in setOf("3E00", "1003", "1001", "2204A1", "222A26", "19028D", "22F187", VagDiagnosticAccess.REQUEST) ||
                 command in VagUdsInfo.Field.entries.map { it.request })
             val target = requireNotNull(route)
             val result = withTimeoutOrNull(20000) {

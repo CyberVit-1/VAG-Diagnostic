@@ -95,6 +95,11 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
     /** Only recovered read/session/identification requests; no arbitrary payload entry point. */
     suspend fun request(command: String): List<Int> = requestPackets(command, false).single()
 
+    suspend fun requestDetails(request: com.vagdiagnostic.app.core.VagDtcDetails.Request): List<Int> {
+        require(request.protocol == com.vagdiagnostic.app.core.VagDtcDetails.Protocol.KWP)
+        return requestPackets(request.command, false).single()
+    }
+
     /** Recovered list, identification and DTC services can advertise multiple packets. */
     suspend fun requestMessages(command: String): List<List<Int>> {
         require(command in setOf("1A9F", "2204A1", "1A9B", "1800FF00", "1802FF00"))
@@ -102,7 +107,7 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
     }
 
     private suspend fun requestPackets(command: String, allowMultiple: Boolean): List<List<Int>> {
-        require(command in setOf("1089", "1A9F", "2204A1", "1800FF00", "1802FF00", "19028D", "1A9B", "22F187", "31B80000") ||
+        require(Regex("120004[0-9A-F]{4}").matches(command) || command in setOf("1089", "1A9F", "2204A1", "1800FF00", "1802FF00", "19028D", "1A9B", "22F187", "31B80000") ||
             command in com.vagdiagnostic.app.core.VagUdsInfo.scanFields.map { it.request })
         check(active)
         coroutineContext.ensureActive()

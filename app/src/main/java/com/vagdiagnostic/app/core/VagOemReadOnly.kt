@@ -29,7 +29,7 @@ object VagOemReadOnly {
         Route(0x17, "Панель приборов", 0x07, 0x714),
         Route(0x42, "Дверь водителя", 0x22, 0x74A),
         Route(0x44, "Усилитель рулевого управления", 0x09, 0x712),
-        Route(0x46, "Центральный комфорт", 0x21, 0x70D, udsAlternatives = listOf(0x17FC008B)),
+        Route(0x46, "Центральный комфорт", 0x21, 0x17FC008B),
         Route(0x52, "Дверь пассажира", 0x23, 0x74B),
         Route(0x53, "Стояночный тормоз", 0x19, 0x752),
         // Added routes require a genuine installation list, not candidate sweeping.
@@ -37,7 +37,7 @@ object VagOemReadOnly {
         Route(0x25, "Иммобилайзер", 0x14, 0x711, installedOnly = true),
         Route(0x62, "Задняя левая дверь", 0x24, null, installedOnly = true),
         Route(0x72, "Задняя правая дверь", 0x25, null, installedOnly = true),
-        Route(0x56, "Магнитола", 0x52, 0x718, installedOnly = true),
+        Route(0x56, "Магнитола", 0x52, null, installedOnly = true),
         // Fixed routes are eligible only when the Gateway reports the display ID.
         // A TP destination disagreement still prevents polling this route.
         Route(0x18, "Дополнительный отопитель", 0x2F, 0x76A, installedOnly = true),

@@ -39,14 +39,15 @@ class VagOemReadOnlyTest {
             if (it.is29Bit) rx in 0x800..0x1FFFFFFF else rx in 1..0x7FF
         })
     }
-    @Test fun comfort29BitPairAndListGateAreExplicit() {
+    @Test fun fixedComfortRouteUsesTheConfirmed29BitCatalogPair() {
         val route = VagOemReadOnly.routes.getValue(0x46)
-        assertEquals(listOf(0x70D), route.udsPaths(false).map { it.udsTx })
-        val paths = route.udsPaths(true)
-        assertEquals(listOf(0x70D, 0x17FC008B), paths.map { it.udsTx })
-        assertEquals(listOf(0x777, 0x17FE008B), paths.map { it.udsRx })
-        assertFalse(paths.first().is29Bit)
-        assertTrue(paths.last().is29Bit)
+        for (listed in listOf(false, true)) {
+            val paths = route.udsPaths(listed)
+            assertEquals(listOf(0x17FC008B), paths.map { it.udsTx })
+            assertEquals(listOf(0x17FE008B), paths.map { it.udsRx })
+            assertTrue(paths.single().is29Bit)
+        }
+        assertNull(VagOemReadOnly.routes.getValue(0x56).udsTx)
     }
     @Test fun addressNamespacesAndStrictInstallationList() {
         assertEquals(0x19, VagOemReadOnly.gateway.id)
