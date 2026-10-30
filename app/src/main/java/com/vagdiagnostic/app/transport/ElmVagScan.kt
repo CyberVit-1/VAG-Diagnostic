@@ -44,12 +44,14 @@ object ElmVagScan {
         val saeSupport = mutableMapOf<Int, Boolean?>()
         val optionalRetries = mutableMapOf<Int, Int>()
         var centralPart: String? = null
+        var candidateFallbackPermitted = allowCandidateFallback
+        var discoveryReconnectNeeded = false
         var currentEngine = engine
         var channelRecoveries = 0
-        suspend fun restoreClosedChannel(key: String, cause: ElmTp20Channel.PeerClosedChannel) {
+        suspend fun restoreConnection(key: String, cause: Throwable) {
             if (channelRecoveries >= 4) throw IOException("Исчерпан предел восстановления TP-каналов", cause)
             currentCoroutineContext().ensureActive()
-            event("VAG_CHANNEL_RECOVERY", "$key: явный A8; новое подключение перед продолжением очереди", "RECOVERING")
+            event("VAG_CHANNEL_RECOVERY", "$key: новое подключение перед продолжением очереди", "RECOVERING")
             currentEngine.close()
             // Production supplies a fresh link as well as an engine. A closed
             // BLE notification channel cannot be reopened in the same object.
@@ -60,6 +62,7 @@ object ElmVagScan {
             channelRecoveries++
             event("VAG_CHANNEL_RECOVERY", "$key: OBD подтверждён; очередь продолжается; повтор не более одного", "CONFIRMED")
         }
+        suspend fun restoreClosedChannel(key: String, cause: ElmTp20Channel.PeerClosedChannel) = restoreConnection(key, cause)
         suspend fun withTp(route: VagOemReadOnly.Route, action: suspend (ElmTp20Channel) -> Unit) {
             val channel = ElmTp20Channel(currentEngine)
             var healthy = true
@@ -153,17 +156,27 @@ object ElmVagScan {
                         if (identity != null) "PARSED" else "UNSUPPORTED")
                     val part = identity?.partNumber
                     if (part != null && VagInstallationBitmap.supports(0x19, part)) {
+                        candidateFallbackPermitted = false
+                        if (VagInstallationBitmap.formatFor(0x19, part) == "mk8") {
+                            val collected = ElmVagFunctionalList.read(currentEngine, part)
+                            installed = collected.installed.takeIf { it.isNotEmpty() }
+                            listLimitations += collected.limitations
+                            discoveryReconnectNeeded = collected.requiresReconnect
+                            if (discoveryReconnectNeeded) healthy = false
+                            else channel.restoreConfiguration()
+                            event("VAG_INSTALLATION_FORMAT", "2A26; mk8; owners=" + collected.respondingOwners.joinToString { "%02X".format(it) },
+                                if (collected.complete) "PARSED" else "INCOMPLETE")
+                        } else {
                         val decoded = VagInstallationBitmap.decode(0x19, part, channel.read("222A26"))
                         installed = decoded.entries.map { entry ->
                             val name = VagOemReadOnly.routes[entry.id]?.name ?: "Блок VAG"
                             VagOemReadOnly.Installed(entry.id, null, false, mappedRoute =
                                 VagOemReadOnly.Route(entry.id, name, entry.tp, entry.udsTx, installedOnly = true))
-                        }
+                        }.takeIf { it.isNotEmpty() }
                         event("VAG_INSTALLATION_FORMAT", "2A26; ${decoded.format}; owner=19", "PARSED")
                         if (decoded.unknownBits.isNotEmpty())
                             listLimitations += "Неизвестные позиции списка: ${decoded.unknownBits.joinToString()}"
-                        if (decoded.format == "mk8")
-                            listLimitations += "Дополнительные списки ECU этой платформы ещё не собраны"
+                        }
                         if (listLimitations.isNotEmpty())
                             event("VAG_INSTALLATION_LIMITATIONS", listLimitations.joinToString("; "), "INCOMPLETE")
                     } else installed = VagOemReadOnly.installed04A1(channel.read("2204A1"))
@@ -174,6 +187,7 @@ object ElmVagScan {
             catch (io: IOException) { throw io }
             catch (failure: RuntimeException) { issues += "Gateway UDS: ${failure.message}" }
         }
+        if (discoveryReconnectNeeded) restoreConnection("Сбор списка ECU", IOException("Функциональный обмен не завершён"))
         if (protocol == null) {
             event("VAG_GATEWAY_DISCOVERY", issues.joinToString("; "), "INCONCLUSIVE")
             return Outcome(null, false, false, "Gateway не подтвердил TP2.0 или UDS; ${issues.joinToString("; ")}")
@@ -215,7 +229,7 @@ object ElmVagScan {
             }
         }
         val listConfirmed = installed != null
-        if (!listConfirmed && !allowCandidateFallback) {
+        if (!listConfirmed && !candidateFallbackPermitted) {
             collectIdentity()
             event("VAG_INSTALLATION_LIST", "Формат списка не подтверждён; кандидаты для этой платформы не опрашиваются", "UNSUPPORTED")
             return Outcome(protocol, false, false, "Gateway ответил; список для этой платформы не подтверждён" +
@@ -343,9 +357,11 @@ object ElmVagScan {
             val responseConfirmed = id in confirmedProtocols
             val declared = id in ids && (listConfirmed || id == 0x19)
             var unit = ControlUnit("VAG-%02X".format(id), route?.name ?: "Блок VAG",
-                ReadState.NOT_QUERIED, note = if (declared) "Подтверждён Gateway; чтение DTC ещё не выполнено"
+                ReadState.NOT_QUERIED, note = if (declared) "Подтверждён списком ECU " +
+                    (listEntry?.listOwners ?: setOf(0x19)).joinToString { "%02X".format(it) } + "; чтение DTC ещё не выполнено"
                 else if (responseConfirmed) "Ответ ECU подтверждён; DTC ещё не прочитаны"
-                else "Кандидат профиля; наличие не подтверждено", source = if (responseConfirmed) "RESPONSE" else if (declared) "GATEWAY" else "CANDIDATE")
+                else "Кандидат профиля; наличие не подтверждено", source = if (responseConfirmed) "RESPONSE" else if (declared)
+                    if (listEntry?.listOwners?.any { it != 0x19 } == true) "INSTALLATION_LIST" else "GATEWAY" else "CANDIDATE")
             onUnit(unit)
             if (route == null) {
                 failed = true
@@ -516,7 +532,7 @@ object ElmVagScan {
         private var active = false
         private var pendingMs = 5250L
         private var cachedPartReply: List<Int>? = null
-        suspend fun open(target: VagOemReadOnly.Route) {
+        private suspend fun configure(target: VagOemReadOnly.Route) {
             val tx = requireNotNull(target.udsTx) { "Нет проверенного UDS-маршрута" }
             val rx = requireNotNull(target.udsRx)
             suspend fun ok(cmd: String) {
@@ -549,6 +565,10 @@ object ElmVagScan {
             }
             ok("ATCFC1")
             route = target
+        }
+        suspend fun restoreConfiguration() = configure(requireNotNull(route))
+        suspend fun open(target: VagOemReadOnly.Route) {
+            configure(target)
             // Presence is independent of extended-session support. A complete
             // matching negative reply also proves that the addressed ECU answered.
             val presence = readOrNoData("3E00", allowNoData = true)
@@ -597,7 +617,7 @@ object ElmVagScan {
                         decoded.payload?.let { return@withTimeoutOrNull it }
                         // No new diagnostic request, session-close or tester-present
                         // may run until this SID has a final response.
-                        raw = engine.receivePendingUdsFrame(rx, pendingMs)
+                        return@withTimeoutOrNull ElmUdsPending.read(engine, target, command, raw, pendingMs, pending)
                     }
                     @Suppress("UNREACHABLE_CODE") emptyList<Int>()
             }

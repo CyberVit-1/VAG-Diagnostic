@@ -220,6 +220,7 @@ object VagInstallationBitmap {
         } }
     }
     fun supports(owner: Int, partNumber: String): Boolean = mappingFor(owner, partNumber) != null
+    fun formatFor(owner: Int, partNumber: String): String? = mappingFor(owner, partNumber)?.name
 
     /** 2A26 is the installation bitmap; 2A28 is the fault-indication bitmap.
      * Fault indications never substitute for reading an ECU's DTC memory. */

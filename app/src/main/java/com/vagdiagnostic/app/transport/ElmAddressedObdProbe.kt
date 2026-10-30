@@ -16,14 +16,15 @@ object ElmAddressedObdProbe {
     data class Outcome(
         val verified: Boolean,
         val reason: String,
-        val atAccepted: Boolean
+        val atAccepted: Boolean,
+        val physicalResponseConfirmed: Boolean = false
     ) {
         fun journalSummary(): String =
             "Addressed legislated OBD; verified=$verified; " +
-                "AT accepted=$atAccepted; $reason; no Gateway requests; VIN omitted"
+            "AT accepted=$atAccepted; addressed OBD response=$physicalResponseConfirmed; $reason; no Gateway requests; VIN omitted"
     }
 
-    suspend fun runOnDisposableEngine(engine: ElmEngine, expectedResponder: String): Outcome {
+    suspend fun runOnDisposableEngine(engine: ElmEngine, expectedResponder: String, readVin: Boolean = true): Outcome {
         // Never use a hard-coded request/response unless the active car has
         // actually sent 41 00 from 7E8 and ELM reported 11-bit/500kbps.
         if (!engine.vehicleReady || engine.protocol !in setOf("6", "A6") ||
@@ -34,6 +35,13 @@ object ElmAddressedObdProbe {
         if (!acceptance.completeAcceptance || acceptance.responder != expectedResponder) {
             return Outcome(false, "Адаптер не подтвердил все адресные AT-команды", false)
         }
+        // Establish physical request routing independently from the optional VIN.
+        // This proves neither a multi-frame exchange nor an OEM ECU/list.
+        val presence = VagAddressedCan.decodeSingleEcu(engine.command("0100"), expectedResponder.toInt(16))
+        val bytes = presence.payload?.map { it.toInt() and 255 }
+        if (!presence.valid || bytes?.size != 6 || bytes.take(2) != listOf(0x41, 0))
+            return Outcome(false, "Адресный OBD 0100 не подтверждён", true)
+        if (!readVin) return Outcome(false, "Адресный OBD 0100 подтверждён; многофреймовый обмен ещё не проверен", true, true)
         // 0902 (legislated Mode 09 PID 02) is read-only. Its response can be
         // multi-frame, allowing a *hardware* ISO-TP flow-control check.
         val raw = engine.command("0902", timeoutMs = 13500)
@@ -46,7 +54,7 @@ object ElmAddressedObdProbe {
             setOf(expectedResponder)
         )
         return if (decoded.verified == setOf(expectedResponder)) {
-            Outcome(true, "Полный ответ стандартного OBD 0902 подтверждён", true)
+            Outcome(true, "Полный ответ стандартного OBD 0902 подтверждён", true, true)
         } else {
             Outcome(false, "Данные 0902: " + decoded.issues.joinToString("; "), true)
         }

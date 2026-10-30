@@ -14,12 +14,13 @@ class ElmVagScanTest {
         val presenceReply: String = "7E00", val sessionReply: String = "5003", val bitmapReply: String? = null,
         val dtcReply: String? = null, val closeFailure: String? = null,
         val includeCentral: Boolean = false, val centralIdentityReply: String? = null,
-        val includeEngine: Boolean = false) : ElmLink {
+        val includeEngine: Boolean = false, val functionalReceiveFailure: Boolean = false) : ElmLink {
         override val label = "Scripted UDS link"
         val sent = mutableListOf<String>()
         private val queue = ArrayDeque<Int>()
         private var hasDtcReply = false
         private var receiveId = "77A"
+        private var functionalTail = ""
         override suspend fun open() {}
         override fun close() { queue.clear() }
         override suspend fun readByte(): Int = queue.pollFirst() ?: -2
@@ -38,6 +39,10 @@ class ElmVagScanTest {
             if (command.startsWith("ATCRA")) receiveId = command.removePrefix("ATCRA")
             val id = if (wrongId) "77B" else receiveId
             if (command == "ATMA") {
+                if (functionalReceiveFailure) {
+                    "BUFFER FULL\r".toByteArray(Charsets.US_ASCII).forEach { queue.add(it.toInt() and 255) }
+                    return
+                }
                 val payload = if (pending == 3) "037F1978" else "03590299"
                 for (b in (id + payload + "\r").toByteArray(Charsets.US_ASCII)) queue.add(b.toInt() and 255)
                 return
@@ -47,7 +52,7 @@ class ElmVagScanTest {
                 command == "0100" -> "7E8064100BE3EA813"
                 command == "ATDPN" -> "6"
                 command.startsWith("AT") -> "OK"
-                command == "1FC000100003011" -> "NO DATA"
+                command.endsWith("C000100003011") -> "NO DATA"
                 command == "3E00" -> if (presenceReply == "NO DATA") "NO DATA" else
                     id + "%02X".format(presenceReply.length / 2) + presenceReply
                 command == "1003" -> if (sessionReply == "NO DATA") "NO DATA" else
@@ -60,6 +65,13 @@ class ElmVagScanTest {
                 command == "2204A1" -> payload(id, "6204A1191F0100" + (if (includeCentral) "09200100" else "") + (if (includeEngine) "01010100" else ""))
                 command == "22F187" -> payload(id, if (id == "778") centralIdentityReply ?: identityReply else identityReply)
                 command == "222A26" -> payload(id, requireNotNull(bitmapReply))
+                command == "023E800000000000" -> "NO DATA"
+                command == "03222A2600000000" -> {
+                    val rows = payload("77A", requireNotNull(bitmapReply)).split('\r')
+                    functionalTail = rows.drop(1).joinToString("\r")
+                    rows.first()
+                }
+                command == "3000100000000000" -> functionalTail.also { functionalTail = "" }
                 command == "19028D" -> { hasDtcReply = true; when (pending) {
                     1 -> id + "037F1978\r" + id + "03590299"
                     2, 3 -> id + "037F1978"
@@ -460,10 +472,9 @@ class ElmVagScanTest {
             assertEquals(1, link.sent.count { it == "22F187" })
         }
     }
-    @Test fun unknownPositionsAndMissingAdditionalListsKeepCoverageIncomplete() = runBlocking {
+    @Test fun unknownPositionsKeepCoverageIncomplete() = runBlocking {
         for ((part, bitmap) in listOf(
-            "5Q0907530" to ("01" + "00".repeat(30) + "01"),
-            "5WA907530" to ("01" + "00".repeat(31)))) {
+            "5Q0907530" to ("01" + "00".repeat(30) + "01"))) {
             val link = UdsLink(identityReply = partReply(part), bitmapReply = "622A26$bitmap")
             val units = linkedMapOf<String, ControlUnit>()
             val outcome = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
@@ -473,6 +484,59 @@ class ElmVagScanTest {
             assertEquals(setOf("VAG-19"), units.keys)
             assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
         }
+    }
+    @Test fun mk8ProductionScanUsesFunctionalListAndRestoresPhysicalSessionBeforeClose() = runBlocking {
+        val link = UdsLink(identityReply = partReply("5WA907530"), bitmapReply = "622A2601" + "00".repeat(31))
+        val units = linkedMapOf<String, ControlUnit>()
+        val outcome = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertTrue(outcome.note, outcome.complete)
+        assertEquals(setOf("VAG-19"), units.keys)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertFalse(link.sent.contains("222A26"))
+        val functional = link.sent.indexOf("03222A2600000000")
+        val close = link.sent.indexOf("1001")
+        assertTrue(link.sent.indexOf("1003") < functional)
+        assertTrue(functional < close)
+        val restoration = link.sent.subList(functional, close)
+        assertTrue(restoration.contains("ATCAF1"))
+        assertTrue(restoration.contains("ATCRA77A"))
+        assertTrue(restoration.contains("ATFCSH710"))
+        assertEquals(1, link.sent.count { it == "03222A2600000000" })
+    }
+    @Test fun emptyModernListNeverEnablesLegacyCandidateFallback() = runBlocking {
+        for (part in listOf("5Q0907530", "5WA907530")) {
+            val link = UdsLink(identityReply = partReply(part), bitmapReply = "622A26" + "00".repeat(32))
+            val units = mutableListOf<ControlUnit>()
+            val outcome = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units += it }, { _, _, _ -> }, allowCandidateFallback = true)
+            assertFalse(outcome.listConfirmed)
+            assertFalse(outcome.complete)
+            assertTrue(units.isEmpty())
+            assertFalse(link.sent.contains("19028D"))
+        }
+    }
+    @Test fun interruptedFunctionalCollectionRequiresNewVerifiedEngineBeforeDtcQueue() = runBlocking {
+        val data = MutableList(32) { 0 }
+        data[0] = 1
+        val bit = (0..255).single { b ->
+            val one = MutableList(32) { 0 }.also { it[b / 8] = 0x80 ushr (b % 8) }
+            VagInstallationBitmap.decode(0x19, "5WA907530", listOf(0x62, 0x2A, 0x26) + one).ids.contains(0x42)
+        }
+        data[bit / 8] = data[bit / 8] or (0x80 ushr (bit % 8))
+        val broken = UdsLink(identityReply = partReply("5WA907530"),
+            bitmapReply = "622A26" + VagOemReadOnly.hex(data), functionalReceiveFailure = true)
+        val fresh = UdsLink()
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        val result = ElmVagScan.scan(ElmEngine(broken, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+            recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }) })
+        assertEquals(1, replacements)
+        assertTrue(result.listConfirmed)
+        assertFalse(result.complete)
+        assertEquals("ATMA", broken.sent.last())
+        assertEquals("ATZ", fresh.sent.first())
+        assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOf("19028D"))
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-42").state)
     }
     @Test fun malformedBitmapDoesNotTurnIntoEmptyInstalledList() = runBlocking {
         for (bitmap in listOf("622A26" + "00".repeat(31), "622A28" + "00".repeat(32), "7F2231")) {
@@ -513,7 +577,7 @@ class ElmVagScanTest {
         assertTrue(result.note, result.complete)
         assertEquals(1, link.sent.count { it == "19028D" })
         val readIndex = link.sent.indexOf("19028D")
-        assertEquals(listOf("ATMA", "", "1001"), link.sent.drop(readIndex + 1))
+        assertEquals(listOf("ATCFC0", "ATCAF0", "ATMA", "", "ATCAF1", "ATCFC1", "1001"), link.sent.drop(readIndex + 1))
         assertTrue(journal.contains("ATMA"))
     }
     @Test fun repeatedPendingIsBoundedWithoutResendOrPrematureSessionClose() = runBlocking {

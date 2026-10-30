@@ -303,9 +303,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         // Only the KNOWN legislated OBD physical pair 7E0->7E8.
                         // No VAG Gateway address is inferred. Probe all transports
                         // with the same code and a disposable, isolated ELM link.
-                        val confirmedPhysicalEcu = check?.verified?.firstOrNull { id ->
-                            Regex("^7E[8-F]$").matches(id) &&
-                                id in session.current.observedCanResponderIds
+                        val confirmedPhysicalEcu = session.current.observedCanResponderIds.firstOrNull { id ->
+                            Regex("^7E[8-F]$").matches(id)
                         }
                         // Only a structurally validated VIN contributes the
                         // two-character chassis marker. Full VIN is display-only;
@@ -313,7 +312,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         // Other recognized VAG chassis require a genuine list;
                         // they never inherit the legacy candidate queue.
                         val tp20Profile = confirmedPhysicalEcu?.let { ecu ->
-                            vinResponse?.let { VagTp20Gateway.profileFromVerifiedMode09(it, ecu, supported.responders) }
+                            VagTp20Gateway.discoveryProfile(vinResponse, ecu, supported.responders)
                         }
                         if (confirmedPhysicalEcu != null &&
                             session.current.protocol in setOf("6", "A6")
@@ -330,7 +329,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                 engine = diagnosticEngine
                                 diagnosticEngine.connect()
                                 val addressed = ElmAddressedObdProbe.runOnDisposableEngine(
-                                    diagnosticEngine, confirmedPhysicalEcu
+                                    diagnosticEngine, confirmedPhysicalEcu,
+                                    readVin = confirmedPhysicalEcu in check?.verified.orEmpty()
                                 )
                                 _state.value = _state.value.copy(
                                     isoTpReadiness = resultText + "; " +
@@ -345,13 +345,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                     outcome = if (addressed.verified) "CONFIRMED"
                                         else "INCONCLUSIVE"
                                 ))
-                                if (addressed.verified && tp20Profile == null) {
-                                    val note = "VAG: подтверждённого платформенного профиля нет; OEM опрос пропущен"
-                                    _state.value = _state.value.copy(isoTpReadiness = _state.value.isoTpReadiness + "; " + note)
-                                    db.journal().insert(JournalEntity(timestamp = System.currentTimeMillis(), connection = cfg.type,
-                                        command = "VAG_SCAN_SKIPPED", raw = note, elapsedMs = 0, outcome = "UNSUPPORTED"))
-                                }
-                                if (addressed.verified && tp20Profile != null) {
+                                if (addressed.physicalResponseConfirmed && tp20Profile != null) {
                                     _state.value = _state.value.copy(
                                         current = "VAG: подключение, список блоков и чтение DTC"
                                     )

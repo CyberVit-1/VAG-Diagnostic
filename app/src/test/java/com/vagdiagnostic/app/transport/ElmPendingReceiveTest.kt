@@ -39,6 +39,26 @@ class ElmPendingReceiveTest {
         assertEquals("17FE008B03590219", engine.receivePendingUdsFrame(0x17FE008B, 100))
         assertEquals(listOf("ATMA", ""), link.sent)
     }
+    @Test fun rawFirstFrameAndOtherOwnersAreRetainedUntilMonitorStopsBeforeManualFc() = runBlocking {
+        val link = Link("77A100A622A26010203\r7B404622A2680\r")
+        val journal = mutableListOf<String>()
+        val engine = ElmEngine(link, { _, raw, _, _ -> journal += raw })
+        val raw = engine.receivePendingCanFrames(setOf(0x77A, 0x7B4), 100, deferJournal = true)
+        assertTrue(raw.contains("77A100A"))
+        assertTrue(raw.contains("7B404622A2680"))
+        assertEquals(listOf("ATMA", ""), link.sent)
+        assertTrue(journal.isEmpty())
+        engine.flushJournal()
+        assertTrue(journal.single().contains("STOPPED"))
+        assertFalse(link.closed)
+    }
+    @Test fun rawMonitorStillRejectsForeignIdsAndCannotResendTheRequest() = runBlocking {
+        val link = Link("77B100A622A26010203\r")
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        assertTrue(runCatching { engine.receivePendingCanFrames(setOf(0x77A), 100) }.exceptionOrNull() is IOException)
+        assertTrue(link.closed)
+        assertEquals(listOf("ATMA"), link.sent)
+    }
     @Test fun wrongAddressOrFirstFrameNeverLeavesLiveStreamWithOutstandingRequest() = runBlocking {
         for (raw in listOf("77E03590299\r", "77F100B590299123456\r", "BUFFER FULL\r")) {
             val link = Link(raw)

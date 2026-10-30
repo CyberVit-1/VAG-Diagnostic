@@ -62,7 +62,7 @@ object VagOemReadOnly {
     data class Installed(val id: Int, val rawStatus: Int?, val hasFaultFlag: Boolean,
         val tpDestination: Int? = null, val extraStatus: Int? = null,
         val observations: List<List<Int>> = emptyList(), val routeConflict: Boolean = false,
-        val mappedRoute: Route? = null)
+        val mappedRoute: Route? = null, val listOwners: Set<Int> = setOf(0x19))
     data class Faults(val values: List<Dtc>, val service: String)
     class ServiceRejected(val service: Int, val nrc: Int) :
         IllegalStateException("Сервис %02X: NRC %02X".format(service, nrc))

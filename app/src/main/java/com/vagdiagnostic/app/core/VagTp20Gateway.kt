@@ -28,6 +28,13 @@ object VagTp20Gateway {
     )
     fun knownCandidate(chassis: String?): Profile? = profiles[chassis]
 
+    /** The app's VAG scan may attempt the fixed Gateway even without VIN.
+     * An unknown platform must supply a valid installation list; no legacy
+     * candidate queue, brand claim or arbitrary CAN sweep follows from this. */
+    fun discoveryProfile(frames: FrameParse?, sourceEcu: String, supportedEcus: Set<String>): Profile =
+        frames?.let { profileFromVerifiedMode09(it, sourceEcu, supportedEcus) }
+            ?: Profile("не определено", "Платформа не определена; обязателен фактический список ECU", "VAG")
+
     /** Known manufacturer identity permits the fixed Gateway probe; the actual
      * list format and routes must still be confirmed at runtime. Other chassis
      * never inherit the legacy profile's unconfirmed candidate queue. */

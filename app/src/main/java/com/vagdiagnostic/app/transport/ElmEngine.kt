@@ -215,5 +215,71 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
             withContext(NonCancellable) { persist(record) }
         }
     }
+    /** Receive raw, strictly identified CAN frames without resending a pending
+     * read. Stop ATMA before the caller emits any required physical FC. */
+    suspend fun receivePendingCanFrames(expectedIds: Set<Int>, timeoutMs: Long,
+        deferJournal: Boolean = false): String = lock.withLock {
+        require(expectedIds.isNotEmpty() && expectedIds.all { it in 0..0x1FFFFFFF } && timeoutMs in 1..6000)
+        val collected = StringBuilder()
+        val line = StringBuilder()
+        val received = mutableListOf<String>()
+        val start = System.nanoTime()
+        var status = "OK"
+        fun accept(row: String, stopping: Boolean) {
+            val clean = row.uppercase().filterNot(Char::isWhitespace)
+            if (clean.isEmpty() || clean == "ATMA" || (stopping && clean == "STOPPED")) return
+            require(clean.all { it in "0123456789ABCDEF" }) { "Неверная строка отложенного CAN" }
+            val headerSize = if (clean.length % 2 == 1) 3 else 8
+            require(clean.length >= headerSize + 2 && clean.length <= headerSize + 16) { "Неверная длина отложенного CAN" }
+            val id = clean.take(headerSize).toLong(16)
+            require(id in 0..0x1FFFFFFF && id.toInt() in expectedIds) { "Незапрошенный CAN ID при ожидании" }
+            received += clean
+        }
+        try {
+            link.write("ATMA\r".toByteArray(Charsets.US_ASCII))
+            withTimeoutOrNull(timeoutMs) {
+                while (received.isEmpty()) {
+                    coroutineContext.ensureActive()
+                    val b = link.readByte()
+                    if (b == -2) { yield(); continue }
+                    if (b == -1) throw EOFException("Поток закрыт при ожидании CAN")
+                    if (b == '>'.code) throw IOException("ELM завершил ожидание без CAN ответа")
+                    if (collected.length >= 32768) throw IOException("Переполнение отложенного CAN")
+                    if (b in 0..127) collected.append(b.toChar())
+                    if (b == '\r'.code || b == '\n'.code) { accept(line.toString(), false); line.clear() }
+                    else if (b in 0..127) line.append(b.toChar())
+                }
+            } ?: throw IOException("Истёк срок ожидания CAN ответа")
+            link.write(byteArrayOf('\r'.code.toByte()))
+            withTimeoutOrNull(1500) {
+                while (true) {
+                    coroutineContext.ensureActive()
+                    val b = link.readByte()
+                    if (b == -2) { yield(); continue }
+                    if (b == -1) throw EOFException("Поток закрыт при завершении CAN мониторинга")
+                    if (b == '>'.code) { accept(line.toString(), true); line.clear(); break }
+                    if (collected.length >= 32768) throw IOException("Переполнение CAN мониторинга")
+                    if (b in 0..127) collected.append(b.toChar())
+                    if (b == '\r'.code || b == '\n'.code) { accept(line.toString(), true); line.clear() }
+                    else if (b in 0..127) line.append(b.toChar())
+                }
+            } ?: throw IOException("ELM не завершил CAN мониторинг")
+            lastCommandNanos = clockNanos()
+            received.joinToString("\r")
+        } catch (error: Throwable) {
+            status = error::class.java.simpleName + ": " + (error.message ?: "")
+            close()
+            if (error is CancellationException || error is IOException) throw error
+            throw IOException("Некорректный отложенный CAN: ${error.message}", error)
+        } finally {
+            val record = JournalRecord("ATMA", collected.toString(), (System.nanoTime() - start) / 1_000_000,
+                status, System.currentTimeMillis())
+            if (deferJournal) {
+                deferredJournal.addLast(record)
+                if (deferredJournal.size > 512) throw IOException("Превышен буфер протокольного журнала")
+            } else withContext(NonCancellable) { persist(record) }
+        }
+    }
+
     fun close() { vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); needsFlowControlReset = false; link.close() }
 }
