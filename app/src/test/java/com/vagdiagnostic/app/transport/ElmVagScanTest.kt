@@ -568,6 +568,21 @@ class ElmVagScanTest {
         assertEquals(1, link.sent.count { it == "ATZ" })
         assertTrue(link.sent.indexOf("0100") < link.sent.indexOf("03C000100003011"))
     }
+    @Test fun malformedKwpExtraRecordCannotEraseBasicDtcOrStartAnotherEcu() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", detailsReply = "520001020304")
+        val units = linkedMapOf<String, ControlUnit>()
+        val failure = runCatching { ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }),
+            { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false) }.exceptionOrNull()
+        assertTrue(failure is IOException)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals("P0299", units.getValue("VAG-01").dtcs.single().code)
+        assertFalse(link.sent.contains("03C000100003011"))
+        val detailsIndex = link.sent.indexOfFirst { it.endsWith("1200040299") }
+        assertTrue(detailsIndex >= 0)
+        // Full TP packets are acknowledged before application-level decoding.
+        // Only those ACK/continuation reads may follow this malformed reply.
+        assertTrue(link.sent.drop(detailsIndex + 1).all { it.startsWith("B") })
+    }
     @Test fun additionalUdsIdentificationReadsAllSelectedFieldsBeforeDtc() = runBlocking {
         fun textReply(did: String, value: String) = "62$did" + VagOemReadOnly.hex(value.map { it.code })
         val link = UdsLink(identityReply = partReply("1K0907530"), infoReplies = mapOf(

@@ -458,7 +458,7 @@ object ElmVagScan {
                             } catch (bad: IllegalArgumentException) {
                                 throw IOException("Некорректный ответ дополнительных записей DTC: ${bad.message}", bad)
                             }
-                        event("VAG_DTC_DETAILS_%02X".format(id), "${fault.code}: ${reply.state}" + (reply.nrc?.let { "; NRC 0x%02X".format(it) } ?: "") + "; расшифровка дополнительных записей не подтверждена",
+                        event("VAG_DTC_DETAILS_%02X".format(id), "${fault.code}: ${reply.state}" + (reply.kwpRecords?.let { "; записей=${it.records.size}; структура=${if (it.complete) "полная" else "частичная"}" } ?: "") + (reply.nrc?.let { "; NRC 0x%02X".format(it) } ?: "") + "; расшифровка дополнительных записей не подтверждена",
                             if (reply.state == VagDtcDetails.State.RAW_RESPONSE) "RAW_ONLY" else "INCOMPLETE")
                     }
                 }

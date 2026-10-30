@@ -5,7 +5,8 @@ package com.vagdiagnostic.app.core
 object VagDtcDetails {
     enum class Protocol { KWP, UDS }
     enum class State { RAW_RESPONSE, NO_DATA, REJECTED }
-    data class Reply(val state: State, val raw: List<Int> = emptyList(), val nrc: Int? = null)
+    data class Reply(val state: State, val raw: List<Int> = emptyList(), val nrc: Int? = null,
+        val kwpRecords: VagKwpDtcRecords.Parsed? = null)
     class Request internal constructor(val protocol: Protocol, val codeBytes: List<Int>) {
         init {
             require(codeBytes.size == if (protocol == Protocol.KWP) 2 else 3)
@@ -38,6 +39,7 @@ object VagDtcDetails {
         } else require(payload.size >= 5) { "Неполный заголовок KWP дополнительных записей" }
         // Transport and request envelope are checked. Do not guess individual
         // record lengths, units or meanings from an unknown ECU/ASAM layout.
-        return Reply(State.RAW_RESPONSE, raw = payload.toList())
+        return Reply(State.RAW_RESPONSE, raw = payload.toList(),
+            kwpRecords = if (request.protocol == Protocol.KWP) VagKwpDtcRecords.decode(payload) else null)
     }
 }
