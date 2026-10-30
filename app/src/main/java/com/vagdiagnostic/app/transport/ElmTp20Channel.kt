@@ -16,6 +16,9 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
      * Caller may terminate this channel before choosing another read path. */
     class NoApplicationResponse : IllegalStateException("ECU не дал прикладного ответа при работающем TP2.0 канале")
     class NoChannelResponse : IllegalStateException("ECU не ответил на CHANNEL SETUP")
+    /** Explicit peer close after ACK, before any application response. The
+     * caller must reset the transport before another diagnostic transaction. */
+    class PeerClosedChannel : IOException("ECU закрыл TP2.0 канал до ответа DTC")
     private var tx = 0
     private var rx = 0
     private var sendSeq = 0
@@ -163,6 +166,11 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
                     }
                     op == 0x90 -> error("Отрицательное подтверждение TP2.0; запрос не повторяется")
                     frame[0] == 0xA8 -> {
+                        if (frame.size == 1 && !completedMessages && acknowledged && expected < 0 &&
+                            result.isEmpty() && messages.isEmpty() && pendingReplies == 0 && !awaitingContinuation && queue.isEmpty()) {
+                            active = false
+                            throw PeerClosedChannel()
+                        }
                         check(completedMessages && frame.size == 1) { "ECU закрыл незавершённый канал TP2.0" }
                         active = false
                     }

@@ -77,6 +77,7 @@ class ElmExpandedRoutesTest {
                     else (if (protocol == "7" && wrong29) "17FE008A" else filter) + "065003003201F4"
                 }
                 cmd == "1001" -> filter + "065001003201F4"
+                cmd == "22F187" -> "NO DATA"
                 cmd == "19028D" -> if (protocol == "7")
                     filter + "100B590219123456\r" + filter + "2108654321040000"
                     else filter + "03590219"
@@ -112,11 +113,11 @@ class ElmExpandedRoutesTest {
         assertTrue(units.values.all { it.state == ReadState.COMPLETE })
         for (tp in listOf("13", "14", "24", "25", "52")) assertTrue(link.sent.contains(tp + "C000100003011"))
         assertTrue(link.sent.containsAll(listOf("ATCRA777", "ATSP7", "ATCP17", "ATSHFC008B", "ATCRA17FE008B",
-            "ATFCSH17FC008B", "ATFCSD300000", "ATFCSM1")))
+            "ATFCSH17FC008B", "ATFCSD300010", "ATFCSM1")))
         assertEquals(2, units.getValue("VAG-46").dtcs.size)
         assertTrue(link.sent.indexOf("ATFCSM1") < link.sent.indexOf("1003", link.sent.indexOf("ATSP7")))
         val next11 = link.sent.indexOf("ATSH70C")
-        assertTrue(link.sent.indexOf("ATFCSM0") in link.sent.indexOf("ATSP7") until next11)
+        assertTrue(link.sent.indexOf("ATFCSM0", link.sent.indexOf("ATSP7")) in link.sent.indexOf("ATSP7") until next11)
         assertFalse(link.sent.any { it == "04" || it.startsWith("27") || it.startsWith("2E") })
     }
     @Test fun addedRoutesAnd29BitAlternativeRequireInstallationList() = runBlocking {

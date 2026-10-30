@@ -179,6 +179,8 @@ object ElmVagScan {
         val queue = ids.toMutableList()
         var next = 0
         var supplementalAttempted = false
+        var channelRecoveries = 0
+        val retriedAfterClose = mutableSetOf<Int>()
         suspend fun discoverAdditional() {
             // This is a fixed legacy procedure, not a sweep of the route catalog.
             // Determine the chassis from ECU09's own identity, never from VIN or
@@ -333,7 +335,7 @@ object ElmVagScan {
                     catch (cancel: CancellationException) { throw cancel }
                     catch (io: IOException) { throw io }
                     catch (failure: RuntimeException) {
-                        if (failure is VagOemReadOnly.ServiceRejected || completedFaults != null) throw failure
+                        if ((failure is VagOemReadOnly.ServiceRejected && failure.service in setOf(0x18, 0x19)) || completedFaults != null) throw failure
                         // A completed service rejection stays with this ECU. Only a
                         // completed setup/healthy no-response can choose another route.
                         if (route.udsTx == null) throw failure
@@ -347,6 +349,20 @@ object ElmVagScan {
                     withContext(NonCancellable) { publishFaults(result) }
                 }
                 throw cancel
+            }
+            catch (closed: ElmTp20Channel.PeerClosedChannel) {
+                onUnit(unit.copy(state = ReadState.PARTIAL,
+                    note = "ECU закрыл канал до DTC; остальные блоки будут опрошены", source = "RESPONSE"))
+                if (channelRecoveries >= 4) throw IOException("Исчерпан предел восстановления TP-каналов", closed)
+                currentCoroutineContext().ensureActive()
+                event("VAG_CHANNEL_RECOVERY", "${route.key}: явный A8; новое подключение перед продолжением очереди", "RECOVERING")
+                engine.close()
+                engine.connect()
+                check(engine.vehicleReady) { "OBD после закрытия TP-канала не подтверждён" }
+                currentCoroutineContext().ensureActive()
+                channelRecoveries++
+                if (retriedAfterClose.add(id)) queue += id else failed = true
+                event("VAG_CHANNEL_RECOVERY", "${route.key}: OBD подтверждён; очередь продолжается; повтор не более одного", "CONFIRMED")
             }
             catch (io: IOException) {
                 completedFaults?.takeIf { !faultsPublished }?.let { result ->
@@ -389,6 +405,7 @@ object ElmVagScan {
         private var route: VagOemReadOnly.Route? = null
         private var active = false
         private var pendingMs = 5250L
+        private var cachedPartReply: List<Int>? = null
         suspend fun open(target: VagOemReadOnly.Route) {
             val tx = requireNotNull(target.udsTx) { "Нет проверенного UDS-маршрута" }
             val rx = requireNotNull(target.udsRx)
@@ -405,7 +422,7 @@ object ElmVagScan {
                 ok("ATSH%06X".format(tx and 0xFFFFFF))
                 ok("ATCRA%08X".format(rx))
                 // The non-OBD 29-bit route needs its exact FC transmit ID.
-                ok("ATFCSH%08X".format(tx)); ok("ATFCSD300000"); ok("ATFCSM1")
+                ok("ATFCSH%08X".format(tx)); ok("ATFCSD300010"); ok("ATFCSM1")
                 check(engine.command("ATDPN").trim().uppercase() in setOf("7", "A7")) { "ELM не подтвердил CAN 7" }
             } else {
                 if (engine.needsFlowControlReset) {
@@ -414,16 +431,25 @@ object ElmVagScan {
                     engine.needsFlowControlReset = false
                 }
                 ok("ATSH%03X".format(tx)); ok("ATCRA%03X".format(rx))
+                // Non-OBD request/response IDs need the actual physical TX ID
+                // for FC as well. OBD's default receive-ID arithmetic is not a
+                // substitute for this ECU route. STmin=0x10, block size zero.
+                engine.needsFlowControlReset = true
+                ok("ATFCSH%03X".format(tx)); ok("ATFCSD300010"); ok("ATFCSM1")
             }
             ok("ATCFC1")
             route = target
             // Presence is independent of extended-session support. A complete
             // matching negative reply also proves that the addressed ECU answered.
-            val presence = read("3E00")
-            check(presence == listOf(0x7E, 0) ||
+            val presence = readOrNoData("3E00", allowNoData = true)
+            check(presence == null || presence == listOf(0x7E, 0) ||
                 (presence.size == 3 && presence.take(2) == listOf(0x7F, 0x3E))) { "Нет подтверждения присутствия UDS ECU" }
             val reply = readOrNoData("1003", allowNoData = true)
             active = reply?.take(2) == listOf(0x50, 3)
+            if (presence == null && reply == null) {
+                cachedPartReply = readOrNoData("22F187", allowNoData = true)
+                check(cachedPartReply != null) { "ECU не ответил на 3E00, 1003 и F187" }
+            }
             if (active && reply != null && reply.size >= 6) {
                 val star = ((reply[4] shl 8) or reply[5]) * 10L
                 check(star in 1..5750) { "UDS P2* вне поддержанного диапазона" }
@@ -436,7 +462,8 @@ object ElmVagScan {
             val reply = read("1001")
             if (reply.take(2) != listOf(0x50, 1)) throw IOException("ECU не подтвердил возврат в штатную UDS-сессию")
         }
-        suspend fun read(command: String): List<Int> = requireNotNull(readOrNoData(command, false))
+        suspend fun read(command: String): List<Int> =
+            (if (command == "22F187") cachedPartReply else null) ?: requireNotNull(readOrNoData(command, false))
 
         private suspend fun readOrNoData(command: String, allowNoData: Boolean): List<Int>? {
             require(command in setOf("3E00", "1003", "1001", "2204A1", "222A26", "19028D", "22F187"))

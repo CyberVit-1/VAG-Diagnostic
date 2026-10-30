@@ -43,7 +43,7 @@ class ElmVehicleReplayTest {
         replay("034", true)
     }
     private suspend fun replay(version: String, metadata: Boolean) {
-        val fixture = withSyntheticPresence(rows(version)).map {
+        val fixture = withCurrentSetup(withSyntheticPresence(rows(version))).map {
             when {
                 metadata && it.command == "1100021A9B" -> it.copy(command = "11000322F187", raw = it.raw.replace("7F1A11", "7F2231"))
                 else -> it
@@ -69,13 +69,16 @@ class ElmVehicleReplayTest {
         assertEquals(fixture.size, link.index)
         assertFalse(link.sent.any { it.contains("1A9B") } && metadata)
     }
+    private fun withCurrentSetup(rows: List<Row>) =
+        withExplicitPhysicalFlowControl(rows.map { it.command to it.raw }).map { Row(it.first, it.second) }
 
     private fun withSyntheticPresence(original: List<Row>): List<Row> {
         var rx = ""
         return original.flatMap { row ->
             if (row.command.startsWith("ATCRA")) rx = row.command.removePrefix("ATCRA")
             if (row.command != "1003") listOf(row)
-            else if (row.raw.trim() == "NO DATA") listOf(row.copy(command = "3E00"))
+            else if (row.raw.trim() == "NO DATA") listOf(row.copy(command = "3E00"), row,
+                Row("22F187", "NO DATA")) // Explicit synthetic read-only presence fallback.
             else {
                 check(row.raw.contains("5003")) { "Unknown recorded session response" }
                 listOf(Row("3E00", rx + "027E00"), row)
@@ -84,7 +87,7 @@ class ElmVehicleReplayTest {
     }
 
     @Test fun recordedQueueDisconnectPreservesEarlierDtcAndStopsTraffic() = runBlocking {
-        val fixture = withSyntheticPresence(rows("034"))
+        val fixture = withCurrentSetup(withSyntheticPresence(rows("034")))
         val stop = fixture.indexOfFirst { it.command == "24C000100003011" } + 1
         assertTrue(stop > 0)
         val link = Replay(fixture, stop)

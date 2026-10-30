@@ -36,6 +36,7 @@ class ElmTp20RecoveryTest {
                     if (tail == "io" || tail == "pending-io") throw IOException("lost stream")
                     if (tail == "cancel" || tail == "pending-cancel") throw CancellationException("stopped")
                     when {
+                        tail in setOf("closed", "pending-closed") && polls >= 4 -> "300A10F8AFF4AFF\r300A8"
                         tail == "pending-many" -> "3001%X00037F1878".format((pendingSeq++ and 15))
                         tail == "foreign" || tail == "pending-foreign" -> "3011100025800"
                         polls == 1 -> "300A10F8AFF4AFF"
@@ -60,6 +61,18 @@ class ElmTp20RecoveryTest {
         channel.open(9)
         assertEquals(listOf(0x50, 0x89), channel.request("1089"))
         channel.close()
+    }
+    @Test fun cleanPeerCloseIsDistinctFromCloseDuringPendingResponse() = runBlocking {
+        for (tail in listOf("closed", "pending-closed")) {
+            val link = Link(tail = tail)
+            val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
+            channel.open(9); channel.request("1089")
+            val error = runCatching { channel.request("1802FF00") }.exceptionOrNull()
+            assertTrue(error.toString(), error is IOException)
+            assertEquals(tail == "closed", error is ElmTp20Channel.PeerClosedChannel)
+            assertFalse(link.sent.contains("A80"))
+            assertEquals(1, link.sent.count { it.endsWith("1802FF00") })
+        }
     }
     @Test fun changedOrMultipleSetupReplayStillFails() = runBlocking {
         for (row in listOf("20900D00003A90701\r", "20800D00003A80701\r",
