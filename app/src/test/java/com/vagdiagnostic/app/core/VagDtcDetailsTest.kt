@@ -23,8 +23,19 @@ class VagDtcDetailsTest {
     }
     @Test fun wrongCodeSubfunctionSidAndTruncationAreRejected() {
         val request = VagDtcDetails.request(VagDtcDetails.Protocol.UDS, uds)
-        for (hex in listOf("590612345708010203", "590412345608", "5906123456", "620612345608", "7F1978", "7F1231"))
+        for (hex in listOf("590612345708010203", "590412345608", "620612345608", "7F1978", "7F1231"))
             assertTrue(hex, runCatching { VagDtcDetails.decode(request, VagOemReadOnly.bytes(hex)) }.isFailure)
+    }
+    @Test fun matchingCompleteEnvelopeWithInvalidOptionalRecordsIsNonfatal() {
+        val request = VagDtcDetails.request(VagDtcDetails.Protocol.UDS, uds)
+        assertEquals(VagDtcDetails.State.INVALID_RECORDS,
+            VagDtcDetails.decode(request, VagOemReadOnly.bytes("5906123456")).state)
+        val kwpRequest = VagDtcDetails.request(VagDtcDetails.Protocol.KWP, kwp)
+        val raw = VagOemReadOnly.bytes("520001020304")
+        val result = VagDtcDetails.decode(kwpRequest, raw)
+        assertEquals(VagDtcDetails.State.INVALID_RECORDS, result.state)
+        assertEquals(raw, result.raw)
+        assertNull(result.kwpRecords)
     }
     @Test fun noDataAndFinalRejectionDoNotBecomeAnEmptyFaultList() {
         val request = VagDtcDetails.request(VagDtcDetails.Protocol.KWP, kwp)
@@ -33,6 +44,6 @@ class VagDtcDetailsTest {
         assertEquals(VagDtcDetails.State.REJECTED, rejected.state)
         assertEquals(0x31, rejected.nrc)
         assertTrue(rejected.raw.isEmpty())
-        assertTrue(runCatching { VagDtcDetails.decode(request, listOf(0x52, 0, 0, 0)) }.isFailure)
+        assertEquals(VagDtcDetails.State.INVALID_RECORDS, VagDtcDetails.decode(request, listOf(0x52, 0, 0, 0)).state)
     }
 }

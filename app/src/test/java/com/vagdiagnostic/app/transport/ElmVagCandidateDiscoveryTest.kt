@@ -11,7 +11,7 @@ import org.junit.Test
 /** Synthetic fallback responses, not a vehicle recording. */
 class ElmVagCandidateDiscoveryTest {
     private class Link(val corruptAt: Int? = null, val cancelAt: Int? = null,
-        val gatewayAvailable: Boolean = true, val activeFilter: Boolean = false) : ElmLink {
+        val gatewayAvailable: Boolean = true, val activeFilter: Boolean = false, val gatewayPart: String? = "5Q0907530") : ElmLink {
         override val label = "Synthetic fixed-catalog fallback"
         val sent = mutableListOf<String>()
         val addressed = mutableListOf<Pair<Int?, String>>()
@@ -51,11 +51,11 @@ class ElmVagCandidateDiscoveryTest {
                 cmd == "1003" -> payload("5003")
                 cmd == "1001" -> payload("5001")
                 cmd == "22F187" -> payload(when (id) {
-                    0x19 -> "62F187" + VagOemReadOnly.hex("5Q0907530".map { it.code })
+                    0x19 -> gatewayPart?.let { "62F187" + VagOemReadOnly.hex(it.map { char -> char.code }) } ?: "7F2231"
                     9 -> "62F187" + VagOemReadOnly.hex("5Q0937087".map { it.code })
                     else -> "7F2231"
                 })
-                cmd == "222A26" -> payload("7F2231")
+                cmd in setOf("222A26", "2204A1") -> payload("7F2231")
                 cmd == "22539B" && activeFilter -> payload("62539B0101")
                 cmd in setOf("22F197", "22F189", "22F19E", "220174", "22539B") -> payload("7F2231")
                 cmd == "19028D" -> payload(if (id == 0xFFFF) "59028D12345608" else "59028D")
@@ -91,8 +91,32 @@ class ElmVagCandidateDiscoveryTest {
         assertTrue(result.note.contains("фильтр"))
         assertFalse(link.sent.any { it.startsWith("2E") || it.startsWith("27") || it.startsWith("29") })
     }
-    @Test fun unverifiedManufacturerCannotStartCatalogFallback() = runBlocking {
+    @Test fun verifiedGatewayPartEnablesAutomaticCatalogWithoutVin() = runBlocking {
         val link = Link()
+        val units = linkedMapOf<String, ControlUnit>()
+        val events = mutableListOf<String>()
+        val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { command, _, _ -> events += command }, allowCandidateFallback = false)
+        assertFalse(result.listConfirmed)
+        assertFalse(result.complete)
+        assertEquals(189, units.size)
+        assertEquals(setOf("VAG-19", "VAG-09", "VAG-FFFF"), units.values.filter { it.source != "CANDIDATE" }.map { it.address }.toSet())
+        assertEquals("123456", units.getValue("VAG-FFFF").dtcs.single().code)
+        assertTrue(events.contains("VAG_DISCOVERY_SCOPE"))
+        assertFalse(link.sent.any { it.startsWith("09") })
+    }
+    @Test fun callerCanRequireAnInstallationListDespiteKnownGatewayPart() = runBlocking {
+        val link = Link()
+        val units = mutableListOf<ControlUnit>()
+        val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units += it }, { _, _, _ -> },
+            allowCandidateFallback = false, allowGatewayIdentityFallback = false)
+        assertFalse(result.complete)
+        assertTrue(units.isEmpty())
+        assertFalse(link.sent.contains("19028D"))
+        assertFalse(link.sent.contains("ATFCSH17FC0077"))
+    }
+    @Test fun unverifiedManufacturerAndUnknownGatewayCannotStartCatalogFallback() = runBlocking {
+        val link = Link(gatewayPart = null)
         val units = mutableListOf<ControlUnit>()
         val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units += it }, { _, _, _ -> }, allowCandidateFallback = false)
         assertFalse(result.listConfirmed)

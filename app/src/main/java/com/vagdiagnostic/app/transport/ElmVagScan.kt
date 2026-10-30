@@ -27,7 +27,8 @@ object ElmVagScan {
         readGatewayIdentity: Boolean = false,
         discoverAdditionalUnits: Boolean = true,
         identifyEcus: Boolean = true,
-        recreateEngine: (() -> ElmEngine)? = null
+        recreateEngine: (() -> ElmEngine)? = null,
+        allowGatewayIdentityFallback: Boolean = true
     ): Outcome {
         var protocol: Protocol? = null
         var installed: List<VagOemReadOnly.Installed>? = null
@@ -49,8 +50,9 @@ object ElmVagScan {
         val saeAttempts = mutableSetOf<Int>()
         val saeSupport = mutableMapOf<Int, Boolean?>()
         val optionalRetries = mutableMapOf<Int, Int>()
+        val gracefulRetries = mutableMapOf<Int, Int>()
         var centralPart: String? = null
-        val candidateFallbackPermitted = allowCandidateFallback
+        var candidateFallbackPermitted = allowCandidateFallback
         var discoveryReconnectNeeded = false
         var diagnosticAccess: VagDiagnosticAccess.Status? = null
         var currentEngine = engine
@@ -230,22 +232,13 @@ object ElmVagScan {
         }
         // Identification has its own short-lived session; a negative or
         // unknown identification does not change a confirmed installation list.
-        suspend fun collectIdentity() {
-            if (!readGatewayIdentity || gatewayIdentityAttempted || protocol == null) return
+        suspend fun collectIdentity(force: Boolean = false) {
+            if ((!readGatewayIdentity && !force) || gatewayIdentityAttempted || protocol == null) return
+            gatewayIdentityAttempted = true
             event("VAG_GATEWAY_IDENTITY_BEGIN", "Чтение номера Gateway", "READING")
             try {
                 if (protocol == Protocol.TP20) {
-                    withTp(gateway) { channel ->
-                        if (gatewayRejectsService1A) {
-                            identity = VagEcuIdentification.udsPartNumber(channel.request("22F187"))
-                        } else {
-                            val replies = channel.requestMessages("1A9B")
-                            identity = VagEcuIdentification.kwpMessages(replies)
-                            if (replies.size == 1 && replies.first() in listOf(
-                                    listOf(0x7F, 0x1A, 0x10), listOf(0x7F, 0x1A, 0x11), listOf(0x7F, 0x1A, 0x12)))
-                                identity = VagEcuIdentification.udsPartNumber(channel.request("22F187"))
-                        }
-                    }
+                    withTp(gateway) { channel -> identity = tpIdentity(0x19, channel) }
                 } else {
                     val channel = Uds(currentEngine)
                     var healthy = true
@@ -265,6 +258,15 @@ object ElmVagScan {
             }
         }
         val listConfirmed = installed != null
+        if (!listConfirmed && !candidateFallbackPermitted && allowGatewayIdentityFallback) {
+            // A validated, whitelisted Gateway part is direct platform evidence;
+            // the fixed catalog must not depend solely on optional VIN service09.
+            collectIdentity(force = true)
+            if (identity?.partNumber?.let { VagInstallationBitmap.supports(0x19, it) } == true) {
+                candidateFallbackPermitted = true
+                event("VAG_DISCOVERY_SCOPE", "Подтверждена поддерживаемая идентификация Gateway; разрешён фиксированный каталог без VIN", "CONFIRMED")
+            }
+        }
         if (!listConfirmed && !candidateFallbackPermitted) {
             collectIdentity()
             event("VAG_INSTALLATION_LIST", "Формат списка не подтверждён; кандидаты для этой платформы не опрашиваются", "UNSUPPORTED")
@@ -451,14 +453,16 @@ object ElmVagScan {
                     for (fault in faults.values.distinctBy { it.raw.take(if (selected == VagDtcDetails.Protocol.KWP) 4 else 6) }) {
                         currentCoroutineContext().ensureActive()
                         val request = VagDtcDetails.request(selected, fault)
-                        val reply = try { VagDtcDetails.decode(request, read(request)) }
+                        val asamKey = if (selected == VagDtcDetails.Protocol.UDS) VagUdsDtcRecords.asamKey(
+                            details[id]?.get(VagUdsInfo.Field.ASAM)?.text, details[id]?.get(VagUdsInfo.Field.ASAM_REVISION)?.text) else null
+                        val reply = try { VagDtcDetails.decode(request, read(request), asamKey) }
                             catch (missing: ElmTp20Channel.NoApplicationResponse) {
                                 event("VAG_DTC_DETAILS_%02X".format(id), "${fault.code}: нет дополнительного ответа; основной DTC сохранён", "INCOMPLETE")
                                 break
                             } catch (bad: IllegalArgumentException) {
                                 throw IOException("Некорректный ответ дополнительных записей DTC: ${bad.message}", bad)
                             }
-                        event("VAG_DTC_DETAILS_%02X".format(id), "${fault.code}: ${reply.state}" + (reply.kwpRecords?.let { "; записей=${it.records.size}; структура=${if (it.complete) "полная" else "частичная"}" } ?: "") + (reply.nrc?.let { "; NRC 0x%02X".format(it) } ?: "") + "; расшифровка дополнительных записей не подтверждена",
+                        event("VAG_DTC_DETAILS_%02X".format(id), "${fault.code}: ${reply.state}" + (reply.kwpRecords?.let { "; записей=${it.records.size}; структура=${if (it.complete) "полная" else "частичная"}" } ?: "") + (reply.udsRecords?.let { "; записей=${it.records.size}; структура=${if (it.complete) "полная" else "частичная"}" } ?: "") + (reply.nrc?.let { "; NRC 0x%02X".format(it) } ?: "") + (reply.issue?.let { "; $it" } ?: "") + "; расшифровка дополнительных записей не подтверждена",
                             if (reply.state == VagDtcDetails.State.RAW_RESPONSE) "RAW_ONLY" else "INCOMPLETE")
                     }
                 }
@@ -601,6 +605,24 @@ object ElmVagScan {
                     note = if (completedFaults != null) "Память DTC прочитана; дальнейший обмен прерван: ${io.message}"
                         else "Соединение потеряно; DTC не подтверждены: ${io.message}"))
                 throw IOException("${route.key}: ${io.message}", io)
+            }
+            catch (closed: ElmTp20Channel.GracefullyClosedChannel) {
+                if (completedFaults != null) {
+                    if (!faultsPublished) publishFaults(requireNotNull(completedFaults))
+                    event("VAG_DTC_DETAILS_%02X".format(id), "Канал штатно завершён после DTC; дополнительные записи не получены", "INCOMPLETE")
+                } else {
+                    val retries = gracefulRetries.getOrDefault(id, 0)
+                    val retry = retries < 3
+                    unit = unit.copy(state = ReadState.PARTIAL,
+                        note = if (retry) "ECU завершил служебный ответ; DTC будут прочитаны в новом канале"
+                            else "ECU завершает канал до DTC; предел повторов достигнут", source = "RESPONSE")
+                    onUnit(unit)
+                    if (retry) {
+                        gracefulRetries[id] = retries + 1
+                        queue += id
+                    } else failed = true
+                    event("VAG_CHANNEL_GRACEFUL_CLOSE", "${route.key}: ${unit.note}", if (retry) "RETRYING" else "INCOMPLETE")
+                }
             }
             catch (optional: OptionalReadUnavailable) {
                 val retries = optionalRetries.getOrDefault(id, 0)

@@ -16,6 +16,9 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
      * Caller may terminate this channel before choosing another read path. */
     class NoApplicationResponse : IllegalStateException("ECU не дал прикладного ответа при работающем TP2.0 канале")
     class NoChannelResponse : IllegalStateException("ECU не ответил на CHANNEL SETUP")
+    /** Valid full application reply followed by a clean peer close. The stream
+     * boundary is known; another request needs a new channel, not a retransmit. */
+    class GracefullyClosedChannel : IllegalStateException("ECU завершил канал после полного ответа")
     /** Explicit peer close after ACK, before any application response. The
      * caller must reset the transport before another diagnostic transaction. */
     class PeerClosedChannel : IOException("ECU закрыл TP2.0 канал до прикладного ответа")
@@ -24,12 +27,14 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
     private var sendSeq = 0
     private var receiveSeq = 0
     private var active = false
+    private var peerClosedAfterReply = false
     private var gapMs = 20L
     private var responseMs = 200L
     private var peerParameters = listOf(0xA1, 1, 0x94, 0xFF, 0x82, 0xFF)
     private var negotiatedPeerParameters: List<Int> = emptyList()
 
     suspend fun open(destination: Int) {
+        peerClosedAfterReply = false
         require(destination in Wire.routes.values.mapNotNull { it.tp }) { "TP2.0 адрес не в профиле" }
         try { openChecked(destination) }
         catch (cancel: CancellationException) { throw cancel }
@@ -109,6 +114,7 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
     private suspend fun requestPackets(command: String, allowMultiple: Boolean): List<List<Int>> {
         require(Regex("120004[0-9A-F]{4}").matches(command) || command in setOf("1089", "1A9F", "2204A1", "1800FF00", "1802FF00", "19028D", "1A9B", "22F187", "31B80000") ||
             command in com.vagdiagnostic.app.core.VagUdsInfo.scanFields.map { it.request })
+        if (!active && peerClosedAfterReply) throw GracefullyClosedChannel()
         check(active)
         coroutineContext.ensureActive()
         val bytes = Wire.bytes(command)
@@ -179,6 +185,7 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
                         }
                         check(completedMessages && frame.size == 1) { "ECU закрыл незавершённый канал TP2.0" }
                         active = false
+                        peerClosedAfterReply = true
                     }
                     frame[0] == 0xA3 -> {
                         check(frame.size == 1) { "Неверный keepalive A3" }

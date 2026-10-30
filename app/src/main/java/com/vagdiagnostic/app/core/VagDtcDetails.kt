@@ -4,9 +4,10 @@ package com.vagdiagnostic.app.core
  * Manufacturer record layouts remain opaque until a matching decoder exists. */
 object VagDtcDetails {
     enum class Protocol { KWP, UDS }
-    enum class State { RAW_RESPONSE, NO_DATA, REJECTED }
+    enum class State { RAW_RESPONSE, NO_DATA, REJECTED, INVALID_RECORDS }
     data class Reply(val state: State, val raw: List<Int> = emptyList(), val nrc: Int? = null,
-        val kwpRecords: VagKwpDtcRecords.Parsed? = null)
+        val kwpRecords: VagKwpDtcRecords.Parsed? = null, val issue: String? = null,
+        val udsRecords: VagUdsDtcRecords.Parsed? = null)
     class Request internal constructor(val protocol: Protocol, val codeBytes: List<Int>) {
         init {
             require(codeBytes.size == if (protocol == Protocol.KWP) 2 else 3)
@@ -23,7 +24,7 @@ object VagDtcDetails {
         val bytes = VagOemReadOnly.bytes(fault.raw)
         return Request(protocol, if (protocol == Protocol.KWP) bytes.take(2) else bytes)
     }
-    fun decode(request: Request, payload: List<Int>?): Reply {
+    fun decode(request: Request, payload: List<Int>?, asamKey: String? = null): Reply {
         if (payload == null) return Reply(State.NO_DATA)
         require(payload.all { it in 0..255 })
         val sid = if (request.protocol == Protocol.KWP) 0x12 else 0x19
@@ -33,13 +34,23 @@ object VagDtcDetails {
         }
         require(payload.firstOrNull() == sid + 0x40) { "Дополнительные записи другого сервиса" }
         if (request.protocol == Protocol.UDS) {
-            require(payload.take(5) == listOf(0x59, 0x06) + request.codeBytes && payload.size >= 6) {
+            require(payload.take(5) == listOf(0x59, 0x06) + request.codeBytes) {
                 "Дополнительные записи другого DTC или неполный заголовок"
             }
-        } else require(payload.size >= 5) { "Неполный заголовок KWP дополнительных записей" }
+            if (payload.size < 6) return Reply(State.INVALID_RECORDS, raw = payload.toList(), issue = "Нет статуса дополнительных записей")
+        }
         // Transport and request envelope are checked. Do not guess individual
         // record lengths, units or meanings from an unknown ECU/ASAM layout.
-        return Reply(State.RAW_RESPONSE, raw = payload.toList(),
-            kwpRecords = if (request.protocol == Protocol.KWP) VagKwpDtcRecords.decode(payload) else null)
+        val records = if (request.protocol == Protocol.KWP) try { VagKwpDtcRecords.decode(payload) }
+            catch (bad: IllegalArgumentException) {
+                // A fully received, matching application reply is safe to close.
+                // An optional record-layout failure is not a broken transport.
+                return Reply(State.INVALID_RECORDS, raw = payload.toList(), issue = bad.message)
+            } else null
+        val udsRecords = if (request.protocol == Protocol.UDS && asamKey != null) try { VagUdsDtcRecords.decode(payload, asamKey) }
+            catch (bad: IllegalArgumentException) {
+                return Reply(State.INVALID_RECORDS, raw = payload.toList(), issue = bad.message)
+            } else null
+        return Reply(State.RAW_RESPONSE, raw = payload.toList(), kwpRecords = records, udsRecords = udsRecords)
     }
 }
