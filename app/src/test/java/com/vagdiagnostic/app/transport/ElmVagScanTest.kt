@@ -114,7 +114,7 @@ class ElmVagScanTest {
         val tpSessionReply: String = "5089", val missingCentral: Boolean = false,
         val silentCapability: Boolean = false, val unlistedCentralResponds: Boolean = false,
         val closeGatewayList: Boolean = false, val detailsReply: String = "7F1231", val closeDetailsAt: Int? = null, val closeAfterReply: String? = null,
-        val closeAfterReplyAt: Int = 1) : ElmLink {
+        val closeAfterReplyAt: Int = 1, val silentEngineSessions: Int = 0) : ElmLink {
         override val label = "Scripted ELM"
         val sent = mutableListOf<String>()
         private val bytes = ArrayDeque<Int>()
@@ -130,6 +130,9 @@ class ElmVagScanTest {
         private var resets = 0
         private var canProtocol = "6"
         private var waitingForCapability = false
+        private var engineSessionRequests = 0
+        val presenceReceivers = mutableListOf<String>()
+        private var currentReceiveId = ""
         private fun nextFrame(): String {
             val frame = remaining.removeFirst()
             return frame + if (keepalive && longList && frame[4] == '7') "\r300A3" else ""
@@ -137,6 +140,8 @@ class ElmVagScanTest {
         override suspend fun open() {}
         override suspend fun write(data: ByteArray) {
             val cmd = data.toString(Charsets.US_ASCII).trim()
+            if (cmd.startsWith("ATCRA")) currentReceiveId = cmd.removePrefix("ATCRA")
+            if (cmd == "3E00") presenceReceivers += currentReceiveId
             if (prefixIndex < recordedPrefix.size) {
                 val row = recordedPrefix[prefixIndex++]
                 check(cmd == row.first) { "Recorded row $prefixIndex: expected ${row.first}, got $cmd" }
@@ -172,6 +177,7 @@ class ElmVagScanTest {
                 cmd == "A00194FF82FF" -> "300A10F94FF82FF"
                 cmd == "A10194FF82FF" -> "NO DATA"
                 cmd == "A3" && waitingForCapability -> "300A10F94FF82FF"
+                cmd in setOf("3E00", "1003", "22F187") -> "NO DATA"
                 cmd == "A3" && waitingForClose -> {
                     pollsBeforeClose++
                     if (pollsBeforeClose < 4) "300A10F94FF82FF" else {
@@ -189,6 +195,12 @@ class ElmVagScanTest {
                 cmd.startsWith("1") -> {
                     if (failRead) throw IOException("Scripted disconnected stream")
                     val request = cmd.drop(6)
+                    if (request == "1089" && destination == 1 && ++engineSessionRequests <= silentEngineSessions) {
+                        waitingForCapability = true
+                        val ack = "300B%X>".format((cmd.take(2).toInt(16) + 1) and 15)
+                        ack.toByteArray(Charsets.US_ASCII).forEach { bytes.add(it.toInt() and 255) }
+                        return
+                    }
                     if (request == "31B80000" && silentCapability) {
                         waitingForCapability = true
                         val ack = "300B%X>".format((cmd.take(2).toInt(16) + 1) and 15)
@@ -245,6 +257,44 @@ class ElmVagScanTest {
         }
         override suspend fun readByte(): Int = bytes.pollFirst() ?: -2
         override fun close() { bytes.clear() }
+    }
+    @Test fun confirmedInstallationScopeIsSavedBeforeAnyEcuRead() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        var checked = false
+        ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { unit ->
+            units[unit.address] = unit
+            if (!checked && unit.state == ReadState.COMPLETE) {
+                checked = true
+                assertEquals(setOf("VAG-19", "VAG-01", "VAG-03"), units.keys)
+                val notRead = units.getValue("VAG-03")
+                assertEquals(ReadState.NOT_QUERIED, notRead.state)
+                assertEquals("GATEWAY", notRead.source)
+                assertTrue(notRead.dtcs.isEmpty())
+                assertTrue(notRead.answeredModes.isEmpty())
+            }
+        }, { _, _, _ -> })
+        assertTrue(checked)
+    }
+    @Test fun listedEngineRetriesOneHealthyMissingSessionBeforeUdsFallback() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", silentEngineSessions = 1, dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        assertEquals(2, link.sent.count { it == "01C000100003011" })
+        assertEquals(1, link.sent.count { it.endsWith("1800FF00") })
+        assertFalse(link.presenceReceivers.contains("7E8"))
+    }
+    @Test fun repeatedMissingEngineSessionIsBoundedAndOtherEcusStillRead() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", silentEngineSessions = 3, dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertFalse(result.complete)
+        assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        assertEquals(2, link.sent.count { it == "01C000100003011" })
+        assertEquals(1, link.presenceReceivers.count { it == "7E8" })
     }
     @Test fun completeGatewayListAndPerEcuDtcUseRecoveredAddressAndAck() = runBlocking {
         for (name in listOf("Wi-Fi", "SPP", "BLE")) {
@@ -898,7 +948,12 @@ class ElmVagScanTest {
             assertEquals(ReadState.COMPLETE, saved.state)
             assertEquals(if (uds) "123456" else "01305", saved.dtcs.single().code)
             assertTrue(saved.answeredModes.contains(DtcKind.OEM))
-            assertEquals(setOf("VAG-19"), units.keys)
+            assertEquals(if (uds) setOf("VAG-19") else setOf("VAG-19", "VAG-01"), units.keys)
+            if (!uds) {
+                assertEquals(ReadState.NOT_QUERIED, units.getValue("VAG-01").state)
+                assertTrue(units.getValue("VAG-01").dtcs.isEmpty())
+                assertTrue(units.getValue("VAG-01").answeredModes.isEmpty())
+            }
             assertEquals(if (uds) "1001" else "A80", (if (uds) iso.sent else tp.sent).last())
         }
     }

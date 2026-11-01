@@ -14,7 +14,7 @@ import kotlin.coroutines.coroutineContext
 class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -> Long = System::nanoTime) {
     /** Acknowledged request, no application packet, and matching live keepalives.
      * Caller may terminate this channel before choosing another read path. */
-    class NoApplicationResponse : IllegalStateException("ECU не дал прикладного ответа при работающем TP2.0 канале")
+    class NoApplicationResponse(val request: String? = null) : IllegalStateException("ECU не дал прикладного ответа при работающем TP2.0 канале")
     class NoChannelResponse : IllegalStateException("ECU не ответил на CHANNEL SETUP")
     /** Valid full application reply followed by a clean peer close. The stream
      * boundary is known; another request needs a new channel, not a retransmit. */
@@ -137,6 +137,8 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
         var pendingReplies = 0
         var count = 0
         var completedMessages = false
+        var lastDataFrame: List<Int>? = null
+        var duplicates = 0
         try {
             queue.addAll(exchange(wire))
             while (true) {
@@ -159,7 +161,7 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
                     if (!waitAllowed && (pendingReplies > 0 || awaitingContinuation))
                         throw IOException("Не получен финальный TP2.0 ответ после ResponsePending")
                     if (!waitAllowed && acknowledged && expected < 0 && messages.isEmpty() && livePeerConfirmed)
-                        throw NoApplicationResponse()
+                        throw NoApplicationResponse(command)
                     check(waitAllowed) {
                         "Неполный ответ TP2.0: получено ${result.size}, ожидается ${if (expected < 0) "начало ответа" else expected.toString()}"
                     }
@@ -196,6 +198,18 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
                         livePeerConfirmed = frame == negotiatedPeerParameters
                     }
                     op in listOf(0x00, 0x10, 0x20, 0x30) -> {
+                        // A lost ACK may repeat the immediately preceding frame.
+                        // Accept only identical bytes within the unfinished packet;
+                        // never append twice, advance sequence, or replay a request.
+                        if (!completedMessages && expected > result.size && result.isNotEmpty() &&
+                            frame == lastDataFrame && (frame[0] and 15) == ((receiveSeq + 15) and 15)) {
+                            if (++duplicates > 3) throw IOException("Превышен предел точных повторов TP2.0 кадра")
+                            if (queue.isEmpty() && op in listOf(0x00, 0x10)) {
+                                delay(gapMs)
+                                queue.addAll(exchange("%02X".format(0xB0 or receiveSeq), allowEmpty = true))
+                            }
+                            continue
+                        }
                         check(!completedMessages) { "Неожиданный второй ответ TP2.0" }
                         check(acknowledged) { "Данные до подтверждения запроса TP2.0" }
                         check(frame[0] and 15 == receiveSeq) { "Пропущен/перепутан TP2.0 sequence" }
@@ -213,6 +227,7 @@ class ElmTp20Channel(private val engine: ElmEngine, private val clockNanos: () -
                         } else frame.drop(1)
                         check(result.size + data.size <= expected) { "Лишние данные TP2.0" }
                         result += data
+                        lastDataFrame = frame.toList()
                         lastDataNanos = clockNanos()
                         val last = op == 0x10 || op == 0x30
                         if (last) check(result.size == expected) { "Обрезанный TP2.0 пакет" }
