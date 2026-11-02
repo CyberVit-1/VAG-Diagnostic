@@ -53,6 +53,8 @@ object ScanCodec {
         units.forEach { unit -> put(JSONObject().apply {
             put("address", unit.address); put("name", unit.name); put("state", unit.state.name); put("note", unit.note)
             put("source", unit.source)
+            put("diagnosticHost", unit.diagnosticHost ?: JSONObject.NULL)
+            put("hostReason", unit.hostReason ?: JSONObject.NULL)
             put("answered", JSONArray(unit.answeredModes.map { it.name }))
             put("dtcs", JSONArray().apply { unit.dtcs.forEach { fault -> put(JSONObject().apply {
                 put("raw", fault.raw); put("code", fault.code); put("kind", fault.kind.name)
@@ -71,6 +73,8 @@ object ScanCodec {
                 address = obj.getString("address"), name = obj.getString("name"),
                 state = ReadState.valueOf(obj.getString("state")), note = obj.optString("note"),
                 source = obj.optString("source", "OBD"),
+                diagnosticHost = obj.optString("diagnosticHost").takeUnless { it == "null" || it.isBlank() },
+                hostReason = obj.optString("hostReason").takeUnless { it == "null" || it.isBlank() },
                 answeredModes = (0 until answered.length()).map { DtcKind.valueOf(answered.getString(it)) }.toSet(),
                 dtcs = (0 until faults.length()).map { j ->
                     val f = faults.getJSONObject(j)

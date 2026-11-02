@@ -225,3 +225,11 @@ Legacy CAN transport инициализирует CAN 6, CAF0/CFC0 и variable D
 Дополнительно восстановлены16фиксированных маршрутов, доступных только после подтверждения ID Gateway (см. исходный Route каталог). Не расширять эти факты до гарантии совместимости других шасси. Полный MQB/Mk8 охват требует отдельных форматов/идентификации и не включён этим изменением.
 
 Из журналов0.3.3/0.3.4 выделены обезличенные OEM обмены578/601команда в test/resources/replay. Они воспроизводятся побайтно со строгой проверкой порядка, без воспроизведения физического времени. Новый выборF187 проверяется явно синтетической подстановкой; исходные записи не переписаны. Сценарии не считаются новым автомобильным испытанием.
+
+## 02.11.2026 — UDS response waiting
+
+[ELM327 datasheet](https://www.elmelectronics.com/wp-content/uploads/2016/07/ELM327DS.pdf), Adaptive Timing/Setting Timeouts, pages13/52: ATAT1 adapts response waiting while ATST remains a maximum. Physical UDS now uses this mode with checked fallback to ATAT0 only for unsupported«?». Raw TP ACK timing remains fixed. Response count is not artificially limited, and complete ISO-TP/pending validation remains. GradeA for command semantics; actual timing benefit remains vehicle-unverified.
+
+## 02.11.2026 — documented function endpoints
+
+See FUNCTION_ENDPOINTS_PQ35.md: Ross-Tech documents comfort integration in09 forBCMPQ35, and theG85 diagnostic endpoint in44 forMK70. Runtime rules require fresh matching identities and complete host reads; independent positive replies override links. NoResponse is not reclassified as a successful DTC read. TheMK70 reference is not proof that a separate04memory is absent.

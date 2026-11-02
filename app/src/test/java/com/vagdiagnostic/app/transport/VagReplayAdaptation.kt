@@ -12,6 +12,9 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
             if (command.startsWith("ATSP")) protocol = command.removePrefix("ATSP")
             if (command == "ATCAF0") uds = false
             if (command == "ATCAF1") uds = true
+            // Physical UDS now uses adaptive timing. The recorded raw TP ACK
+            // windows remain fixed; only adapter setup is synthetic here.
+            if (command == "ATAT0" && uds) continue
             if (command == "ATFCSM0") custom = false
             if (command == "ATFCSM1") custom = true
             if (command.startsWith("ATSH")) {
@@ -25,6 +28,7 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
                 custom = true
             }
             add((if (command == "ATFCSD300000") "ATFCSD300010" else command) to raw)
+            if (command == "ATSTFF" && uds) add("ATAT1" to "OK")
         }
     }
 }

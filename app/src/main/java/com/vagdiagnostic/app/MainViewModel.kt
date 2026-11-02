@@ -363,12 +363,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                         val gateway = ElmVagScan.scan(diagnosticEngine,
                                             onUnit = { unit ->
                                                 units[unit.address] = unit
-                                                _state.value = _state.value.copy(units = units.values.toList(), current = unit.name)
+                                                _state.value = _state.value.copy(units = units.values.toList(),
+                                                    current = if (unit.state == ReadState.NOT_QUERIED) _state.value.current else unit.name)
                                                 checkpoint(units.values.toList(), 3, true)
                                             },
                                             event = { command, detail, outcome ->
                                                 if (command == "VAG_GATEWAY_IDENTITY_BEGIN")
                                                     _state.value = _state.value.copy(current = "VAG: идентификация Gateway")
+                                                if (command == "VAG_ECU_QUERY_BEGIN")
+                                                    _state.value = _state.value.copy(current = "Чтение блока: " + detail)
                                                 db.journal().insert(JournalEntity(
                                                     timestamp = System.currentTimeMillis(), connection = cfg.type,
                                                     command = command, raw = detail, elapsedMs = 0, outcome = outcome))

@@ -391,12 +391,14 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
     var expanded by rememberSaveable(unit.address) { mutableStateOf(false) }
     val tint = when {
         unit.dtcs.isNotEmpty() -> Color(0xFFE88F91)
+        unit.diagnosticHost != null -> MaterialTheme.colorScheme.primary
         unit.state == ReadState.COMPLETE -> Color(0xFF67C9A8)
         unit.state == ReadState.NOT_QUERIED -> MaterialTheme.colorScheme.onSurfaceVariant
         else -> Color(0xFFFFC56D)
     }
     val statusText = when {
         unit.dtcs.isNotEmpty() -> "Получены записи DTC: ${unit.dtcs.size}"
+        unit.diagnosticHost != null -> "Связанный блок: " + unit.diagnosticHost.removePrefix("VAG-") + " · собственные DTC не подтверждены"
         unit.state == ReadState.COMPLETE -> if (unit.source == "OBD") "Ошибок нет (OBD-II)" else "DTC не найдены в прочитанной памяти ECU"
         unit.source == "CANDIDATE" -> "Кандидат профиля — наличие не подтверждено"
         unit.state == ReadState.NOT_QUERIED -> "Не опрошен"
@@ -417,6 +419,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                 Column(Modifier.padding(start = 17.dp, end = 17.dp, bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     HorizontalDivider()
                     Text(unit.note.ifEmpty { "Ожидание результатов" }, style = MaterialTheme.typography.bodySmall)
+                    unit.hostReason?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     if (unit.dtcs.isEmpty()) Text("Нет подтверждённых записей DTC", style = MaterialTheme.typography.bodySmall)
                     unit.dtcs.forEach { fault ->
                         OutlinedCard(onClick = { search(fault.code) }, modifier = Modifier.fillMaxWidth()) {

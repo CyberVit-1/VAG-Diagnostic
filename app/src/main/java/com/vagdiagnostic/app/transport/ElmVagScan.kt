@@ -36,7 +36,7 @@ object ElmVagScan {
     /** A scan owns its state. Keeping it off coroutine local-variable spills
      * avoids a huge DEX state machine, including its exception-resume paths. */
     private class ScanSession(engine: ElmEngine,
-        private val onUnit: suspend (ControlUnit) -> Unit,
+        private val emitUnit: suspend (ControlUnit) -> Unit,
         private val event: suspend (String, String, String) -> Unit,
         allowCandidateFallback: Boolean,
         private val readGatewayIdentity: Boolean,
@@ -45,6 +45,11 @@ object ElmVagScan {
         private val recreateEngine: (() -> ElmEngine)?,
         private val allowGatewayIdentityFallback: Boolean
     ) {
+        private val observedUnits = linkedMapOf<String, ControlUnit>()
+        private suspend fun onUnit(unit: ControlUnit) {
+            observedUnits[unit.address] = unit
+            emitUnit(unit)
+        }
         private var protocol: Protocol? = null
         private var installed: List<VagOemReadOnly.Installed>? = null
         private var gatewayRejectsService1A = false
@@ -310,6 +315,7 @@ object ElmVagScan {
                 else "Кандидат профиля; наличие не подтверждено", source = if (responseConfirmed) "RESPONSE" else if (declared)
                     if (listEntry?.listOwners?.any { it != 0x19 } == true) "INSTALLATION_LIST" else "GATEWAY" else "CANDIDATE")
             onUnit(unit)
+            event("VAG_ECU_QUERY_BEGIN", unit.name, "READING")
             if (route == null) {
                 failed = true
                 onUnit(unit.copy(state = ReadState.NOT_QUERIED, note = "Gateway сообщил блок, но проверенного маршрута в профиле нет"))
@@ -369,8 +375,6 @@ object ElmVagScan {
                         confirmedConnection(Protocol.TP20)
                         val powertrain = if (identifyEcus) {
                             try {
-                                tpIdentity(id, channel)
-                                if (id in udsInfoOverTp) collectDetails(id, VagUdsInfo.scanFields) { channel.request(it) }
                                 if (saeAttempts.add(id)) saeSupport[id] = VagKwpCapabilities.supportsSaeDtc(channel.request(VagKwpCapabilities.REQUEST))
                             } catch (missing: ElmTp20Channel.NoApplicationResponse) {
                                 throw OptionalReadUnavailable(missing)
@@ -381,7 +385,13 @@ object ElmVagScan {
                             channel.requestMessages(if (powertrain) "1800FF00" else "1802FF00"), powertrain)
                         completedFaults = result
                         publishFaults(requireNotNull(result))
-                        if (identifyEcus) readDtcDetails(VagDtcDetails.Protocol.KWP, requireNotNull(result)) { channel.requestDetails(it) }
+                        if (identifyEcus) try {
+                            tpIdentity(id, channel)
+                            if (id in udsInfoOverTp) collectDetails(id, VagUdsInfo.scanFields) { channel.request(it) }
+                            readDtcDetails(VagDtcDetails.Protocol.KWP, requireNotNull(result)) { channel.requestDetails(it) }
+                        } catch (missing: ElmTp20Channel.NoApplicationResponse) {
+                            event("VAG_ECU_INFO_%02X".format(id), "Дополнительный ответ не получен; основные DTC сохранены", "INCOMPLETE")
+                        }
                     }
                     return requireNotNull(result)
                 }
@@ -410,6 +420,11 @@ object ElmVagScan {
                         try {
                             channel.open(path)
                             confirmedConnection(Protocol.UDS)
+                            // Publish the useful result in this same connection
+                            // before optional identification and enrichment.
+                            val faults = VagOemReadOnly.udsFaults(channel.read("19028D"))
+                            completedFaults = faults
+                            publishFaults(faults)
                             if (identifyEcus && id !in identityAttempts) {
                                 identityAttempts += id
                                 identities[id] = channel.identifyPart()
@@ -417,9 +432,6 @@ object ElmVagScan {
                             if (identifyEcus) collectDetails(id, VagUdsInfo.scanFields + VagUdsInfo.Field.ACCESS_STATUS) {
                                 channel.readOptionalInfo(it)
                             }
-                            val faults = VagOemReadOnly.udsFaults(channel.read("19028D"))
-                            completedFaults = faults
-                            publishFaults(faults)
                             if (identifyEcus && faults.values.isNotEmpty()) {
                                 // This DTC enrichment requires ASAM and revision. A
                                 // failed optional preflight is not a cached success.
@@ -692,6 +704,11 @@ object ElmVagScan {
                 scanUnit(id)
             }
             // DTC results have already been checkpointed before optional metadata.
+            for (unit in observedUnits.values.toList()) {
+                val host = VagDiagnosticTopology.host(unit, observedUnits, identities) ?: continue
+                onUnit(unit.copy(diagnosticHost = host.address, hostReason = host.reason))
+                event("VAG_FUNCTION_HOST_" + unit.address.removePrefix("VAG-"), host.reason + " Источник: " + host.evidence, "RELATED")
+            }
             collectIdentity()
             val savedGateway = gatewayUnit
             if (identity != null && savedGateway != null)
@@ -719,7 +736,15 @@ object ElmVagScan {
             }
             val protocol = if (target.is29Bit) "7" else "6"
             // Keep automatic FC disabled until the new ID/filter/mode is ready.
-            for (cmd in listOf("ATSP$protocol", "ATH1", "ATD0", "ATCAF1", "ATCFC0", "ATV0", "ATCEA", "ATAT0", "ATSTFF")) ok(cmd)
+            for (cmd in listOf("ATSP$protocol", "ATH1", "ATD0", "ATCAF1", "ATCFC0", "ATV0", "ATCEA", "ATSTFF")) ok(cmd)
+            // Keep the conservative maximum, but let ELM adapt the idle wait
+            // after complete replies. Raw TP2.0 still uses fixed ACK timing.
+            val adaptive = engine.command("ATAT1").uppercase().replace("ATAT1", "").filterNot { it.isWhitespace() }
+            when (adaptive) {
+                "OK" -> Unit
+                "?" -> ok("ATAT0")
+                else -> throw IOException("ELM не подтвердил адаптивный тайминг UDS")
+            }
             if (target.is29Bit) {
                 engine.needsFlowControlReset = true
                 ok("ATCP%02X".format(tx ushr 24))

@@ -17,7 +17,9 @@ data class ControlUnit(
     val dtcs: List<Dtc> = emptyList(),
     val note: String = "",
     val answeredModes: Set<DtcKind> = emptySet(),
-    val source: String = "OBD"
+    val source: String = "OBD",
+    val diagnosticHost: String? = null,
+    val hostReason: String? = null
 )
 data class FrameParse(val messages: Map<String, List<ByteArray>>, val problems: List<String>) {
     fun messagesFor(sid: Int): Map<String, List<ByteArray>> = messages.mapValues { (_, frames) ->

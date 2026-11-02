@@ -17,7 +17,8 @@ class ElmVagScanTest {
         val includeEngine: Boolean = false, val functionalReceiveFailure: Boolean = false,
         val centralSilent: Boolean = false, val rejectAfterFunctional: String? = null,
         val infoReplies: Map<String, String> = emptyMap(), val infoFailure: String? = null,
-        val detailsReply: String = "7F1931", val detailsFailure: String? = null) : ElmLink {
+        val detailsReply: String = "7F1931", val detailsFailure: String? = null,
+        val adaptiveReply: String = "OK") : ElmLink {
         override val label = "Scripted UDS link"
         val sent = mutableListOf<String>()
         val addressedRequests = mutableListOf<Pair<String, String>>()
@@ -57,6 +58,7 @@ class ElmVagScanTest {
                 command == "ATZ" -> "ELM327 v1.5"
                 command == "0100" -> "7E8064100BE3EA813"
                 command == "ATDPN" -> "6"
+                command == "ATAT1" -> adaptiveReply
                 functionalComplete && command == rejectAfterFunctional -> "?"
                 command.startsWith("AT") -> "OK"
                 command.endsWith("C000100003011") -> "NO DATA"
@@ -114,7 +116,8 @@ class ElmVagScanTest {
         val tpSessionReply: String = "5089", val missingCentral: Boolean = false,
         val silentCapability: Boolean = false, val unlistedCentralResponds: Boolean = false,
         val closeGatewayList: Boolean = false, val detailsReply: String = "7F1231", val closeDetailsAt: Int? = null, val closeAfterReply: String? = null,
-        val closeAfterReplyAt: Int = 1, val silentEngineSessions: Int = 0) : ElmLink {
+        val closeAfterReplyAt: Int = 1, val silentEngineSessions: Int = 0,
+        val identityByDestination: Map<Int, String> = emptyMap(), val silentDestinations: Set<Int> = emptySet()) : ElmLink {
         override val label = "Scripted ELM"
         val sent = mutableListOf<String>()
         private val bytes = ArrayDeque<Int>()
@@ -169,7 +172,7 @@ class ElmVagScanTest {
                     destination = cmd.take(2).toInt(16); receiveSeq = 0
                     hasDtcReply = false
                     if (destination == 0x33 && supplementalSetup != null) supplementalSetup
-                    else if ((destination == 0x33 && missingSupplemental) || (destination == 0x1F && missingGateway) ||
+                    else if (destination in silentDestinations || (destination == 0x33 && missingSupplemental) || (destination == 0x1F && missingGateway) ||
                         (destination == 0x20 && (missingCentral || (!unlistedCentralResponds && !longList &&
                             installedReply?.contains("09000001") != true)))) "NO DATA"
                     else "%03X00D00003000701".format(0x200 or destination)
@@ -223,7 +226,7 @@ class ElmVagScanTest {
                         "31B80000" -> saeReply ?: if (destination in setOf(1, 2)) "71B80118" else "7F3111"
                         "22F187" -> "7F2231"
                         "22F197", "22F189", "22F19E" -> "7F2231"
-                        "1A9B" -> if (failIdentity || (destination == 0x33 && failSupplemental)) throw IOException("identity stream lost") else identityReply
+                        "1A9B" -> if (failIdentity || (destination == 0x33 && failSupplemental)) throw IOException("identity stream lost") else identityByDestination[destination] ?: identityReply
                         "1A9F" -> installedReply ?: if (longList || rejectService1A) "7F1A11" else "5A9F090100000119000001"
                         "2204A1" -> if (rejectService1A) "6204A1191F010001010100" else "6204A1" + (1..65).joinToString("") { "%02X%02X0100".format(it, it) }
                         "1800FF00" -> dtcReply ?: "5801029908"
@@ -257,6 +260,24 @@ class ElmVagScanTest {
         }
         override suspend fun readByte(): Int = bytes.pollFirst() ?: -2
         override fun close() { bytes.clear() }
+    }
+    @Test fun documentedHostReferencesAreAttachedAfterActualReadsWithoutCopyingDtc() = runBlocking {
+        fun identified(part: String, component: String) = "5A9B" + VagOemReadOnly.hex((part.padEnd(12) + "0001").map { it.code }) +
+            "00".repeat(10) + VagOemReadOnly.hex(component.padEnd(16).map { it.code })
+        val link = Link(installedReply = "5A9F19" + listOf(0x19, 3, 4, 0x44, 9, 0x46).joinToString("") { "%02X000001".format(it) },
+            dtcReply = "5801051924", silentDestinations = setOf(0x13, 0x21),
+            identityByDestination = mapOf(3 to identified("1K0907379AK", "MK70 M MASR"),
+                9 to identified("1K0909144R", "EPS_ZFLS Kl. 235"), 0x20 to identified("1K0937086H", "BCM PQ35 M")))
+        val units = linkedMapOf<String, ControlUnit>()
+        ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false)
+        for ((child, host) in listOf("VAG-04" to "VAG-44", "VAG-46" to "VAG-09")) {
+            assertEquals(host, units.getValue(child).diagnosticHost)
+            assertEquals(ReadState.NO_RESPONSE, units.getValue(child).state)
+            assertTrue(units.getValue(child).dtcs.isEmpty())
+            assertTrue(units.getValue(child).answeredModes.isEmpty())
+            assertEquals(ReadState.COMPLETE, units.getValue(host).state)
+            assertEquals(1, units.getValue(host).dtcs.size)
+        }
     }
     @Test fun confirmedInstallationScopeIsSavedBeforeAnyEcuRead() = runBlocking {
         val link = Link(installedReply = "5A9F0D190000010100000103000001", dtcReply = "5800")
@@ -674,7 +695,7 @@ class ElmVagScanTest {
         assertFalse(link.sent.any { it.endsWith("1800FF00") })
         assertFalse(link.sent.contains("ATZ"))
     }
-    @Test fun additionalUdsIdentificationReadsAllSelectedFieldsBeforeDtc() = runBlocking {
+    @Test fun additionalUdsIdentificationReadsAllSelectedFieldsAfterDtc() = runBlocking {
         fun textReply(did: String, value: String) = "62$did" + VagOemReadOnly.hex(value.map { it.code })
         val link = UdsLink(identityReply = partReply("1K0907530"), infoReplies = mapOf(
             "22F197" to textReply("F197", "TEST CONTROLLER"), "22F189" to textReply("F189", "9999"),
@@ -686,10 +707,39 @@ class ElmVagScanTest {
         assertTrue(result.note, result.complete)
         for (request in listOf("22F197", "22F189", "22F19E", "220174")) {
             assertEquals(1, link.sent.count { it == request })
-            assertTrue(link.sent.indexOf(request) < link.sent.indexOf("19028D"))
+            assertTrue(link.sent.indexOf(request) > link.sent.indexOf("19028D"))
         }
         assertTrue(units.getValue("VAG-19").note.contains("ПО 9999"))
         assertTrue(events.contains("VAG_ECU_INFO_19" to "PARSED"))
+    }
+    @Test fun physicalUdsEnablesAdaptiveTimingWithTheExistingMaximum() = runBlocking {
+        val link = UdsLink()
+        ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> })
+        assertTrue(link.sent.indexOf("ATSTFF") < link.sent.indexOf("ATAT1"))
+        assertTrue(link.sent.indexOf("ATAT1") < link.sent.indexOf("3E00"))
+    }
+    @Test fun unsupportedAdaptiveTimingFallsBackBeforeAnyUdsRequest() = runBlocking {
+        val link = UdsLink(adaptiveReply = "?")
+        val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> })
+        assertTrue(result.complete)
+        val position = link.sent.indexOf("ATAT1")
+        assertTrue(position >= 0)
+        assertEquals("ATAT0", link.sent[position + 1])
+    }
+    @Test fun malformedAdaptiveReplyCannotStartPhysicalUdsTraffic() = runBlocking {
+        val link = UdsLink(adaptiveReply = "BUFFER FULL")
+        val failure = runCatching { ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> }) }.exceptionOrNull()
+        assertTrue(failure.toString(), failure is IOException)
+        assertFalse(link.sent.contains("3E00"))
+    }
+    @Test fun completeTpDtcIsPublishedBeforeOptionalIdentityFailure() = runBlocking {
+        val link = Link(failIdentity = true, dtcReply = "5801051924")
+        val units = linkedMapOf<String, ControlUnit>()
+        val failure = runCatching { ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }),
+            { units[it.address] = it }, { _, _, _ -> }) }.exceptionOrNull()
+        assertTrue(failure is IOException)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals("01305", units.getValue("VAG-19").dtcs.single().code)
     }
     @Test fun missingOptionalUdsFieldsNeverBecomeMissingDtcResponse() = runBlocking {
         val link = UdsLink(infoReplies = listOf("22F197", "22F189", "22F19E", "220174").associateWith { "NO DATA" })
@@ -699,15 +749,18 @@ class ElmVagScanTest {
         assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
         assertTrue(link.sent.contains("19028D"))
     }
-    @Test fun brokenOrCancelledAdditionalInfoCannotSendFurtherFieldsOrDtc() = runBlocking {
+    @Test fun brokenOrCancelledAdditionalInfoKeepsDtcAndStopsFurtherFields() = runBlocking {
         for (mode in listOf("wrong-did", "io", "cancel")) {
             val link = UdsLink(infoReplies = if (mode == "wrong-did") mapOf("22F197" to "62F18939393939") else emptyMap(),
                 infoFailure = mode.takeIf { it != "wrong-did" })
-            val failure = runCatching { ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> }) }.exceptionOrNull()
+            val units = linkedMapOf<String, ControlUnit>()
+            val failure = runCatching { ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }),
+                { units[it.address] = it }, { _, _, _ -> }) }.exceptionOrNull()
             if (mode == "cancel") assertTrue(failure is CancellationException) else assertTrue(failure is IOException)
             assertEquals("22F197", link.sent.last())
             assertFalse(link.sent.contains("22F189"))
-            assertFalse(link.sent.contains("19028D"))
+            assertTrue(link.sent.contains("19028D"))
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
         }
     }
     @Test fun validatedPartNumberSelectsTheActualInstallationFormat() = runBlocking {
@@ -842,7 +895,7 @@ class ElmVagScanTest {
         assertEquals(1, link.sent.count { it == "19028D" })
         val readIndex = link.sent.indexOf("19028D")
         val closeIndex = link.sent.drop(readIndex + 1).indexOf("1001") + readIndex + 1
-        assertEquals(listOf("ATCFC0", "ATCAF0", "ATMA", "", "ATCAF1", "ATCFC1", "1001"), link.sent.subList(readIndex + 1, closeIndex + 1))
+        assertEquals(listOf("ATCFC0", "ATCAF0", "ATMA", "", "ATCAF1", "ATCFC1", "22F197", "22F189", "22F19E", "220174", "1001"), link.sent.subList(readIndex + 1, closeIndex + 1))
         assertTrue(journal.contains("ATMA"))
     }
     @Test fun repeatedPendingIsBoundedWithoutResendOrPrematureSessionClose() = runBlocking {
