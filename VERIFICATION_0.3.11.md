@@ -1,0 +1,22 @@
+# Проверка кандидата0.3.11 / code27
+
+Исходный commit: 09394f447f8cbe53525b0852a7f6de548480c488.
+Tree: b5cd4fc3ad37a708218a9c69ca8366779568c3e2.
+
+- [Push CI](https://github.com/CyberVit-1/VAG-Diagnostic/actions/runs/41638093080): success.
+- [PR CI](https://github.com/CyberVit-1/VAG-Diagnostic/actions/runs/41638097616): success.
+- Артефакт13231517836, VAG-Diagnostic-v0.3.11-debug-apk.
+- ZIP SHA256: 1720ac44e9543c361579a5acff56040261065ac61dbd44425262efb501a668dd.
+- APK SHA256: e8a86ed3fd59cc93123960548351d7aff72468aaa25b131d9b283002f8c06206.
+- APK: 18626177bytes; com.vagdiagnostic.app; versionName0.3.11/versionCode27.
+- ZIP CRC, отсутствие фактического VIN и приватных обозначений: PASS.
+- DEX:724 метода, max112registers/8396codeunits, oversized[].
+- Локальные380 JVM +380 Android unit-тестов/assembleDebug прошли;
+  восемь профильных тестов повторены после финального уточнения VT label.
+  CI окончательного исходного кода также прошёл.
+
+Финальная проверка фактического CI APK на ART пока ожидает USB-устройства.
+Предыдущие138 ART-проверок относятся к промежуточному срезу. Нового
+автомобильного испытания, установки APK и доступа к данным приложения нет.
+Read-only функциональная карта: CONNECTION_PORT_AUDIT_2026-11-03.md.
+До окончательной проверки APK не рекомендовать к автомобильному испытанию.
