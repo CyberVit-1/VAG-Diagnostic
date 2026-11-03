@@ -10,10 +10,10 @@ import org.junit.Test
 class ElmTp20Recorded038Test {
     private class Replay(val splitDuplicate: Boolean = false, val alter: (String) -> String = { it }) : ElmLink {
         override val label = "Recorded ABS identity"
-        val rows = requireNotNull(javaClass.getResourceAsStream("/replay/vehicle-038-abs-identity.tsv"))
+        val rows = withSyntheticTpKeepalives(requireNotNull(javaClass.getResourceAsStream("/replay/vehicle-038-abs-identity.tsv"))
             .bufferedReader().readLines().map { line -> line.split('\t', limit = 2).let {
                 it[0] to String(Base64.getDecoder().decode(it[1]), Charsets.UTF_8)
-            } }
+            } })
         var index = 0
         var repeatedAcks = 0
         private val bytes = ArrayDeque<Int>()

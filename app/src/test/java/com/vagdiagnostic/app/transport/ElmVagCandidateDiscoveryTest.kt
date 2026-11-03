@@ -64,7 +64,7 @@ class ElmVagCandidateDiscoveryTest {
             (answer + ">").toByteArray(Charsets.US_ASCII).forEach { queue.add(it.toInt() and 255) }
         }
     }
-    @Test fun fixedCatalogIncludesExtendedLogicalIdsWithoutPromotingSilentCandidates() = runBlocking {
+    @Test fun fixedCatalogIncludesExtendedLogicalIdsWithoutPromotingSilentCandidates() = runBlocking(VagRetryBackoff { }) {
         val link = Link()
         val units = linkedMapOf<String, ControlUnit>()
         val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> }, allowCandidateFallback = true)
@@ -80,7 +80,7 @@ class ElmVagCandidateDiscoveryTest {
         assertFalse(link.sent.contains("ATSH718")) // No additional radio address.
         assertEquals(1, link.addressed.count { it == (0xFFFF to "19028D") })
     }
-    @Test fun activeFilterDoesNotHideRespondingFallbackEcus() = runBlocking {
+    @Test fun activeFilterDoesNotHideRespondingFallbackEcus() = runBlocking(VagRetryBackoff { }) {
         val link = Link(activeFilter = true)
         val units = linkedMapOf<String, ControlUnit>()
         val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> }, allowCandidateFallback = true)
@@ -91,7 +91,7 @@ class ElmVagCandidateDiscoveryTest {
         assertTrue(result.note.contains("фильтр"))
         assertFalse(link.sent.any { it.startsWith("2E") || it.startsWith("27") || it.startsWith("29") })
     }
-    @Test fun verifiedGatewayPartEnablesAutomaticCatalogWithoutVin() = runBlocking {
+    @Test fun verifiedGatewayPartEnablesAutomaticCatalogWithoutVin() = runBlocking(VagRetryBackoff { }) {
         val link = Link()
         val units = linkedMapOf<String, ControlUnit>()
         val events = mutableListOf<String>()
@@ -105,7 +105,7 @@ class ElmVagCandidateDiscoveryTest {
         assertTrue(events.contains("VAG_DISCOVERY_SCOPE"))
         assertFalse(link.sent.any { it.startsWith("09") })
     }
-    @Test fun callerCanRequireAnInstallationListDespiteKnownGatewayPart() = runBlocking {
+    @Test fun callerCanRequireAnInstallationListDespiteKnownGatewayPart() = runBlocking(VagRetryBackoff { }) {
         val link = Link()
         val units = mutableListOf<ControlUnit>()
         val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units += it }, { _, _, _ -> },
@@ -115,7 +115,7 @@ class ElmVagCandidateDiscoveryTest {
         assertFalse(link.sent.contains("19028D"))
         assertFalse(link.sent.contains("ATFCSH17FC0077"))
     }
-    @Test fun unverifiedManufacturerAndUnknownGatewayCannotStartCatalogFallback() = runBlocking {
+    @Test fun unverifiedManufacturerAndUnknownGatewayCannotStartCatalogFallback() = runBlocking(VagRetryBackoff { }) {
         val link = Link(gatewayPart = null)
         val units = mutableListOf<ControlUnit>()
         val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units += it }, { _, _, _ -> }, allowCandidateFallback = false)
@@ -124,7 +124,7 @@ class ElmVagCandidateDiscoveryTest {
         assertFalse(link.sent.contains("19028D"))
         assertFalse(link.sent.contains("ATFCSH17FC0077"))
     }
-    @Test fun verifiedManufacturerCanDiscoverActualEcusWhenGatewayDoesNotAnswer() = runBlocking {
+    @Test fun verifiedManufacturerCanDiscoverActualEcusWhenGatewayDoesNotAnswer() = runBlocking(VagRetryBackoff { }) {
         val link = Link(gatewayAvailable = false)
         val units = linkedMapOf<String, ControlUnit>()
         val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
@@ -136,10 +136,10 @@ class ElmVagCandidateDiscoveryTest {
         assertEquals(ReadState.COMPLETE, units.getValue("VAG-FFFF").state)
         assertEquals(ReadState.NO_RESPONSE, units.getValue("VAG-19").state)
         assertEquals("CANDIDATE", units.getValue("VAG-19").source)
-        assertEquals(1, link.addressed.count { it == (0x19 to "3E00") })
+        assertEquals(3, link.addressed.count { it == (0x19 to "3E00") })
         assertFalse(link.addressed.contains(0x19 to "19028D"))
     }
-    @Test fun fatalCandidateReplyOrCancellationStopsQueueAndPreservesEarlierDtc() = runBlocking {
+    @Test fun fatalCandidateReplyOrCancellationStopsQueueAndPreservesEarlierDtc() = runBlocking(VagRetryBackoff { }) {
         for (cancel in listOf(false, true)) {
             val link = Link(corruptAt = if (cancel) null else 1, cancelAt = if (cancel) 1 else null)
             val units = linkedMapOf<String, ControlUnit>()

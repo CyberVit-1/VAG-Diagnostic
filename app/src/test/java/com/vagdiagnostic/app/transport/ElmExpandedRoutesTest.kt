@@ -64,6 +64,7 @@ class ElmExpandedRoutesTest {
                     else "%03X00D00003000701".format(0x200 or destination)
                 }
                 cmd == "A00194FF82FF" -> "300A10F94FF82FF"
+                cmd == "A3" -> "300A10F94FF82FF"
                 cmd == "A80" || (cmd.startsWith("B") && cmd.length == 3) -> ""
                 cmd.startsWith("B") -> frames.removeFirst()
                 cmd == "3E00" -> {
@@ -108,7 +109,7 @@ class ElmExpandedRoutesTest {
         engine.connect()
         return ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> })
     }
-    @Test fun allReported18HaveRoutesAndComfortUsesBounded29BitAlternative() = runBlocking {
+    @Test fun allReported18HaveRoutesAndComfortUsesBounded29BitAlternative() = runBlocking(VagRetryBackoff { }) {
         val link = Link()
         val units = linkedMapOf<String, ControlUnit>()
         val result = scan(link, units)
@@ -126,7 +127,7 @@ class ElmExpandedRoutesTest {
         assertTrue(link.sent.indexOf("ATFCSM0", link.sent.indexOf("ATSP7")) in link.sent.indexOf("ATSP7") until next11)
         assertFalse(link.sent.any { it == "04" || it.startsWith("27") || it.startsWith("2E") })
     }
-    @Test fun unverifiedPlatformCannotUseCatalogWhenInstallationListIsMissing() = runBlocking {
+    @Test fun unverifiedPlatformCannotUseCatalogWhenInstallationListIsMissing() = runBlocking(VagRetryBackoff { }) {
         val link = Link(missingList = true)
         val units = linkedMapOf<String, ControlUnit>()
         val engine = ElmEngine(link, { _, _, _, _ -> })
@@ -136,7 +137,7 @@ class ElmExpandedRoutesTest {
         for (tp in listOf("13", "14", "24", "25", "52")) assertFalse(link.sent.contains(tp + "C000100003011"))
         assertFalse(link.sent.contains("ATSP7"))
     }
-    @Test fun lostApplicationReplyDoesNotStartListFallbackOrCandidates() = runBlocking {
+    @Test fun lostApplicationReplyDoesNotStartListFallbackOrCandidates() = runBlocking(VagRetryBackoff { }) {
         val link = Link(lostListReply = true)
         val units = linkedMapOf<String, ControlUnit>()
         assertTrue(runCatching { scan(link, units) }.exceptionOrNull() is IOException)
@@ -144,7 +145,7 @@ class ElmExpandedRoutesTest {
         assertTrue(link.sent.last().endsWith("1A9F"))
         assertFalse(link.sent.any { it.endsWith("2204A1") || it == "A80" || it == "1003" })
     }
-    @Test fun conflictingAdvertisedTpAddressIsNeitherGuessedNorUsed() = runBlocking {
+    @Test fun conflictingAdvertisedTpAddressIsNeitherGuessedNorUsed() = runBlocking(VagRetryBackoff { }) {
         val link = Link(mismatchedList = true)
         val units = linkedMapOf<String, ControlUnit>()
         assertFalse(scan(link, units).complete)
@@ -152,7 +153,7 @@ class ElmExpandedRoutesTest {
         assertFalse(link.sent.contains("13C000100003011"))
         assertFalse(link.sent.contains("99C000100003011"))
     }
-    @Test fun wrong29BitEcuOrBrokenStreamAbortsWithoutSessionCloseOrLaterEcu() = runBlocking {
+    @Test fun wrong29BitEcuOrBrokenStreamAbortsWithoutSessionCloseOrLaterEcu() = runBlocking(VagRetryBackoff { }) {
         for (link in listOf(Link(wrong29 = true), Link(fail29 = true))) {
             val units = linkedMapOf<String, ControlUnit>()
             try { scan(link, units); fail("Expected strict 29-bit failure") } catch (_: IOException) {}
@@ -163,7 +164,7 @@ class ElmExpandedRoutesTest {
     }
     private fun List<String>.indexOf(value: String, from: Int): Int =
         (from until size).firstOrNull { this[it] == value } ?: -1
-    @Test fun additionalPlatformsNeverSweepCandidatesWithoutInstallationList() = runBlocking {
+    @Test fun additionalPlatformsNeverSweepCandidatesWithoutInstallationList() = runBlocking(VagRetryBackoff { }) {
         val link = Link(missingList = true)
         val engine = ElmEngine(link, { _, _, _, _ -> })
         engine.connect()
@@ -175,7 +176,7 @@ class ElmExpandedRoutesTest {
         assertTrue(link.sent.filter { it.endsWith("C000100003011") }.all { it.startsWith("1F") })
         assertFalse(link.sent.any { it.endsWith("1800FF00") || it.endsWith("1802FF00") || it == "19028D" })
     }
-    @Test fun additionalPlatformsUseOnlyReportedKnownRoutesAfterConfirmedList() = runBlocking {
+    @Test fun additionalPlatformsUseOnlyReportedKnownRoutesAfterConfirmedList() = runBlocking(VagRetryBackoff { }) {
         val link = Link()
         val engine = ElmEngine(link, { _, _, _, _ -> })
         engine.connect()

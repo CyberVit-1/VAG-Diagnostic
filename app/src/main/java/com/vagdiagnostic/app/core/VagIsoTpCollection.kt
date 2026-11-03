@@ -3,7 +3,12 @@ package com.vagdiagnostic.app.core
 /** Bounded, owner-separated raw ISO-TP collection for a single read request.
  * Caller supplies the fixed receive IDs and emits FC only for the corresponding
  * known transmit route. An unknown responder never creates an installed ECU. */
-class VagIsoTpCollection(val expectedIds: Set<Int>, val request: String) {
+class VagIsoTpCollection(val expectedIds: Set<Int>, val request: String,
+    automaticFlowControl: Boolean = false) {
+    private var useAutomaticFlowControl = automaticFlowControl
+    /** ATMA does not provide the command-mode FC guarantee. Existing partial
+     * messages retain their already-issued FC; later FirstFrames need a new one. */
+    fun automaticFlowControlForNewMessages(enabled: Boolean) { useAutomaticFlowControl = enabled }
     private data class Partial(val length: Int, val data: MutableList<Int>, var sequence: Int = 1,
         var flowSent: Boolean = false)
     private val partial = linkedMapOf<Int, Partial>()
@@ -24,6 +29,14 @@ class VagIsoTpCollection(val expectedIds: Set<Int>, val request: String) {
     val flowControlNeeded: Set<Int> get() = partial.filterValues { !it.flowSent }.keys.toSet()
     val unfinished: Set<Int> get() = partial.keys.toSet()
     val pending: Set<Int> get() = pendingCounts.keys.filter { it !in complete && it !in partial }.toSet()
+    /** Preserve already validated pending evidence when an adapter switches
+     * from native message assembly to raw monitoring. No RAW row is invented. */
+    fun recordPending(id: Int, count: Int) {
+        require(id in expectedIds && id !in complete && id !in partial && count in 1..8)
+        val total = pendingCounts.getOrDefault(id, 0) + count
+        require(total <= 8)
+        pendingCounts[id] = total
+    }
     fun flowControlSent(id: Int) {
         val state = requireNotNull(partial[id]) { "Нет FirstFrame для flow control" }
         check(!state.flowSent) { "Повторный flow control" }
@@ -76,7 +89,7 @@ class VagIsoTpCollection(val expectedIds: Set<Int>, val request: String) {
                     require(length in 8..4095) { "Неверная длина ISO-TP" }
                     totalBytes += length
                     require(totalBytes <= 16384) { "Превышен суммарный размер ISO-TP" }
-                    partial[owner] = Partial(length, frame.drop(2).toMutableList())
+                    partial[owner] = Partial(length, frame.drop(2).toMutableList(), flowSent = useAutomaticFlowControl)
                 }
                 2 -> {
                     val state = requireNotNull(partial[owner]) { "ConsecutiveFrame без FirstFrame" }

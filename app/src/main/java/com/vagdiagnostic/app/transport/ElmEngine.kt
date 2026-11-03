@@ -20,7 +20,8 @@ import kotlin.coroutines.coroutineContext
 /** Single writer / single reader. End-of-reply is a mandatory ELM '>' prompt. */
 class ElmEngine(private val link: ElmLink, private val log: suspend (String, String, Long, String) -> Unit,
                 private val clockNanos: () -> Long = System::nanoTime,
-                private val timestampedLog: (suspend (String, String, Long, String, Long) -> Unit)? = null) {
+                private val timestampedLog: (suspend (String, String, Long, String, Long) -> Unit)? = null,
+                internal val manualUds: Boolean = false) {
     private data class JournalRecord(val command: String, val raw: String, val elapsed: Long, val status: String, val timestamp: Long)
     private val deferredJournal = ArrayDeque<JournalRecord>()
     /** Flush after an ECU ACK/disconnect boundary, never while an ACK is due.
@@ -40,6 +41,8 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
     /** Monotonic age of the last completed ELM reply. */
     fun idleMs(): Long = lastCommandNanos?.let { (clockNanos() - it).coerceAtLeast(0L) / 1_000_000L } ?: 0L
     private val lock = Mutex()
+    private val confirmedSettings = ElmSettingCache()
+    internal var nativeSegmentation: ElmNativeSegmentation? = null
     // Custom FC from a 29-bit OEM route must not leak into later 11-bit UDS.
     internal var needsFlowControlReset = false
     var protocol: String = "Не определён"
@@ -112,8 +115,28 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
         } catch (error: Throwable) { close(); throw error }
     }
 
-    suspend fun command(text: String, timeoutMs: Long = 5500, deferJournal: Boolean = false): String = lock.withLock {
-        require(text.matches(Regex("[A-Z0-9]+", RegexOption.IGNORE_CASE))) { "Недопустимая команда" }
+    suspend fun command(text: String, timeoutMs: Long = 5500, deferJournal: Boolean = false): String =
+        lock.withLock { commandLocked(text, timeoutMs, deferJournal) }
+    /** Returns whether an actual setting command was sent. Cache hits create
+     * neither a synthetic response nor a new RAW journal entry. */
+    suspend fun configureSetting(text: String, timeoutMs: Long = 5500,
+        deferJournal: Boolean = false): Boolean = lock.withLock {
+        val command = text.uppercase()
+        require(confirmedSettings.setting(command)) { "Настройка не допускает кэширование" }
+        coroutineContext.ensureActive()
+        if (confirmedSettings.confirmed(command)) return@withLock false
+        val raw = commandLocked(command, timeoutMs, deferJournal)
+        ElmCompletedCanError.check(raw, command)
+        if (!confirmedSettings.confirmed(command)) throw IOException("ELM не подтвердил $command")
+        true
+    }
+    private suspend fun commandLocked(text: String, timeoutMs: Long, deferJournal: Boolean): String {
+        require(text.matches(Regex("[A-Z0-9]+", RegexOption.IGNORE_CASE)) ||
+            text.matches(Regex("STCFCPA(?:[0-9A-F]{3},[0-9A-F]{3}|[0-9A-F]{8},[0-9A-F]{8})", RegexOption.IGNORE_CASE)) ||
+            text.matches(Regex("VTSWGP (?:GR1, BZF1|GR0|GT[01])|VTFCTRA (?:[0-9A-F]{3}, [0-9A-F]{3}|[0-9A-F]{8}, [0-9A-F]{8})|VTTOST REP:[0-9]{1,4}", RegexOption.IGNORE_CASE))) { "Недопустимая команда" }
+        val command = text.uppercase()
+        confirmedSettings.beforeCommand(command)
+        if (command.matches(Regex("ATSP[0-9A-C]"))) nativeSegmentation?.onProtocolSelection()
         val start = System.nanoTime()
         val collected = StringBuilder()
         var status = "OK"
@@ -131,15 +154,19 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                 }
             }
             val raw = collected.toString()
+            confirmedSettings.observe(command, raw)
             lastCommandNanos = clockNanos()
             if (raw.contains("BUFFER FULL", true) || raw.contains("STOPPED", true) || raw.contains("CAN ERROR", true)) {
                 status = "ADAPTER_ERROR"
             }
-            return@withLock raw
+            return raw
         } catch (error: TimeoutCancellationException) {
+            confirmedSettings.clear()
+            coroutineContext.ensureActive()
             status = "TIMEOUT: ${text} did not end with ELM > prompt"
-            throw IOException("Тайм-аут ответа ELM на $text", error)
+            throw ElmCommandTimeout("Тайм-аут ответа ELM на $text", error)
         } catch (error: Throwable) {
+            confirmedSettings.clear()
             status = error::class.java.simpleName + ": " + (error.message ?: "")
             throw error
         } finally {
@@ -244,13 +271,13 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                     val b = link.readByte()
                     if (b == -2) { yield(); continue }
                     if (b == -1) throw EOFException("Поток закрыт при ожидании CAN")
-                    if (b == '>'.code) throw IOException("ELM завершил ожидание без CAN ответа")
-                    if (collected.length >= 32768) throw IOException("Переполнение отложенного CAN")
+                    if (b == '>'.code) throw VagProtocolFailure("ELM завершил ожидание без CAN ответа")
+                    if (collected.length >= 32768) throw VagProtocolFailure("Переполнение отложенного CAN")
                     if (b in 0..127) collected.append(b.toChar())
                     if (b == '\r'.code || b == '\n'.code) { accept(line.toString(), false); line.clear() }
                     else if (b in 0..127) line.append(b.toChar())
                 }
-            } ?: throw IOException("Истёк срок ожидания CAN ответа")
+            } ?: throw ElmCommandTimeout("Истёк срок ожидания CAN ответа")
             link.write(byteArrayOf('\r'.code.toByte()))
             withTimeoutOrNull(1500) {
                 while (true) {
@@ -259,19 +286,19 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                     if (b == -2) { yield(); continue }
                     if (b == -1) throw EOFException("Поток закрыт при завершении CAN мониторинга")
                     if (b == '>'.code) { accept(line.toString(), true); line.clear(); break }
-                    if (collected.length >= 32768) throw IOException("Переполнение CAN мониторинга")
+                    if (collected.length >= 32768) throw VagProtocolFailure("Переполнение CAN мониторинга")
                     if (b in 0..127) collected.append(b.toChar())
                     if (b == '\r'.code || b == '\n'.code) { accept(line.toString(), true); line.clear() }
                     else if (b in 0..127) line.append(b.toChar())
                 }
-            } ?: throw IOException("ELM не завершил CAN мониторинг")
+            } ?: throw ElmCommandTimeout("ELM не завершил CAN мониторинг")
             lastCommandNanos = clockNanos()
             received.joinToString("\r")
         } catch (error: Throwable) {
             status = error::class.java.simpleName + ": " + (error.message ?: "")
             close()
             if (error is CancellationException || error is IOException) throw error
-            throw IOException("Некорректный отложенный CAN: ${error.message}", error)
+            throw VagProtocolFailure("Некорректный отложенный CAN: ${error.message}", error)
         } finally {
             val record = JournalRecord("ATMA", collected.toString(), (System.nanoTime() - start) / 1_000_000,
                 status, System.currentTimeMillis())
@@ -282,5 +309,5 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
         }
     }
 
-    fun close() { vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); needsFlowControlReset = false; link.close() }
+    fun close() { nativeSegmentation = null; confirmedSettings.clear(); vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); needsFlowControlReset = false; link.close() }
 }

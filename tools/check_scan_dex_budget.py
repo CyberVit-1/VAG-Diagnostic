@@ -5,6 +5,14 @@ Uses only the Python standard library; never reads vehicle/user data.
 """
 import struct,sys,zipfile,json
 
+PROTOCOL_PREFIXES = tuple('Lcom/vagdiagnostic/app/' + name for name in (
+    'transport/ElmVagScan', 'transport/ElmTp20Channel',
+    'transport/ElmUdsRawTransaction', 'transport/ElmUdsPending',
+    'transport/VagReadRetry', 'core/VagIsoTpCollection', 'core/VagIsoTpOutgoing',
+    'transport/ElmEngine', 'transport/ElmSettingCache', 'transport/ElmNativeSegmentation',
+    'transport/ElmAdapterNativeProbe', 'transport/ElmUdsCanConfiguration',
+    'transport/ElmUdsNativeDriver', 'core/VagUdsNativeTransaction'))
+
 def inspect(data):
     def u32(at):return struct.unpack_from('<I',data,at)[0]
     def uleb(at):
@@ -23,7 +31,7 @@ def inspect(data):
     result=[]
     for i in range(u32(0x60)):
         at=u32(0x64)+i*32;name=types[u32(at)]
-        if not name.startswith('Lcom/vagdiagnostic/app/transport/ElmVagScan'):continue
+        if not name.startswith(PROTOCOL_PREFIXES):continue
         at=u32(at+24)
         if not at:continue
         counts=[]

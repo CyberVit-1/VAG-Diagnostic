@@ -16,6 +16,7 @@ class ElmTp20RecoveryTest {
         val bytes = ArrayDeque<Int>()
         var polls = 0
         var pendingSeq = 2
+        private var dtcSent = false
         override suspend fun open() {}
         override fun close() {}
         override suspend fun readByte(): Int = bytes.pollFirst() ?: -2
@@ -28,9 +29,10 @@ class ElmTp20RecoveryTest {
                 c == "09C000100003011" -> "20900D00003A80701"
                 c == "A00194FF82FF" -> setup + "300A10F8AFF4AFF"
                 c == "1000021089" -> "300B1\r3001000025089"
-                c == "1100041802FF00" -> if (tail == "unacked") "NO DATA" else if (tail.startsWith("pending"))
+                c.matches(Regex("1[0-9A-F]00041802FF00")) -> { dtcSent = true; if (tail == "unacked") "NO DATA" else if (tail.startsWith("pending"))
                     "300B2\r3001100037F" + (if (tail == "pending-wrong") "1A" else "18") + "78" +
-                    (if (tail == "pending-coalesced") "\r3001200025800" else "") else "300B2"
+                    (if (tail == "pending-coalesced") "\r3001200025800" else "") else "300B%X".format((c.take(2).toInt(16) + 1) and 15) }
+                c == "A3" && !dtcSent -> "300A10F8AFF4AFF"
                 c == "A3" -> {
                     polls++
                     if (tail == "io" || tail == "pending-io") throw IOException("lost stream")
@@ -96,8 +98,9 @@ class ElmTp20RecoveryTest {
         val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
         channel.open(9); channel.request("1089")
         assertTrue(runCatching { channel.request("1802FF00") }.exceptionOrNull() is ElmTp20Channel.NoApplicationResponse)
-        assertEquals(8, link.polls)
+        assertEquals(17, link.polls) // two bounded attempts and their intervening idle check
         assertEquals(1, link.sent.count { it == "1100041802FF00" })
+        assertEquals(1, link.sent.count { it == "1200041802FF00" })
         channel.close()
         assertEquals("A80", link.sent.last())
     }

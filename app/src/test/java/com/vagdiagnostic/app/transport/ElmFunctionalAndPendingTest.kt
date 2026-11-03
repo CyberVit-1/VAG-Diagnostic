@@ -36,6 +36,35 @@ class ElmFunctionalAndPendingTest {
     private fun bitsFor(id: Int): Int = (0..255).single { bit ->
         VagInstallationBitmap.decode(0x19, "5WA907530", bitmap(bit)).ids.contains(id)
     }
+    @Test fun completedSilentOrBusyFunctionalListCanRetryBeforeReadingEcus() = runBlocking {
+        for (initial in listOf("NO DATA\r>", "77A037F2221\r>")) {
+            var requests = 0
+            val payload = bitmap(7)
+            val link = Link { cmd -> when (cmd) {
+                "023E800000000000" -> "NO DATA\r>"
+                "03222A2600000000" -> if (++requests == 1) initial else first(payload) + "\r>"
+                "3000100000000000" -> tail(payload) + "\r>"
+                else -> "OK\r>"
+            } }
+            val result = ElmVagFunctionalList.read(ElmEngine(link, { _, _, _, _ -> }), "5WA907530")
+            assertTrue(result.limitations.toString(), result.complete)
+            assertEquals(2, requests)
+            assertEquals(listOf(0x19), result.installed.map { it.id })
+            assertFalse(link.closed)
+        }
+    }
+    @Test fun persistentBusyFunctionalListIsBoundedWithoutInventingInstalledEcus() = runBlocking {
+        val link = Link { cmd -> when (cmd) {
+            "023E800000000000" -> "NO DATA\r>"
+            "03222A2600000000" -> "77A037F2221\r>"
+            else -> "OK\r>"
+        } }
+        val result = ElmVagFunctionalList.read(ElmEngine(link, { _, _, _, _ -> }), "5WA907530")
+        assertFalse(result.complete)
+        assertTrue(result.installed.isEmpty())
+        assertEquals(4, link.sent.count { it == "03222A2600000000" })
+        assertFalse(link.sent.contains("3000100000000000"))
+    }
     @Test fun interleavedOwnersMergeTheirOwnListsAndUsePhysicalGatewayFc() = runBlocking {
         val payload = bitmap(7, bitsFor(0x42), bitsFor(0x52), bitsFor(9))
         val link = Link { cmd -> when (cmd) {

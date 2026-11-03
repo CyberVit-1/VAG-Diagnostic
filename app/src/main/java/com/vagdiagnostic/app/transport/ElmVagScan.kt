@@ -67,6 +67,7 @@ object ElmVagScan {
         private val details = mutableMapOf<Int, Map<VagUdsInfo.Field, VagUdsInfo.Value>>()
         private val absentTp = mutableSetOf<Int>()
         private val absentUds = mutableSetOf<Int>()
+        private val connectionIssues = mutableMapOf<Int, String>()
         private val saeAttempts = mutableSetOf<Int>()
         private val saeSupport = mutableMapOf<Int, Boolean?>()
         private val optionalRetries = mutableMapOf<Int, Int>()
@@ -88,22 +89,43 @@ object ElmVagScan {
         private val retriedAfterClose = mutableSetOf<Int>()
 
         private suspend fun restoreConnection(key: String, cause: Throwable) {
-            if (channelRecoveries >= 4) throw IOException("Исчерпан предел восстановления TP-каналов", cause)
+            // Each discovery stage is finite and each ECU has bounded retries.
+            // Do not turn failures of four different ECUs into a global limit
+            // that prevents the remaining verified installation scope being read.
             currentCoroutineContext().ensureActive()
             event("VAG_CHANNEL_RECOVERY", "$key: новое подключение перед продолжением очереди", "RECOVERING")
+            withContext(NonCancellable) { currentEngine.flushJournal() }
             currentEngine.close()
+            currentCoroutineContext().ensureActive()
             // Production supplies a fresh link as well as an engine. A closed
             // BLE notification channel cannot be reopened in the same object.
             currentEngine = recreateEngine?.invoke() ?: currentEngine
-            currentEngine.connect()
+            try { currentEngine.connect() }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) { throw IOException("Не удалось подтвердить новое соединение после ошибки $key", failure) }
             if (!currentEngine.vehicleReady) throw IOException("OBD после закрытия TP-канала не подтверждён")
             currentCoroutineContext().ensureActive()
             channelRecoveries++
-            event("VAG_CHANNEL_RECOVERY", "$key: OBD подтверждён; очередь продолжается; повтор не более одного", "CONFIRMED")
+            event("VAG_CHANNEL_RECOVERY", "$key: OBD подтверждён; очередь продолжается; восстановлений=$channelRecoveries", "CONFIRMED")
         }
         private suspend fun restoreClosedChannel(key: String, cause: ElmTp20Channel.PeerClosedChannel) = restoreConnection(key, cause)
+        private suspend fun finishFailedReadStage(key: String, cause: IOException) {
+            // Only callers with an exhausted, classified diagnostic failure use
+            // this boundary. Socket loss and failed fresh-link proof still abort.
+            if (recreateEngine == null) throw cause
+            event("VAG_READ_STAGE_INCOMPLETE", "$key: ${cause.message}", "INCOMPLETE")
+            restoreConnection(key, cause)
+        }
+        private suspend fun finishFailedDiscovery(key: String, cause: IOException) {
+            issues += "$key: ${cause.message}"
+            finishFailedReadStage(key, cause)
+        }
+        private fun recovery(key: String): (suspend (Throwable) -> ElmEngine)? =
+            if (recreateEngine == null) null else { failure -> restoreConnection(key, failure); currentEngine }
+        private fun newUds() = Uds(currentEngine, if (recreateEngine == null) null else
+            { key, failure -> restoreConnection(key, failure); currentEngine })
         private suspend fun withTp(route: VagOemReadOnly.Route, action: suspend (ElmTp20Channel) -> Unit) {
-            val channel = ElmTp20Channel(currentEngine)
+            val channel = ElmTp20Channel(currentEngine, recoverEngine = recovery(route.key))
             var healthy = true
             try {
                 channel.open(requireNotNull(route.tp))
@@ -177,7 +199,7 @@ object ElmVagScan {
                 if (protocol == Protocol.TP20) {
                     withTp(gateway) { channel -> identity = tpIdentity(0x19, channel) }
                 } else {
-                    val channel = Uds(currentEngine)
+                    val channel = newUds()
                     var healthy = true
                     try {
                         channel.open(gateway)
@@ -189,6 +211,8 @@ object ElmVagScan {
                 event("VAG_GATEWAY_IDENTITY", identity?.summary() ?: "Идентификация не поддержана или формат не распознан",
                     if (identity != null) "PARSED" else "UNSUPPORTED")
             } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: VagProtocolFailure) { finishFailedReadStage("Идентификация Gateway", failure) }
+            catch (failure: ElmCompletedCanError) { finishFailedReadStage("Идентификация Gateway", failure) }
             catch (io: IOException) { throw io }
             catch (failure: RuntimeException) {
                 event("VAG_GATEWAY_IDENTITY", "Идентификация не подтверждена: ${failure.message}", "INCONCLUSIVE")
@@ -211,7 +235,7 @@ object ElmVagScan {
                             listOf(0x7F, 0x1A, 0x10), listOf(0x7F, 0x1A, 0x11), listOf(0x7F, 0x1A, 0x12)))
                         centralPart = VagEcuIdentification.udsPartNumber(channel.request("22F187"))?.partNumber
                 } else if (centralProtocol == Protocol.UDS) {
-                    val channel = Uds(currentEngine)
+                    val channel = newUds()
                     var healthy = true
                     try {
                         channel.open(central)
@@ -222,6 +246,8 @@ object ElmVagScan {
                 }
             } catch (cancel: CancellationException) { throw cancel }
             catch (closed: ElmTp20Channel.PeerClosedChannel) { restoreClosedChannel(central.key, closed) }
+            catch (failure: VagProtocolFailure) { finishFailedReadStage("Идентификация ${central.key}", failure) }
+            catch (failure: ElmCompletedCanError) { finishFailedReadStage("Идентификация ${central.key}", failure) }
             catch (io: IOException) { throw io }
             catch (failure: RuntimeException) {
                 event("VAG_CHASSIS_IDENTITY", "09: идентификация не подтверждена; ${failure.message}", "INCONCLUSIVE")
@@ -242,6 +268,8 @@ object ElmVagScan {
                 }
             } catch (cancel: CancellationException) { throw cancel }
             catch (closed: ElmTp20Channel.PeerClosedChannel) { restoreClosedChannel(extra.key, closed) }
+            catch (failure: VagProtocolFailure) { finishFailedReadStage("Дополнительный опрос ${extra.key}", failure) }
+            catch (failure: ElmCompletedCanError) { finishFailedReadStage("Дополнительный опрос ${extra.key}", failure) }
             catch (io: IOException) { throw io }
             catch (failure: RuntimeException) {
                 // A final session NRC also proves this specific ECU responded.
@@ -272,14 +300,26 @@ object ElmVagScan {
                         }
                     } catch (cancel: CancellationException) { throw cancel }
                     catch (closed: ElmTp20Channel.PeerClosedChannel) { restoreClosedChannel(central.key, closed) }
+                    catch (failure: VagProtocolFailure) {
+                        connectionIssues[0x09] = failure.message.orEmpty()
+                        finishFailedReadStage("Предварительный опрос ${central.key}", failure)
+                    }
+                    catch (failure: ElmCompletedCanError) {
+                        connectionIssues[0x09] = failure.message.orEmpty()
+                        finishFailedReadStage("Предварительный опрос ${central.key}", failure)
+                    }
                     catch (io: IOException) { throw io }
-                    catch (_: ElmTp20Channel.NoChannelResponse) { absentTp += 0x09; tryUds = true }
+                    catch (unavailable: ElmTp20Channel.ConnectionUnavailable) {
+                        absentTp += 0x09; tryUds = true
+                        connectionIssues[0x09] = unavailable.message.orEmpty()
+                        event("VAG_ECU_CONNECTION_09", unavailable.message.orEmpty(), "INCOMPLETE")
+                    }
                     catch (_: ElmTp20Channel.NoApplicationResponse) {
                         if (0x09 !in confirmedProtocols) { absentTp += 0x09; tryUds = true }
                     }
                     catch (_: IllegalStateException) { }
                     if (tryUds && central.udsTx != null) {
-                        val channel = Uds(currentEngine)
+                        val channel = newUds()
                         var healthy = true
                         try {
                             channel.open(central)
@@ -289,6 +329,16 @@ object ElmVagScan {
                             identities[0x09] = value
                             centralPart = value?.partNumber
                         } catch (cancel: CancellationException) { healthy = false; throw cancel }
+                        catch (failure: VagProtocolFailure) {
+                            healthy = false
+                            connectionIssues[0x09] = failure.message.orEmpty()
+                            finishFailedReadStage("Предварительный UDS опрос ${central.key}", failure)
+                        }
+                        catch (failure: ElmCompletedCanError) {
+                            healthy = false
+                            connectionIssues[0x09] = failure.message.orEmpty()
+                            finishFailedReadStage("Предварительный UDS опрос ${central.key}", failure)
+                        }
                         catch (io: IOException) { healthy = false; throw io }
                         catch (_: UdsNoResponse) { absentUds += 0x09 }
                         catch (_: IllegalStateException) { }
@@ -363,7 +413,7 @@ object ElmVagScan {
                                 event("VAG_DTC_DETAILS_%02X".format(id), "${fault.code}: нет дополнительного ответа; основной DTC сохранён", "INCOMPLETE")
                                 break
                             } catch (bad: IllegalArgumentException) {
-                                throw IOException("Некорректный ответ дополнительных записей DTC: ${bad.message}", bad)
+                                throw VagProtocolFailure("Некорректный ответ дополнительных записей DTC: ${bad.message}", bad)
                             }
                         event("VAG_DTC_DETAILS_%02X".format(id), "${fault.code}: ${reply.state}" + (reply.kwpRecords?.let { "; записей=${it.records.size}; структура=${if (it.complete) "полная" else "частичная"}" } ?: "") + (reply.udsRecords?.let { "; записей=${it.records.size}; структура=${if (it.complete) "полная" else "частичная"}" } ?: "") + (reply.nrc?.let { "; NRC 0x%02X".format(it) } ?: "") + (reply.issue?.let { "; $it" } ?: "") + "; расшифровка дополнительных записей не подтверждена",
                             if (reply.state == VagDtcDetails.State.RAW_RESPONSE) "RAW_ONLY" else "INCOMPLETE")
@@ -378,6 +428,10 @@ object ElmVagScan {
                                 if (saeAttempts.add(id)) saeSupport[id] = VagKwpCapabilities.supportsSaeDtc(channel.request(VagKwpCapabilities.REQUEST))
                             } catch (missing: ElmTp20Channel.NoApplicationResponse) {
                                 throw OptionalReadUnavailable(missing)
+                            } catch (_: ElmCompletedCanError) {
+                                // This fixed capability command has no retriable
+                                // flag; its completed failure selects OEM format.
+                                saeSupport[id] = false
                             }
                             saeSupport[id] == true
                         } else id == 1 || id == 2 // Recorded pre-capability test sequences only.
@@ -400,7 +454,7 @@ object ElmVagScan {
                         // A complete NO DATA setup or a healthy unanswered1089
                         // permits one fresh-channel retry on the listed CAN engine.
                         // Never retry a DTC request, pending or damaged transaction.
-                        val retryable = missing is ElmTp20Channel.NoChannelResponse ||
+                        val retryable = missing is ElmTp20Channel.ConnectionUnavailable ||
                             (missing is ElmTp20Channel.NoApplicationResponse && missing.request == "1089")
                         if (!retryable || !identifyEcus || id != 0x01 || listEntry == null ||
                             VagConnectionPolicy.isUdsOnlyChassis(centralPart)) throw missing
@@ -415,7 +469,7 @@ object ElmVagScan {
                     var lastFailure: RuntimeException? = null
                     var onlyNoResponse = true
                     for ((index, path) in paths.withIndex()) {
-                        val channel = Uds(currentEngine)
+                        val channel = newUds()
                         var healthy = true
                         try {
                             channel.open(path)
@@ -479,14 +533,17 @@ object ElmVagScan {
                             (failure is VagOemReadOnly.ServiceRejected && failure.service in setOf(0x18, 0x19)) || completedFaults != null) throw failure
                         // A completed service rejection stays with this ECU. Only a
                         // completed setup/healthy no-response can choose another route.
-                        if (failure !is ElmTp20Channel.NoChannelResponse && failure !is ElmTp20Channel.NoApplicationResponse) throw failure
+                        if (failure !is ElmTp20Channel.ConnectionUnavailable && failure !is ElmTp20Channel.NoApplicationResponse) throw failure
                         absentTp += id
+                        connectionIssues[id] = failure.message.orEmpty()
                         if (route.udsTx == null) throw failure
                         event("VAG_ECU_PROTOCOL_FALLBACK", "${route.key}: TP2.0 ${failure.message}; known UDS route", "INCONCLUSIVE")
                         udsRead()
                     }
                 } else {
-                    check(!identifyEcus || VagConnectionPolicy.mustConnectToUds(state, id in absentTp)) { "Нет доступного подтверждаемого протокола ECU" }
+                    check(!identifyEcus || VagConnectionPolicy.mustConnectToUds(state, id in absentTp)) {
+                        "Нет доступного подтверждаемого протокола ECU" + connectionIssues[id]?.let { "; $it" }.orEmpty()
+                    }
                     udsRead()
                 }
                 if (!faultsPublished) publishFaults(result)
@@ -507,6 +564,30 @@ object ElmVagScan {
                     restoreClosedChannel(route.key, closed)
                     if (retriedAfterClose.add(id)) queue += id else failed = true
                 }
+            }
+            catch (can: ElmCompletedCanError) {
+                completedFaults?.takeIf { !faultsPublished }?.let { publishFaults(it) }
+                if (completedFaults == null) failed = true
+                onUnit(unit.copy(state = if (completedFaults != null) ReadState.COMPLETE else
+                    if (unit.source == "RESPONSE") ReadState.PARTIAL else ReadState.NO_RESPONSE,
+                    note = if (completedFaults != null) "DTC прочитаны; дополнительные данные не подтверждены: CAN ERROR"
+                        else "DTC не подтверждены: CAN ERROR; предел повторов команды исчерпан"))
+                event("VAG_DTC_%02X".format(id), "CAN ERROR; остальные ECU после восстановления соединения", "INCOMPLETE")
+                restoreConnection(route.key, can)
+            }
+            catch (protocolFailure: VagProtocolFailure) {
+                completedFaults?.takeIf { !faultsPublished }?.let { publishFaults(it) }
+                onUnit(unit.copy(state = if (completedFaults != null) ReadState.COMPLETE else
+                    if (unit.source == "RESPONSE") ReadState.PARTIAL else ReadState.NO_RESPONSE,
+                    note = if (completedFaults != null) "DTC прочитаны; дополнительные данные не подтверждены: ${protocolFailure.message}"
+                        else "DTC не подтверждены; предел восстановления команды исчерпан: ${protocolFailure.message}"))
+                // Without a fresh-link factory there is no proof that a broken
+                // transaction can be replaced. Production always supplies it.
+                if (recreateEngine == null) throw VagProtocolFailure(
+                    "${route.key}: ${protocolFailure.message}", protocolFailure, protocolFailure.noData)
+                if (completedFaults == null) failed = true
+                restoreConnection(route.key, protocolFailure)
+                event("VAG_ECU_READ_INCOMPLETE", "${route.key}: остальные ECU после подтверждённого нового соединения", "INCOMPLETE")
             }
             catch (io: IOException) {
                 completedFaults?.takeIf { !faultsPublished }?.let { result ->
@@ -561,6 +642,13 @@ object ElmVagScan {
         }
 
         suspend fun run(): Outcome {
+            if (currentEngine.manualUds) try {
+                val nativeCandidate = ElmAdapterNativeProbe.inspect(currentEngine)
+                event("VAG_ADAPTER_NATIVE_CANDIDATE", if (nativeCandidate) "Семейство адаптера распознано; команды режима требуют подтверждения"
+                    else "Общая ветвь ELM", if (nativeCandidate) "CANDIDATE" else "GENERIC")
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: IOException) { finishFailedReadStage("Идентификация адаптера", failure) }
+            catch (failure: RuntimeException) { finishFailedReadStage("Идентификация адаптера", VagProtocolFailure("Неполный ответ адаптера", failure)) }
             try {
                 withTp(gateway) { channel ->
                     protocol = Protocol.TP20
@@ -577,8 +665,10 @@ object ElmVagScan {
                 issues += "Gateway TP2.0: ${closed.message}"
                 restoreClosedChannel(gateway.key, closed)
             }
+            catch (failure: VagProtocolFailure) { finishFailedDiscovery("Gateway TP2.0", failure) }
+            catch (failure: ElmCompletedCanError) { finishFailedDiscovery("Gateway TP2.0", failure) }
             catch (io: IOException) { throw io }
-            catch (failure: ElmTp20Channel.NoChannelResponse) { absentTp += 0x19; issues += "Gateway TP2.0: ${failure.message}" }
+            catch (failure: ElmTp20Channel.ConnectionUnavailable) { absentTp += 0x19; issues += "Gateway TP2.0: ${failure.message}" }
             catch (failure: IllegalStateException) { issues += "Gateway TP2.0: ${failure.message}" }
             catch (failure: IllegalArgumentException) { issues += "Список TP2.0: ${failure.message}" }
 
@@ -587,12 +677,14 @@ object ElmVagScan {
             if (protocol == Protocol.TP20 && installed == null && legacyListFallbackAllowed) {
                 try { withTp(gateway) { installed = VagOemReadOnly.installed04A1Messages(it.requestMessages("2204A1")) } }
                 catch (cancel: CancellationException) { throw cancel }
+                catch (failure: VagProtocolFailure) { finishFailedDiscovery("Список 04A1/TP2.0", failure) }
+                catch (failure: ElmCompletedCanError) { finishFailedDiscovery("Список 04A1/TP2.0", failure) }
                 catch (io: IOException) { throw io }
                 catch (failure: RuntimeException) { issues += "Список 04A1/TP2.0: ${failure.message}" }
             }
             if (protocol == null) {
                 try {
-                    val channel = Uds(currentEngine)
+                    val channel = newUds()
                     var healthy = true
                     try {
                         channel.open(gateway)
@@ -642,6 +734,8 @@ object ElmVagScan {
                     catch (io: IOException) { healthy = false; throw io }
                     finally { if (healthy && currentCoroutineContext().isActive) channel.close() }
                 } catch (cancel: CancellationException) { throw cancel }
+                catch (failure: VagProtocolFailure) { finishFailedDiscovery("Gateway UDS", failure) }
+                catch (failure: ElmCompletedCanError) { finishFailedDiscovery("Gateway UDS", failure) }
                 catch (io: IOException) { throw io }
                 catch (failure: UdsNoResponse) { absentUds += 0x19; issues += "Gateway UDS: ${failure.message}" }
                 catch (failure: RuntimeException) { issues += "Gateway UDS: ${failure.message}" }
@@ -668,6 +762,7 @@ object ElmVagScan {
                 collectIdentity()
                 event("VAG_INSTALLATION_LIST", "Формат списка не подтверждён; кандидаты для этой платформы не опрашиваются", "UNSUPPORTED")
                 return Outcome(protocol, false, false, "Gateway ответил; список для этой платформы не подтверждён" +
+                    (if (issues.isNotEmpty()) "; " + issues.joinToString("; ") else "") +
                     (if (listLimitations.isNotEmpty()) "; " + listLimitations.joinToString("; ") else "") +
                     (identity?.let { "; " + it.summary() } ?: ""))
             }
@@ -689,6 +784,12 @@ object ElmVagScan {
                     note = "Наличие подтверждено; чтение DTC ещё не выполнено",
                     source = if (id in confirmedProtocols) "RESPONSE" else
                         if (entry?.listOwners?.any { it != 0x19 } == true) "INSTALLATION_LIST" else "GATEWAY"))
+            }
+            // Gateway's own confirmed transport does not need the chassis probe
+            // used to select protocols for other ECUs. Publish its DTC first.
+            if (queue.firstOrNull() == 0x19 && 0x19 in confirmedProtocols) {
+                next = 1
+                scanUnit(0x19)
             }
             identifyCentral()
             while (true) {
@@ -722,16 +823,24 @@ object ElmVagScan {
         }
     }
 
-    private class Uds(private val engine: ElmEngine) {
+    private class Uds(private var engine: ElmEngine, private val recoverEngine: (suspend (String, Throwable) -> ElmEngine)? = null) {
+        private suspend fun execute(command: String, timeoutMs: Long = 5500): String =
+            engine.command(command, timeoutMs).also { ElmCompletedCanError.check(it, command) }
         private var route: VagOemReadOnly.Route? = null
         private var active = false
         private var pendingMs = 5250L
         private var cachedPartReply: List<Int>? = null
+        private var opening = false
         private suspend fun configure(target: VagOemReadOnly.Route) {
+            if (engine.manualUds) {
+                ElmUdsCanConfiguration.configure(engine, target)
+                route = target
+                return
+            }
             val tx = requireNotNull(target.udsTx) { "Нет проверенного UDS-маршрута" }
             val rx = requireNotNull(target.udsRx)
             suspend fun ok(cmd: String) {
-                val raw = engine.command(cmd).uppercase().replace(cmd, "").filterNot { it.isWhitespace() }
+                val raw = execute(cmd).uppercase().replace(cmd, "").filterNot { it.isWhitespace() }
                 if (raw != "OK") throw IOException("ELM отклонил $cmd")
             }
             val protocol = if (target.is29Bit) "7" else "6"
@@ -739,7 +848,7 @@ object ElmVagScan {
             for (cmd in listOf("ATSP$protocol", "ATH1", "ATD0", "ATCAF1", "ATCFC0", "ATV0", "ATCEA", "ATSTFF")) ok(cmd)
             // Keep the conservative maximum, but let ELM adapt the idle wait
             // after complete replies. Raw TP2.0 still uses fixed ACK timing.
-            val adaptive = engine.command("ATAT1").uppercase().replace("ATAT1", "").filterNot { it.isWhitespace() }
+            val adaptive = execute("ATAT1").uppercase().replace("ATAT1", "").filterNot { it.isWhitespace() }
             when (adaptive) {
                 "OK" -> Unit
                 "?" -> ok("ATAT0")
@@ -752,7 +861,7 @@ object ElmVagScan {
                 ok("ATCRA%08X".format(rx))
                 // The non-OBD 29-bit route needs its exact FC transmit ID.
                 ok("ATFCSH%08X".format(tx)); ok("ATFCSD300010"); ok("ATFCSM1")
-                if (engine.command("ATDPN").trim().uppercase() !in setOf("7", "A7")) throw IOException("ELM не подтвердил CAN 7")
+                if (execute("ATDPN").trim().uppercase() !in setOf("7", "A7")) throw IOException("ELM не подтвердил CAN 7")
             } else {
                 if (engine.needsFlowControlReset) {
                     try { ok("ATFCSM0") }
@@ -771,12 +880,31 @@ object ElmVagScan {
         }
         suspend fun restoreConfiguration() = configure(requireNotNull(route))
         suspend fun open(target: VagOemReadOnly.Route) {
+            repeat(4) { attempt ->
+                opening = true
+                try { openOnce(target); return }
+                catch (failure: VagProtocolFailure) {
+                    if (recoverEngine == null || attempt == 3) throw failure
+                    engine = recoverEngine.invoke(target.key, failure)
+                    if (!engine.vehicleReady) throw IOException("Связь после восстановления UDS не подтверждена")
+                } finally { opening = false }
+            }
+        }
+        private suspend fun openOnce(target: VagOemReadOnly.Route) {
+            active = false
+            pendingMs = 5250L
+            cachedPartReply = null
             configure(target)
             // Presence is independent of extended-session support. A complete
             // matching negative reply also proves that the addressed ECU answered.
-            val presence = readOrNoData("3E00", allowNoData = true)
+            var presence: List<Int>? = null
+            for (attempt in 0 until 3) {
+                presence = readOrNoData("3E00", allowNoData = true)
+                if (presence != null) break
+                currentCoroutineContext().ensureActive()
+            }
             if (!(presence == null || presence == listOf(0x7E, 0) ||
-                (presence.size == 3 && presence.take(2) == listOf(0x7F, 0x3E)))) throw IOException("Нет подтверждения присутствия UDS ECU")
+                (presence.size == 3 && presence.take(2) == listOf(0x7F, 0x3E)))) throw VagProtocolFailure("Нет подтверждения присутствия UDS ECU")
             val reply = readOrNoData("1003", allowNoData = true)
             active = reply?.take(2) == listOf(0x50, 3)
             if (presence == null && reply == null) {
@@ -785,7 +913,7 @@ object ElmVagScan {
             }
             if (active && reply != null && reply.size >= 6) {
                 val star = ((reply[4] shl 8) or reply[5]) * 10L
-                if (star !in 1..5750) throw IOException("UDS P2* вне поддержанного диапазона")
+                if (star !in 1..5750) throw VagProtocolFailure("UDS P2* вне поддержанного диапазона")
                 pendingMs = star + 250
             }
         }
@@ -794,6 +922,7 @@ object ElmVagScan {
             active = false
             val reply = read("1001")
             if (reply.take(2) != listOf(0x50, 1)) throw IOException("ECU не подтвердил возврат в штатную UDS-сессию")
+            active = false
         }
         suspend fun read(command: String): List<Int> =
             (if (command == "22F187") cachedPartReply else null) ?: requireNotNull(readOrNoData(command, false))
@@ -814,12 +943,39 @@ object ElmVagScan {
         }
 
         private suspend fun readOrNoData(command: String, allowNoData: Boolean): List<Int>? {
-            require(Regex("1906[0-9A-F]{6}FF").matches(command) || command in setOf("3E00", "1003", "1001", "2204A1", "222A26", "19028D", "22F187", VagDiagnosticAccess.REQUEST) ||
-                command in VagUdsInfo.Field.entries.map { it.request })
+            val result = VagReadRetry.run(command, classify = { attempt: Result<List<Int>?> ->
+                val failure = attempt.exceptionOrNull()
+                when (failure) {
+                    is VagProtocolFailure -> if (failure.noData) VagReadRetry.Outcome.NO_DATA else VagReadRetry.Outcome.PROTOCOL_ERROR
+                    null -> VagReadRetry.response(command, attempt.getOrThrow())
+                    else -> VagReadRetry.Outcome.CAN_ERROR
+                }
+            }, beforeRetry = { attempt ->
+                (attempt.exceptionOrNull() as? VagProtocolFailure)?.let { failure ->
+                    val target = requireNotNull(route)
+                    engine = requireNotNull(recoverEngine).invoke(target.key, failure)
+                    if (!engine.vehicleReady) throw IOException("Связь после восстановления UDS не подтверждена")
+                    open(target)
+                }
+            }) {
+                try { Result.success(readOrNoDataOnce(command, allowNoData = true)) }
+                catch (can: ElmCompletedCanError) { Result.failure(can) }
+                catch (failure: VagProtocolFailure) {
+                    if (recoverEngine == null || opening) throw failure
+                    Result.failure(failure)
+                }
+            }.getOrThrow()
+            if (result == null && !allowNoData) error("ELM завершил UDS $command без ответа")
+            return result
+        }
+        private suspend fun readOrNoDataOnce(command: String, allowNoData: Boolean): List<Int>? {
+            require(ElmUdsReadRequests.allowed(command))
             val target = requireNotNull(route)
+            if (engine.nativeSegmentation?.enabled == true) return ElmUdsNativeDriver.read(engine, target, command, pendingMs)
+            if (engine.manualUds) return ElmUdsRawTransaction.read(engine, target, command, pendingMs, automaticFlowControl = true)
             val result = withTimeoutOrNull(20000) {
                     val rx = requireNotNull(target.udsRx)
-                    var raw = engine.command(command, 8500)
+                    var raw = execute(command, 8500)
                     var pending = 0
                     while (true) {
                         currentCoroutineContext().ensureActive()
@@ -828,9 +984,9 @@ object ElmVagScan {
                             error("ELM завершил UDS $command без ответа")
                         }
                         val decoded = try { VagUdsTransaction.decode(raw, rx, command) }
-                            catch (bad: IllegalArgumentException) { throw IOException(bad.message, bad) }
+                            catch (bad: IllegalArgumentException) { throw VagProtocolFailure(bad.message ?: "Повреждённый UDS ответ", bad) }
                         pending += decoded.pendingCount
-                        if (pending > 8) throw IOException("Слишком много UDS ResponsePending")
+                        if (pending > 8) throw VagProtocolFailure("Слишком много UDS ResponsePending")
                         decoded.payload?.let { return@withTimeoutOrNull it }
                         // No new diagnostic request, session-close or tester-present
                         // may run until this SID has a final response.
@@ -840,7 +996,7 @@ object ElmVagScan {
             }
             if (result == null) {
                 engine.close()
-                throw IOException("Превышен общий срок ожидания UDS $command")
+                throw VagProtocolFailure("Превышен общий срок ожидания UDS $command")
             }
             return result.ifEmpty { null }
         }

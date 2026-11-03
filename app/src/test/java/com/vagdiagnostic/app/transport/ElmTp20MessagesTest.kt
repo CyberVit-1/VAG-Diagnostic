@@ -65,7 +65,7 @@ class ElmTp20MessagesTest {
         assertTrue(link.sent.contains("B3"))
         assertFalse(link.sent.contains("B30"))
         assertEquals("B40", link.sent.last())
-        assertEquals(0, link.sent.count { it == "A3" })
+        assertEquals(1, link.sent.count { it == "A3" })
     }
     @Test fun missingOrCorruptContinuationStopsWithoutClosingOrResending() = runBlocking {
         for (tail in listOf("missing", "foreign", "sequence", "unadvertised", "many", "wrong-sid", "wrong-did", "extra-on-quiet")) {

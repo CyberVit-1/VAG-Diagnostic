@@ -1,0 +1,115 @@
+package com.vagdiagnostic.app.transport
+
+import com.vagdiagnostic.app.core.VagOemReadOnly
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.*
+import org.junit.Test
+import java.util.ArrayDeque
+
+/** Synthetic raw-CAN responses; no hardware capability is implied. */
+class ElmUdsRawTransactionTest {
+    private class Link(vararg replies: Pair<String, String>) : ElmLink {
+        override val label = "Synthetic raw UDS"
+        val script = ArrayDeque(replies.toList())
+        val sent = mutableListOf<String>()
+        val bytes = ArrayDeque<Int>()
+        var closed = false
+        override suspend fun open() { }
+        override suspend fun readByte(): Int = if (bytes.isEmpty()) -2 else bytes.removeFirst()
+        override fun close() { closed = true }
+        override suspend fun write(bytes: ByteArray) {
+            val command = bytes.toString(Charsets.US_ASCII).trim()
+            sent += command
+            val response = when {
+                script.peekFirst()?.first == command -> script.removeFirst().second
+                command == "ATZ" -> "ELM327"
+                command == "ATDPN" -> "6"
+                command.startsWith("AT") -> "OK"
+                command == "0100" -> "7E8064100BE3EA813"
+                else -> {
+                    val expected = script.removeFirst()
+                    assertEquals(expected.first, command)
+                    expected.second
+                }
+            }
+            val end = if (command == "ATMA") "\r" else "\r>"
+            for (b in (response + end).toByteArray()) this.bytes.addLast(b.toInt() and 255)
+        }
+    }
+    private val gateway = VagOemReadOnly.routes.getValue(0x19)
+    @Test fun rawSingleFrameIncludesPciAndIsReadWithoutAutomaticFormatting() = runBlocking {
+        val link = Link("0319028DAAAAAAAA" to "77A0359028D")
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        assertEquals(listOf(0x59, 2, 0x8D), ElmUdsRawTransaction.read(engine, gateway, "19028D"))
+        assertTrue(link.script.isEmpty())
+        assertFalse(link.closed)
+    }
+    @Test fun firstFrameRequiresOneExplicitFlowControlBeforeConsecutiveFrame() = runBlocking {
+        val link = Link("0319028DAAAAAAAA" to "77A100859028D010203",
+            "300010AAAAAAAAAA" to "77A210405AAAAAAAAAA")
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        assertEquals(listOf(0x59, 2, 0x8D, 1, 2, 3, 4, 5), ElmUdsRawTransaction.read(engine, gateway, "19028D"))
+        assertEquals(1, link.sent.count { it == ElmUdsRawTransaction.FLOW_CONTROL })
+        assertTrue(link.script.isEmpty())
+    }
+    @Test fun completePendingThenFinalNeverResendsTheRequest() = runBlocking {
+        val link = Link("0319028DAAAAAAAA" to "77A037F1978\r77A0359028D")
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        assertEquals(listOf(0x59, 2, 0x8D), ElmUdsRawTransaction.read(engine, gateway, "19028D"))
+        assertEquals(1, link.sent.count { it == "0319028DAAAAAAAA" })
+    }
+    @Test fun completedNoDataAndFinalNegativeRemainDistinct() = runBlocking {
+        for ((raw, expected) in listOf("NO DATA" to null, "77A037F1931" to listOf(0x7F, 0x19, 0x31))) {
+            val link = Link("0319028DAAAAAAAA" to raw)
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            assertEquals(expected, ElmUdsRawTransaction.read(engine, gateway, "19028D"))
+            assertFalse(link.closed)
+        }
+    }
+    @Test fun foreignOwnerAndWrongSequenceCannotProduceAnEmptySuccessfulReply() = runBlocking {
+        for (script in listOf(arrayOf("0319028DAAAAAAAA" to "7E80359028D"),
+            arrayOf("0319028DAAAAAAAA" to "77A100859028D010203", "300010AAAAAAAAAA" to "77A220405AAAAAAAAAA"))) {
+            val link = Link(*script)
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            assertTrue(runCatching { ElmUdsRawTransaction.read(engine, gateway, "19028D") }.exceptionOrNull() is VagProtocolFailure)
+            assertTrue(link.closed)
+        }
+    }
+    @Test fun writeServicesAreRejectedBeforeAnyFrameIsSent() = runBlocking {
+        val link = Link()
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        val before = link.sent.toList()
+        for (request in listOf("14FFFFFF", "2701", "2EF19000", "3101FF00")) {
+            assertTrue(runCatching { ElmUdsRawTransaction.read(engine, gateway, request) }.exceptionOrNull() is IllegalArgumentException)
+            assertTrue(runCatching { ElmUdsNativeDriver.read(engine, gateway, request, 5250) }.exceptionOrNull() is IllegalArgumentException)
+        }
+        assertEquals(before, link.sent)
+    }
+    @Test fun lateFirstFrameAfterPendingUsesManualFcOnlyAfterMonitorStops() = runBlocking {
+        val link = Link("0319028DAAAAAAAA" to "77A037F1978",
+            "ATMA" to "77A100859028D010203", "" to "STOPPED",
+            "300010AAAAAAAAAA" to "77A210405AAAAAAAAAA")
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        assertEquals(listOf(0x59, 2, 0x8D, 1, 2, 3, 4, 5),
+            ElmUdsRawTransaction.read(engine, gateway, "19028D", automaticFlowControl = true))
+        val start = link.sent.indexOf("0319028DAAAAAAAA")
+        assertEquals(listOf("0319028DAAAAAAAA", "ATCFC0", "ATMA", "", "300010AAAAAAAAAA", "ATCFC1"), link.sent.drop(start))
+        assertTrue(link.script.isEmpty())
+        assertFalse(link.closed)
+    }
+    @Test fun rawTwentyNineBitReplyRequiresItsExactOwner() = runBlocking {
+        val route = VagOemReadOnly.routes.values.first { it.is29Bit }
+        val rx = "%08X".format(requireNotNull(route.udsRx))
+        val link = Link("0319028DAAAAAAAA" to (rx + "0359028D"))
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        assertEquals(listOf(0x59, 2, 0x8D), ElmUdsRawTransaction.read(engine, route, "19028D"))
+    }
+    @Test fun mixedAdapterStatusAndPayloadCannotBecomeZeroDtcs() = runBlocking {
+        for (status in listOf("NO DATA", "CAN ERROR", "OK", "STOPPED")) {
+            val link = Link("0319028DAAAAAAAA" to (status + "\r77A0359028D"))
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            assertTrue(runCatching { ElmUdsRawTransaction.read(engine, gateway, "19028D") }.exceptionOrNull() is VagProtocolFailure)
+            assertTrue(link.closed)
+        }
+    }
+}

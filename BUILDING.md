@@ -1,3 +1,10 @@
+## Кандидат0.3.11/code27
+
+Рабочий пакет com.vagdiagnostic.app, Room v1 без миграции. Актуальные
+протокольные проверки и ограничения: CONNECTION_PORT_AUDIT_2026-11-03.md.
+GitHub workflow собирает debug APK, выполняет unit-тесты и DEX budget guard;
+артефакт VAG-Diagnostic-v0.3.11-debug-apk. Сборка не равна проверке на автомобиле.
+
 # Сборка и физический тест 0.1.0
 
 ## Условия

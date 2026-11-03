@@ -15,16 +15,23 @@ internal object ElmVagFunctionalList {
     private val routes = owners.associateWith { VagOemReadOnly.routes.getValue(it) }
     private val byRx = routes.entries.associate { requireNotNull(it.value.udsRx) to it.key }
     data class Result(val installed: List<VagOemReadOnly.Installed>, val respondingOwners: Set<Int>,
-        val limitations: List<String>, val requiresReconnect: Boolean) {
+        val limitations: List<String>, val requiresReconnect: Boolean,
+        val retryOutcome: VagReadRetry.Outcome = VagReadRetry.Outcome.COMPLETE) {
         val complete: Boolean get() = installed.isNotEmpty() && limitations.isEmpty()
     }
 
     suspend fun read(engine: ElmEngine, gatewayPart: String, faults: Boolean = false): Result {
+        engine.nativeSegmentation?.disable()
+        val request = if (faults) "222A28" else "222A26"
+        return VagReadRetry.run(request, classify = { it.retryOutcome }) { readOnce(engine, gatewayPart, faults) }
+    }
+    private suspend fun readOnce(engine: ElmEngine, gatewayPart: String, faults: Boolean): Result {
         require(VagInstallationBitmap.formatFor(0x19, gatewayPart) == "mk8")
         val request = if (faults) "222A28" else "222A26"
         val collection = VagIsoTpCollection(byRx.keys, request)
         val started = System.nanoTime()
         var reconnect = false
+        var completedSilence = false
         val failures = mutableListOf<String>()
         suspend fun command(value: String, timeout: Long = 8500) = engine.command(value, timeout, deferJournal = true)
         suspend fun ok(value: String) {
@@ -52,9 +59,12 @@ internal object ElmVagFunctionalList {
             poke.accept(command("023E800000000000"), "023E800000000000")
             if (poke.pending.isNotEmpty() || poke.unfinished.isNotEmpty()) throw IOException("Незавершённый функциональный TesterPresent")
             val rawRequest = "03${request}00000000"
-            collection.accept(command(rawRequest), rawRequest)
+            val initial = command(rawRequest)
+            collection.accept(initial, rawRequest)
+            completedSilence = initial.uppercase().replace(rawRequest, "").filterNot(Char::isWhitespace) == "NODATA" &&
+                collection.payloads.isEmpty() && collection.pending.isEmpty() && collection.unfinished.isEmpty()
             var receives = 0
-            while (true) {
+            while (!completedSilence) {
                 currentCoroutineContext().ensureActive()
                 val elapsed = (System.nanoTime() - started) / 1_000_000
                 if (elapsed >= 20000) throw IOException("Истёк общий срок функционального списка")
@@ -100,6 +110,21 @@ internal object ElmVagFunctionalList {
         if (missing.isNotEmpty()) failures += "Не подтверждены списки ECU: " + missing.joinToString { "%02X".format(it) }
         if (collection.unknownIds.isNotEmpty()) failures += "Ответы без подтверждённого владельца списка: " + collection.unknownIds.joinToString { "%03X".format(it) }
         if (collection.invalidIds.isNotEmpty()) failures += "Повреждённые ответы: " + collection.invalidIds.joinToString { "%03X".format(it) }
-        return Result(merged.values.toList(), lists.keys, failures.distinct(), reconnect)
+        // A complete busy/no-data result can repeat. An unfinished, unknown or
+        // damaged owner stream must instead be replaced by the scan caller.
+        val stable = !reconnect && collection.pending.isEmpty() && collection.unfinished.isEmpty() &&
+            collection.invalidIds.isEmpty() && collection.unknownIds.isEmpty()
+        val allPositiveListsValid = collection.payloads.all { (rx, payload) ->
+            payload.first() == 0x7F || byRx.getValue(rx) in lists
+        }
+        val allExpectedFinished = requiredOwners(lists).all { requireNotNull(routes.getValue(it).udsRx) in collection.payloads }
+        val retry = when {
+            stable && completedSilence -> VagReadRetry.Outcome.NO_DATA
+            stable && allPositiveListsValid && allExpectedFinished && collection.payloads.values.any {
+                it == listOf(0x7F, 0x22, 0x21)
+            } -> VagReadRetry.Outcome.BUSY
+            else -> VagReadRetry.Outcome.COMPLETE
+        }
+        return Result(merged.values.toList(), lists.keys, failures.distinct(), reconnect, retry)
     }
 }

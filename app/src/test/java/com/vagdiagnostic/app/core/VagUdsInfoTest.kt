@@ -66,10 +66,11 @@ class VagUdsInfoTest {
             assertEquals("TEST UNIT", saved.values.single().text)
         }
     }
-    @Test fun accessStatusRequiresCompleteFourByteBodyWithoutInventingBitMeaning() {
+    @Test fun accessStatusRequiresFourByteWholePayloadWithoutInventingBitMeaning() {
         val field = VagUdsInfo.Field.ACCESS_STATUS
-        assertEquals(listOf(0, 1, 2, 3), VagUdsInfo.decode(field, reply(field, listOf(0, 1, 2, 3))).raw)
-        for (body in listOf(listOf(3), listOf(0, 1, 2), listOf(0, 1, 2, 3, 4)))
+        // The source checks size4 of the WHOLE positive payload: 62 01 74 xx.
+        assertEquals(listOf(3), VagUdsInfo.decode(field, listOf(0x62, 0x01, 0x74, 3)).raw)
+        for (body in listOf(emptyList(), listOf(0, 1), listOf(0, 1, 2, 3), listOf(0, 1, 2, 3, 4)))
             assertEquals(VagUdsInfo.State.INVALID, VagUdsInfo.decode(field, reply(field, body)).state)
     }
 }

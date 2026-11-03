@@ -112,7 +112,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "BLE / NUS" -> BleNusLink(context, cfg.mac)
             else -> error("Неизвестный транспорт")
         }
-        return ElmEngine(driver, log = { _, _, _, _ -> }, timestampedLog = { cmd, raw, ms, result, timestamp ->
+        return ElmEngine(driver, log = { _, _, _, _ -> }, manualUds = true, timestampedLog = { cmd, raw, ms, result, timestamp ->
             db.journal().insert(JournalEntity(timestamp = timestamp, connection = driver.label,
                 command = cmd, raw = raw, elapsedMs = ms, outcome = result))
         })

@@ -7,7 +7,7 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
     var uds = false
     var tx = ""
     var custom = false
-    return buildList {
+    return withSyntheticTpKeepalives(buildList {
         for ((command, raw) in withoutLegacySilentProbes(rows)) {
             if (command.startsWith("ATSP")) protocol = command.removePrefix("ATSP")
             if (command == "ATCAF0") uds = false
@@ -29,6 +29,46 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
             }
             add((if (command == "ATFCSD300000") "ATFCSD300010" else command) to raw)
             if (command == "ATSTFF" && uds) add("ATAT1" to "OK")
+            // Historic resources contain one completed silent CHANNEL SETUP.
+            // Additional attempts are explicitly synthetic silence, not a new
+            // physical recording or evidence that the ECU remains absent.
+            if (!uds && command.matches(Regex("[0-9A-F]{2}C000100003011")) && raw.trim() == "NO DATA")
+                repeat(3) { add(command to "NO DATA") }
+            // Three completed silent physical presence attempts are synthetic
+            // extensions; no extra request is inserted after pending/partial data.
+            if (uds && command == "3E00" && raw.trim() == "NO DATA")
+                repeat(2) { add(command to "NO DATA") }
+            // Completed command-level silence gets one additional synthetic
+            // attempt. Never extend a recorded pending or partial payload.
+            if (uds && VagReadRetry.enabled(command) && raw.trim() == "NO DATA")
+                add(command to "NO DATA")
+        }
+    })
+}
+
+/** Recorded responses are unchanged. Added idle A3/A1 exchanges explicitly
+ * model the verified control flow; they are not new vehicle observations. */
+internal fun withSyntheticTpKeepalives(rows: List<Pair<String, String>>): List<Pair<String, String>> {
+    var rawTp = true
+    var first = true
+    var peer = ""
+    return buildList {
+        for ((command, reply) in rows) {
+            if (command == "ATCAF0") rawTp = true
+            if (command == "ATCAF1") rawTp = false
+            if (command == "A00194FF82FF") {
+                peer = Regex("300(A1[0-9A-F]{10})").find(reply.filterNot { it.isWhitespace() })?.groupValues?.get(1).orEmpty()
+                first = true
+            }
+            if (rawTp && command.length % 2 == 0 &&
+                command.matches(Regex("1[0-9A-F][0-9A-F]{4}(10|1A|18|19|22|31|12)[0-9A-F]*"))) {
+                if (!first) {
+                    check(peer.isNotEmpty()) { "No recorded A1 for synthetic idle check" }
+                    add("A3" to "300$peer")
+                }
+                first = false
+            }
+            add(command to reply)
         }
     }
 }

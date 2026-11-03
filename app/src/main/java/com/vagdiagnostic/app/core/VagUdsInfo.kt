@@ -5,7 +5,7 @@ package com.vagdiagnostic.app.core
 object VagUdsInfo {
     enum class Field(val did: Int, val maxBytes: Int) {
         COMPONENT(0xF197, 128), SOFTWARE(0xF189, 32), ASAM(0xF19E, 128),
-        ASAM_REVISION(0xF1A2, 16), ACCESS_STATUS(0x0174, 4);
+        ASAM_REVISION(0xF1A2, 16), ACCESS_STATUS(0x0174, 1);
         val request: String get() = "22%04X".format(did)
     }
     enum class State { PRESENT, NO_DATA, REJECTED, INVALID }
@@ -22,7 +22,7 @@ object VagUdsInfo {
         require(reply.take(3) == listOf(0x62, field.did ushr 8, field.did and 255)) { "Ответ другому DID идентификации" }
         val body = reply.drop(3)
         if (field == Field.ACCESS_STATUS)
-            return if (body.size == 4) Value(State.PRESENT, raw = body.toList()) else Value(State.INVALID)
+            return if (body.size == 1) Value(State.PRESENT, raw = body.toList()) else Value(State.INVALID)
         if (body.isEmpty() || body.size > field.maxBytes) return Value(State.INVALID)
         val data = body.dropLastWhile { it == 0 || it == 0x20 }
         val whitespace = setOf(9, 10, 13)

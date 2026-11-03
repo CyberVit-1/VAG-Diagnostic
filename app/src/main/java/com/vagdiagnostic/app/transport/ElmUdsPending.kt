@@ -14,11 +14,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  * reception permits a late FirstFrame followed by explicit physical FC. */
 internal object ElmUdsPending {
     suspend fun read(engine: ElmEngine, target: VagOemReadOnly.Route, request: String,
-        initialRaw: String, timeoutMs: Long, initialPending: Int): List<Int> {
+        initialRaw: String?, timeoutMs: Long, initialPending: Int): List<Int> {
         val rx = requireNotNull(target.udsRx)
         requireNotNull(target.udsTx)
         val frames = VagIsoTpCollection(setOf(rx), request)
-        frames.accept(initialRaw)
+        if (initialRaw == null) frames.recordPending(rx, initialPending) else frames.accept(initialRaw)
         suspend fun ok(cmd: String) {
             val raw = engine.command(cmd, deferJournal = true).uppercase().replace(cmd, "").filterNot(Char::isWhitespace)
             if (raw != "OK") throw IOException("ELM отклонил настройку ожидания $cmd")
@@ -38,16 +38,24 @@ internal object ElmUdsPending {
                         // The current physical TX/header was established by Uds.open.
                         // Retain the same 11/29-bit address, never use functional FC.
                         frames.flowControlSent(rx)
-                        frames.accept(engine.command("3000100000000000", timeoutMs, deferJournal = true), "3000100000000000")
+                        val flowControl = if (engine.manualUds) ElmUdsRawTransaction.FLOW_CONTROL else "3000100000000000"
+                        frames.accept(engine.command(flowControl, timeoutMs, deferJournal = true), flowControl)
                     } else {
-                        if (++receives > (9 - initialPending).coerceAtLeast(1)) throw IOException("Превышен предел ожидания UDS")
+                        if (++receives > (9 - initialPending).coerceAtLeast(1)) throw VagProtocolFailure("Превышен предел ожидания UDS")
                         frames.accept(engine.receivePendingCanFrames(setOf(rx), timeoutMs, deferJournal = true), "ATMA")
                     }
                 }
                 @Suppress("UNREACHABLE_CODE") emptyList<Int>()
-            } ?: throw IOException("Истёк общий срок ожидания UDS")
+            } ?: throw VagProtocolFailure("Истёк общий срок ожидания UDS")
             return result
         } catch (cancel: CancellationException) { engine.close(); throw cancel }
+        catch (failure: VagProtocolFailure) {
+            engine.close()
+            // An expired pending transaction needs a fresh connection, not the
+            // completed-NO-DATA budget or a repeat on the old stream.
+            throw VagProtocolFailure("UDS продолжение не завершено: ${failure.message}", failure)
+        }
+        catch (failure: RuntimeException) { engine.close(); throw VagProtocolFailure("Повреждённое UDS продолжение", failure) }
         catch (failure: Exception) { engine.close(); throw IOException("UDS продолжение не завершено: ${failure.message}", failure) }
         finally { withContext(NonCancellable) { engine.flushJournal() } }
     }
