@@ -14,8 +14,9 @@ internal object ElmUdsCanConfiguration {
         ok(if (target.is29Bit) "ATSP7" else "ATSP6")
         ok("ATCFC0")
         if (engine.needsFlowControlReset) { ok("ATFCSM0"); engine.needsFlowControlReset = false }
-        val native = engine.nativeSegmentation?.enableRoute(target) == true
-        for (command in listOf("ATH1", "ATD0", if (native) "ATCAF1" else "ATCAF0", "ATV0", "ATCEA", "ATAT0")) ok(command)
+        val automatic = target.id in engine.automaticCanRoutes
+        val native = !automatic && engine.nativeSegmentation?.enableRoute(target) == true
+        for (command in listOf("ATH1", "ATD0", if (native || automatic) "ATCAF1" else "ATCAF0", "ATV0", "ATCEA", "ATAT0")) ok(command)
         if (target.is29Bit) {
             ok("ATCP%02X".format(tx ushr 24)); ok("ATSH%06X".format(tx and 0xFFFFFF))
             ok("ATCRA%08X".format(rx))

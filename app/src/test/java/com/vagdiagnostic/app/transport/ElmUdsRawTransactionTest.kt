@@ -104,8 +104,18 @@ class ElmUdsRawTransactionTest {
         val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
         assertEquals(listOf(0x59, 2, 0x8D), ElmUdsRawTransaction.read(engine, route, "19028D"))
     }
+    @Test fun exactQuestionMarkLeavesKnownPromptBoundaryForCapabilityFallback() = runBlocking {
+        val link = Link("023E00AAAAAAAAAA" to "?")
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        assertTrue(runCatching { ElmUdsRawTransaction.read(engine, gateway, "3E00") }.exceptionOrNull()
+            is ElmUdsRawTransaction.UnsupportedCommand)
+        assertFalse(link.closed)
+        assertTrue(engine.vehicleReady)
+        assertEquals("OK", engine.command("ATCAF1").trim())
+    }
+
     @Test fun mixedAdapterStatusAndPayloadCannotBecomeZeroDtcs() = runBlocking {
-        for (status in listOf("NO DATA", "CAN ERROR", "OK", "STOPPED")) {
+        for (status in listOf("NO DATA", "CAN ERROR", "OK", "STOPPED", "?")) {
             val link = Link("0319028DAAAAAAAA" to (status + "\r77A0359028D"))
             val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
             assertTrue(runCatching { ElmUdsRawTransaction.read(engine, gateway, "19028D") }.exceptionOrNull() is VagProtocolFailure)

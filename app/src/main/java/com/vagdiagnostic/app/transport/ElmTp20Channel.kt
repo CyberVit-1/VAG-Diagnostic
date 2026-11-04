@@ -21,7 +21,9 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
     class NoChannelResponse : ConnectionUnavailable("ECU не ответил на CHANNEL SETUP")
     /** Complete negative setup, not an ambiguous/broken stream. No channel exists. */
     class ChannelRejected(val opcode: Int) : ConnectionUnavailable("ECU отклонил CHANNEL SETUP: 0x%02X".format(opcode))
-    class ParametersUnavailable : ConnectionUnavailable("ECU не подтвердил параметры TP2.0 после ограниченных повторов")
+    class ParametersUnavailable(val setupOpcode: Int? = null) : ConnectionUnavailable(
+        "ECU не подтвердил параметры TP2.0 после ограниченных повторов" +
+            (setupOpcode?.let { "; последний CHANNEL SETUP: 0x%02X".format(it) } ?: ""))
     /** Valid full application reply followed by a clean peer close. The stream
      * boundary is known; another request needs a new channel, not a retransmit. */
     class GracefullyClosedChannel : IllegalStateException("ECU завершил канал после полного ответа")
@@ -85,7 +87,7 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
             val parameters = negotiateParameters(destination, d)
             if (parameters == null) {
                 close()
-                if (connectionAttempt == 1) throw ParametersUnavailable()
+                if (connectionAttempt == 1) throw ParametersUnavailable(d[1])
                 continue
             }
             responseMs = timingMs(parameters[2])

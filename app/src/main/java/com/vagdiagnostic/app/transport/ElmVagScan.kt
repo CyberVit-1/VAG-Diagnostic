@@ -575,6 +575,15 @@ object ElmVagScan {
                 event("VAG_DTC_%02X".format(id), "CAN ERROR; остальные ECU после восстановления соединения", "INCOMPLETE")
                 restoreConnection(route.key, can)
             }
+            catch (unsupported: ElmUdsRawTransaction.UnsupportedCommand) {
+                completedFaults?.takeIf { !faultsPublished }?.let { publishFaults(it) }
+                if (completedFaults == null) failed = true
+                onUnit(unit.copy(state = if (completedFaults != null) ReadState.COMPLETE else
+                    if (unit.source == "RESPONSE") ReadState.PARTIAL else ReadState.NO_RESPONSE,
+                    note = if (completedFaults != null) "DTC прочитаны; дополнительные данные не подтверждены: ${unsupported.message}"
+                        else "DTC не подтверждены: ${unsupported.message}"))
+                event("VAG_ADAPTER_COMMAND_REJECTED", "${route.key}: ${unsupported.message}", "INCOMPLETE")
+            }
             catch (protocolFailure: VagProtocolFailure) {
                 completedFaults?.takeIf { !faultsPublished }?.let { publishFaults(it) }
                 onUnit(unit.copy(state = if (completedFaults != null) ReadState.COMPLETE else
@@ -972,10 +981,21 @@ object ElmVagScan {
             require(ElmUdsReadRequests.allowed(command))
             val target = requireNotNull(route)
             if (engine.nativeSegmentation?.enabled == true) return ElmUdsNativeDriver.read(engine, target, command, pendingMs)
-            if (engine.manualUds) return ElmUdsRawTransaction.read(engine, target, command, pendingMs, automaticFlowControl = true)
+            if (engine.manualUds && target.id !in engine.automaticCanRoutes) {
+                try { return ElmUdsRawTransaction.read(engine, target, command, pendingMs, automaticFlowControl = true) }
+                catch (unsupported: ElmUdsRawTransaction.UnsupportedCommand) {
+                    // A complete '?' is an adapter capability refusal, not an
+                    // unfinished ECU reply. Configure the already-supported CAF1
+                    // path once for this route on this physical connection.
+                    engine.automaticCanRoutes += target.id
+                    configure(target)
+                    return readOrNoDataOnce(command, allowNoData)
+                }
+            }
             val result = withTimeoutOrNull(20000) {
                     val rx = requireNotNull(target.udsRx)
                     var raw = execute(command, 8500)
+                    if (raw.trim() == "?") throw ElmUdsRawTransaction.UnsupportedCommand(command)
                     var pending = 0
                     while (true) {
                         currentCoroutineContext().ensureActive()

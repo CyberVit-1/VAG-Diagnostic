@@ -53,6 +53,9 @@ jobs:
       - name: JVM unit tests
         run: gradle --no-daemon :app:testDebugUnitTest --stacktrace
 
+      - name: Record actual unit-test totals
+        run: python3 tools/summarize_unit_tests.py
+
       - name: Reject oversized protocol coroutine DEX methods
         run: python3 tools/check_scan_dex_budget.py app/build/outputs/apk/debug/app-debug.apk
 
@@ -60,7 +63,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: VAG-Diagnostic-v0.3.11-debug-apk
+          name: VAG-Diagnostic-v0.3.12-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30

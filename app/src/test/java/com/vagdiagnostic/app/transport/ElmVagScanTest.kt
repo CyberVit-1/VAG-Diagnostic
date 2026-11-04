@@ -25,7 +25,9 @@ class ElmVagScanTest {
         val automaticRawFlow: Boolean = true, val nativeBanner: String = "?",
         val nativeRejected: Set<String> = emptySet(), val includeConvenience: Boolean = false,
         val vtBanner: String = "?", val nativeAssembledReplies: Boolean = true,
-        val nativeProbeFailure: Boolean = false, val latePendingFirstFrame: Boolean = false) : ElmLink {
+        val nativeProbeFailure: Boolean = false, val latePendingFirstFrame: Boolean = false,
+        val rejectRaw29: Boolean = false, val automatic29Status: String? = null,
+        val automatic29StatusCommands: Set<String> = setOf("3E00", "1003", "22F187", "19028D", "1001")) : ElmLink {
         override val label = "Scripted UDS link"
         val sent = mutableListOf<String>()
         val wireSent = mutableListOf<String>()
@@ -60,10 +62,19 @@ class ElmVagScanTest {
         override suspend fun write(bytes: ByteArray) {
             val wire = bytes.toString(Charsets.US_ASCII).trim()
             wireSent += wire
+            // The rejection is from the real trace; following replies are synthetic.
+            if (rejectRaw29 && receiveId.length == 8 && wire.matches(Regex("0[1-7][0-9A-F]{14}"))) {
+                for (b in "?\r>".toByteArray()) queue.add(b.toInt() and 255)
+                return
+            }
             if (rawCan && wire == ElmUdsRawTransaction.FLOW_CONTROL) {
                 assertTrue("FC requires an outstanding FirstFrame", rawTail.isNotEmpty())
                 for (b in (rawTail + "\r>").toByteArray()) queue.add(b.toInt() and 255)
                 rawTail = ""
+                return
+            }
+            if (automatic29Status != null && receiveId.length == 8 && wire in automatic29StatusCommands) {
+                for (b in (automatic29Status + "\r>").toByteArray()) queue.add(b.toInt() and 255)
                 return
             }
             val command = if (nativeTx && wire.matches(Regex("(?:[0-9A-F]{2}){2,7}1"))) wire.dropLast(1)
@@ -402,6 +413,49 @@ class ElmVagScanTest {
         assertEquals("Gateway header must survive its completed discovery/read boundary", 1, link.wireSent.count { it == "ATSH710" })
         assertEquals("Every actual ECU DTC request must still be transmitted", 2, link.wireSent.count { it == "0319028DAAAAAAAA" })
     }
+    @Test fun rejectedRaw29CommandUsesConfirmedAutomaticFormattingWithoutReconnect() = runBlocking {
+        val link = UdsLink(rawCan = true, includeConvenience = true, rejectRaw29 = true,
+            dtcReply = "59028D12345608")
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-46").state)
+        assertEquals("123456", units.getValue("VAG-46").dtcs.single().code)
+        val rejected = link.wireSent.lastIndexOf("023E00AAAAAAAAAA")
+        assertTrue(link.wireSent.drop(rejected + 1).contains("ATCAF1"))
+        assertTrue(link.wireSent.drop(rejected + 1).contains("3E00"))
+        assertEquals(1, link.wireSent.count { it == "ATZ" })
+        assertFalse(link.wireSent.drop(rejected + 1).contains("0319028DAAAAAAAA"))
+    }
+
+    @Test fun rejectedOrSilentAutomaticFallbackCannotBecomeZeroDtcOrReconnectLoop() = runBlocking {
+        for (status in listOf("?", "NO DATA")) {
+            val link = UdsLink(rawCan = true, includeConvenience = true, rejectRaw29 = true,
+                automatic29Status = status)
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertNotEquals(status, ReadState.COMPLETE, units.getValue("VAG-46").state)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals(1, link.wireSent.count { it == "ATZ" })
+        }
+    }
+
+    @Test fun adapterRefusalAfterDtcPreservesConfirmedFaultsAndReturnsPartialMetadata() = runBlocking {
+        val link = UdsLink(rawCan = true, includeConvenience = true, rejectRaw29 = true,
+            automatic29Status = "?", automatic29StatusCommands = setOf("22F197"), dtcReply = "59028D12345608")
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false)
+        val unit = units.getValue("VAG-46")
+        assertEquals(ReadState.COMPLETE, unit.state)
+        assertEquals("123456", unit.dtcs.single().code)
+        assertTrue(unit.note, unit.note.contains("Адаптер"))
+        assertEquals(1, link.wireSent.count { it == "ATZ" })
+    }
+
     @Test fun nativeAdapterReadsElevenAndTwentyNineBitEcusWithOneResponseRequests() = runBlocking {
         for (vt in listOf(false, true)) {
         val link = UdsLink(rawCan = true, nativeBanner = if (vt) "?" else "STN1170 v5.6.5", includeEngine = true,

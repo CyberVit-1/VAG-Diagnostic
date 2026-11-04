@@ -13,6 +13,8 @@ import java.io.IOException
  * CAF0 and the selected FC mode first. This helper never chooses another ECU
  * or retries a request. With CFC1, only the adapter emits flow control. */
 internal object ElmUdsRawTransaction {
+    /** Complete adapter rejection before any ECU/ISO-TP response. */
+    class UnsupportedCommand(val request: String? = null) : IllegalStateException("Адаптер отклонил CAN запрос" + (request?.let { ": $it" } ?: ""))
     const val FLOW_CONTROL = "300010AAAAAAAAAA"
     suspend fun read(engine: ElmEngine, target: VagOemReadOnly.Route, request: String,
         pendingMs: Long = 5250, automaticFlowControl: Boolean = false): List<Int>? {
@@ -40,6 +42,7 @@ internal object ElmUdsRawTransaction {
                 val initial = send(wire)
                 val rows = initial.uppercase().replace('>', '\n').replace('\r', '\n').split('\n')
                     .map { it.filterNot(Char::isWhitespace) }.filter { it.isNotEmpty() && it != wire }
+                if (rows == listOf("?")) throw UnsupportedCommand(request)
                 if (rows == listOf("NODATA")) { completedSilence = true; return@withTimeoutOrNull null }
                 accept(initial, wire)
                 var receives = 0
@@ -71,6 +74,7 @@ internal object ElmUdsRawTransaction {
             } ?: if (completedSilence) null
                 else throw VagProtocolFailure("Не завершён RAW UDS ответ")
         } catch (cancel: CancellationException) { engine.close(); throw cancel }
+        catch (unsupported: UnsupportedCommand) { throw unsupported }
         catch (can: ElmCompletedCanError) {
             if (frames.pending.isNotEmpty() || frames.unfinished.isNotEmpty()) {
                 engine.close()

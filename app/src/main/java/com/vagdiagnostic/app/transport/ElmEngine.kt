@@ -43,6 +43,7 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
     private val lock = Mutex()
     private val confirmedSettings = ElmSettingCache()
     internal var nativeSegmentation: ElmNativeSegmentation? = null
+    internal val automaticCanRoutes = mutableSetOf<Int>()
     // Custom FC from a 29-bit OEM route must not leak into later 11-bit UDS.
     internal var needsFlowControlReset = false
     var protocol: String = "Не определён"
@@ -135,6 +136,7 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
             text.matches(Regex("STCFCPA(?:[0-9A-F]{3},[0-9A-F]{3}|[0-9A-F]{8},[0-9A-F]{8})", RegexOption.IGNORE_CASE)) ||
             text.matches(Regex("VTSWGP (?:GR1, BZF1|GR0|GT[01])|VTFCTRA (?:[0-9A-F]{3}, [0-9A-F]{3}|[0-9A-F]{8}, [0-9A-F]{8})|VTTOST REP:[0-9]{1,4}", RegexOption.IGNORE_CASE))) { "Недопустимая команда" }
         val command = text.uppercase()
+        if (command in setOf("ATZ", "ATD", "ATWS")) automaticCanRoutes.clear()
         confirmedSettings.beforeCommand(command)
         if (command.matches(Regex("ATSP[0-9A-C]"))) nativeSegmentation?.onProtocolSelection()
         val start = System.nanoTime()
@@ -309,5 +311,5 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
         }
     }
 
-    fun close() { nativeSegmentation = null; confirmedSettings.clear(); vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); needsFlowControlReset = false; link.close() }
+    fun close() { automaticCanRoutes.clear(); nativeSegmentation = null; confirmedSettings.clear(); vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); needsFlowControlReset = false; link.close() }
 }
