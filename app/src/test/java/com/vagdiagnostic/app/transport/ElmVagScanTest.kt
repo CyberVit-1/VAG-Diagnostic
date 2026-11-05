@@ -190,7 +190,7 @@ class ElmVagScanTest {
         val closeAfterReplyAt: Int = 1, val silentEngineSessions: Int = 0,
         val identityByDestination: Map<Int, String> = emptyMap(), val silentDestinations: Set<Int> = emptySet(),
         val centralSetupReplies: List<String> = emptyList(), val dtcReplies: List<String> = emptyList(),
-        val obdReply: String = "7E8064100BE3EA813") : ElmLink {
+        val obdReply: String = "7E8064100BE3EA813", val initialCanProtocol: String = "6") : ElmLink {
         override val label = "Scripted ELM"
         val sent = mutableListOf<String>()
         private val bytes = ArrayDeque<Int>()
@@ -204,7 +204,7 @@ class ElmVagScanTest {
         private var waitingForClose = false
         private var pollsBeforeClose = 0
         private var resets = 0
-        private var canProtocol = "6"
+        private var canProtocol = initialCanProtocol
         private var waitingForCapability = false
         private var engineSessionRequests = 0
         val presenceReceivers = mutableListOf<String>()
@@ -1718,6 +1718,22 @@ class ElmVagScanTest {
         assertEquals(2, link.addressedRequests.count { it == ("778" to "1003") })
         assertEquals(2, link.addressedRequests.count { it == ("778" to "22F187") })
         assertFalse(link.addressedRequests.contains("778" to "19028D"))
+    }
+    @Test fun gatewayDiscoveryDoesNotRequireALegislatedElevenBitObdPair() = runBlocking {
+        for (protocol in listOf("7", "8", "9", "?")) {
+            val link = Link(obdReply = "18DAF110064100BE3EA813", initialCanProtocol = protocol)
+            val engine = ElmEngine(link, { _, _, _, _ -> })
+            engine.connect()
+            val plan = VagOemScanPlan.create(engine.isCanVehicle, null, emptySet())
+            assertTrue("CAN $protocol must admit fixed Gateway discovery", plan.attemptGateway)
+            val units = linkedMapOf<String, ControlUnit>()
+            val outcome = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                allowCandidateFallback = plan.profile!!.allowCandidateFallback, discoverAdditionalUnits = false)
+            assertTrue(outcome.note, outcome.listConfirmed)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertTrue(link.sent.contains("ATSP6"))
+            assertFalse(link.sent.contains("ATSH7E0"))
+        }
     }
     @Test fun additionalDiscoveryCompletesBeforeTheFirstDtcRead() = runBlocking {
         val link = Link(installedReply = "5A9F091900000109000001",

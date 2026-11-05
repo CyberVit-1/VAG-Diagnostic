@@ -17,7 +17,7 @@ import com.vagdiagnostic.app.core.DiagnosticLogRedactor
 import com.vagdiagnostic.app.core.ElmFrames
 import com.vagdiagnostic.app.core.ObdDecoder
 import com.vagdiagnostic.app.core.ObdMode09Readiness
-import com.vagdiagnostic.app.core.VagTp20Gateway
+import com.vagdiagnostic.app.core.VagOemScanPlan
 import com.vagdiagnostic.app.core.ReadState
 import com.vagdiagnostic.app.data.ConnectionSettings
 import com.vagdiagnostic.app.data.DiagnosticDatabase
@@ -28,7 +28,6 @@ import com.vagdiagnostic.app.data.Settings
 import com.vagdiagnostic.app.transport.BleNusLink
 import com.vagdiagnostic.app.transport.BluetoothSppLink
 import com.vagdiagnostic.app.transport.ElmEngine
-import com.vagdiagnostic.app.transport.ElmAddressedObdProbe
 import com.vagdiagnostic.app.transport.ElmVagScan
 import com.vagdiagnostic.app.transport.ElmScanSession
 import com.vagdiagnostic.app.transport.WifiTcpLink
@@ -300,25 +299,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             elapsedMs = 0,
                             outcome = if (check?.confirmed == true) "CONFIRMED" else "INCONCLUSIVE"
                         ))
-                        // Only the KNOWN legislated OBD physical pair 7E0->7E8.
-                        // No VAG Gateway address is inferred. Probe all transports
-                        // with the same code and a disposable, isolated ELM link.
-                        val confirmedPhysicalEcu = session.current.observedCanResponderIds.firstOrNull { id ->
-                            Regex("^7E[8-F]$").matches(id)
-                        }
                         // Only a structurally validated VIN contributes the
                         // two-character chassis marker. Full VIN is display-only;
                         // never copy it to summary events or saved scan results.
-                        // Other recognized VAG chassis require a genuine list;
-                        // they never inherit the legacy candidate queue.
-                        val tp20Profile = confirmedPhysicalEcu?.let { ecu ->
-                            VagTp20Gateway.discoveryProfile(vinResponse, ecu, supported.responders)
-                        }
-                        if (confirmedPhysicalEcu != null &&
-                            session.current.protocol in setOf("6", "A6")
-                        ) {
+                        // A fixed candidate fallback needs verified identity;
+                        // unknown platforms must provide their actual ECU list.
+                        val oemPlan = VagOemScanPlan.create(session.current.isCanVehicle,
+                            vinResponse, supported.responders)
+                        val tp20Profile = oemPlan.profile
+                        if (tp20Profile != null) {
                             _state.value = _state.value.copy(
-                                current = "OBD-II: адресная ISO-TP проверка"
+                                current = "VAG: подготовка опроса блоков"
                             )
                             session.close()
                             connectedSettings = null
@@ -328,31 +319,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                 disposable = diagnosticEngine
                                 engine = diagnosticEngine
                                 diagnosticEngine.connect()
-                                val addressed = ElmAddressedObdProbe.runOnDisposableEngine(
-                                    diagnosticEngine, confirmedPhysicalEcu,
-                                    readVin = confirmedPhysicalEcu in check?.verified.orEmpty()
-                                )
-                                _state.value = _state.value.copy(
-                                    isoTpReadiness = resultText + "; " +
-                                        if (addressed.verified) "адресный OBD ISO-TP подтверждён"
-                                        else "адресный OBD ISO-TP не подтверждён"
-                                )
+                                if (!diagnosticEngine.vehicleReady || diagnosticEngine.isCanVehicle != true)
+                                    throw java.io.IOException("CAN-связь после нового подключения не подтверждена")
+                                // OEM discovery proves its own channel/list.
+                                // Do not reread VIN through an unrelated physical
+                                // OBD pair before attempting the fixed Gateway.
                                 db.journal().insert(JournalEntity(
                                     timestamp = System.currentTimeMillis(),
                                     connection = cfg.type,
-                                    command = "ADDRESSED_OBD_ISOTP",
-                                    raw = addressed.journalSummary(), elapsedMs = 0,
-                                    outcome = if (addressed.verified) "CONFIRMED"
-                                        else "INCONCLUSIVE"
+                                    command = "VAG_SCAN_ADMISSION",
+                                    raw = "CAN подтверждён; фиксированная проверка Gateway; наличие ECU и DTC требуют собственных ответов",
+                                    elapsedMs = 0, outcome = "ATTEMPT_ALLOWED"
                                 ))
-                                if (!addressed.physicalResponseConfirmed) {
-                                    incompleteModes = true
-                                    val note = "VAG: OEM опрос не начат; адресный ответ OBD не подтверждён"
-                                    _state.value = _state.value.copy(isoTpReadiness = _state.value.isoTpReadiness + "; " + note)
-                                    db.journal().insert(JournalEntity(timestamp = System.currentTimeMillis(), connection = cfg.type,
-                                        command = "VAG_SCAN_SKIPPED", raw = note, elapsedMs = 0, outcome = "INCOMPLETE"))
-                                }
-                                if (addressed.physicalResponseConfirmed && tp20Profile != null) {
+                                run {
                                     _state.value = _state.value.copy(
                                         current = "VAG: подключение, список блоков и чтение DTC"
                                     )
@@ -407,14 +386,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                 throw cancel
                             } catch (problem: Exception) {
                                 incompleteModes = true
-                                val note = "Адресная OBD-проверка: " +
+                                val note = "Подготовка VAG-опроса: " +
                                     (problem.message ?: problem::class.java.simpleName)
                                 _state.value = _state.value.copy(
                                     isoTpReadiness = resultText + "; " + note
                                 )
                                 db.journal().insert(JournalEntity(
                                     timestamp = System.currentTimeMillis(),
-                                    connection = cfg.type, command = "ADDRESSED_OBD_ISOTP",
+                                    connection = cfg.type, command = "VAG_SCAN_PREFLIGHT",
                                     raw = note, elapsedMs = 0, outcome = "INCONCLUSIVE"
                                 ))
                             } finally {
