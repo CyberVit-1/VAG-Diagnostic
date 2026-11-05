@@ -8,7 +8,7 @@ object VagUdsInfo {
         ASAM_REVISION(0xF1A2, 16), ACCESS_STATUS(0x0174, 1);
         val request: String get() = "22%04X".format(did)
     }
-    enum class State { PRESENT, NO_DATA, REJECTED, INVALID }
+    enum class State { PRESENT, NO_DATA, REJECTED, INVALID, ADAPTER_REJECTED }
     data class Value(val state: State, val text: String? = null, val raw: List<Int>? = null, val nrc: Int? = null)
     val scanFields = listOf(Field.COMPONENT, Field.SOFTWARE, Field.ASAM)
 
@@ -33,10 +33,17 @@ object VagUdsInfo {
 
     suspend fun collect(fields: List<Field>, onValue: suspend (Field, Value) -> Unit = { _, _ -> },
         read: suspend (String) -> List<Int>?): Map<Field, Value> {
+        return collectValues(fields, onValue) { field -> decode(field, read(field.request)) }
+    }
+
+    /** Allows transport-specific, completed refusal outcomes without fabricating
+     * an ECU negative response. Physical IO and malformed replies still propagate. */
+    suspend fun collectValues(fields: List<Field>, onValue: suspend (Field, Value) -> Unit = { _, _ -> },
+        read: suspend (Field) -> Value): Map<Field, Value> {
         require(fields.distinct().size == fields.size)
         val result = linkedMapOf<Field, Value>()
         for (field in fields) {
-            val value = decode(field, read(field.request))
+            val value = read(field)
             result[field] = value
             onValue(field, value)
         }

@@ -4,6 +4,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VagOemReadOnlyTest {
+    @Test fun repeatedCodeKeepsFirstStatusWithinOneEcuWithoutSalvagingMalformedTail() {
+        val rawKwp = VagOemReadOnly.kwpFaults(VagOemReadOnly.bytes("5802051924051901"), false)
+        assertEquals(2, rawKwp.values.size)
+        val kwp = rawKwp.deduplicated()
+        assertEquals(1, kwp.values.size)
+        assertEquals("051924", kwp.values.single().raw)
+        val rawUds = VagOemReadOnly.udsFaults(VagOemReadOnly.bytes("590219096D0801096D0808"))
+        assertEquals(2, rawUds.values.size)
+        val uds = rawUds.deduplicated()
+        assertEquals(1, uds.values.size)
+        assertEquals("096D08", uds.values.single().code)
+        assertTrue(uds.values.single().statusText!!.contains("0x01"))
+        assertTrue(runCatching {
+            VagOemReadOnly.udsFaults(VagOemReadOnly.bytes("590219096D0801096D08"))
+        }.isFailure)
+    }
     @Test fun actual04A1RecordsUseThirdBytePresenceRatherThanFourthByte() {
         val found = VagOemReadOnly.installed04A1(VagOemReadOnly.bytes("6204A101010100111500000202010003030100"))
         assertEquals(listOf(1, 2, 3), found.map { it.id })

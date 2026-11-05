@@ -63,7 +63,11 @@ object VagOemReadOnly {
         val tpDestination: Int? = null, val extraStatus: Int? = null,
         val observations: List<List<Int>> = emptyList(), val routeConflict: Boolean = false,
         val mappedRoute: Route? = null, val listOwners: Set<Int> = setOf(0x19))
-    data class Faults(val values: List<Dtc>, val service: String)
+    data class Faults(val values: List<Dtc>, val service: String) {
+        /** Operation-level policy: retain the first record for each code in this
+         * ECU, without combining status bits. Raw decoders keep all records. */
+        fun deduplicated(): Faults = copy(values = values.distinctBy { it.code })
+    }
     class ServiceRejected(val service: Int, val nrc: Int) :
         IllegalStateException("Сервис %02X: NRC %02X".format(service, nrc))
 

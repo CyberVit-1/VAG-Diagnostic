@@ -93,7 +93,9 @@ class ElmVehicleReplayTest {
         val link = Replay(fixture, stop)
         val engine = ElmEngine(link, { _, _, _, _ -> })
         val units = linkedMapOf<String, ControlUnit>()
-        val error = runCatching { ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false) }.exceptionOrNull()
+        // This historical wire fixture contains no supplemental discovery.
+        val error = runCatching { ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false) }.exceptionOrNull()
         assertTrue(error.toString(), error is IOException)
         assertEquals(stop, link.index)
         assertEquals("24C000100003011", link.sent.last())

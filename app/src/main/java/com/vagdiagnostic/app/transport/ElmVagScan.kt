@@ -85,7 +85,6 @@ object ElmVagScan {
         private var gatewayUnit: ControlUnit? = null
         private val queue = mutableListOf<Int>()
         private var next = 0
-        private var supplementalAttempted = false
         private val retriedAfterClose = mutableSetOf<Int>()
 
         private suspend fun restoreConnection(key: String, cause: Throwable) {
@@ -178,7 +177,7 @@ object ElmVagScan {
         }
         private suspend fun collectDetails(id: Int, fields: List<VagUdsInfo.Field>, read: suspend (String) -> List<Int>?) {
             if (!detailsAttempts.add(id)) return
-            val result = try { VagUdsInfo.collect(fields, onValue = { field, value ->
+            val result = try { VagUdsInfo.collectValues(fields, onValue = { field, value ->
                 // A later timeout/cancellation must not discard earlier complete fields.
                 val saved = details[id].orEmpty() + (field to value)
                 details[id] = saved
@@ -186,7 +185,12 @@ object ElmVagScan {
                 if (id == 0x19) identity = identities[id]
                 event("VAG_ECU_INFO_%02X_%s".format(id, field.name), value.state.name,
                     if (value.state == VagUdsInfo.State.PRESENT) "PARSED" else "INCOMPLETE")
-            }, read = read) }
+            }, read = { field ->
+                try { VagUdsInfo.decode(field, read(field.request)) }
+                catch (_: ElmUdsRawTransaction.UnsupportedCommand) {
+                    VagUdsInfo.Value(VagUdsInfo.State.ADAPTER_REJECTED)
+                }
+            }) }
                 catch (bad: IllegalArgumentException) { throw IOException("Неверная идентификация ECU: ${bad.message}", bad) }
             event("VAG_ECU_INFO_%02X".format(id), result.entries.joinToString { "${it.key.name}: ${it.value.state}" },
                 if (result.values.all { it.state == VagUdsInfo.State.PRESENT }) "PARSED" else "INCOMPLETE")
@@ -223,6 +227,7 @@ object ElmVagScan {
             // Determine the chassis from ECU09's own identity, never from VIN or
             // the Gateway part. An unconfirmed central ECU cannot select it.
             if (!discoverAdditionalUnits || !listConfirmed || 0x61 in queue) return
+            if (!identifyEcus) identifyCentral(force = true)
             val centralProtocol = confirmedProtocols[0x09]
             val central = installed?.firstOrNull { it.id == 0x09 }?.mappedRoute
                 ?: VagOemReadOnly.routes.getValue(0x09)
@@ -263,7 +268,10 @@ object ElmVagScan {
                 withTp(extra) { channel ->
                     // A matching complete positive or final diagnostic rejection
                     // is response evidence. A quiet live channel alone is not.
-                    channel.requestMessages("1A9B")
+                    // The discovery procedure uses the same identity cache as
+                    // the later full scan. Do not repeat a completed read merely
+                    // because this ECU was added outside the Gateway list.
+                    tpIdentity(0x61, channel)
                     answered = true
                 }
             } catch (cancel: CancellationException) { throw cancel }
@@ -285,8 +293,8 @@ object ElmVagScan {
             }
         }
 
-        private suspend fun identifyCentral() {
-            if (identifyEcus) {
+        private suspend fun identifyCentral(force: Boolean = false) {
+            if (identifyEcus || force) {
                 val centralEntry = installed?.firstOrNull { it.id == 0x09 }
                 val central = centralEntry?.mappedRoute ?: VagOemReadOnly.routes.getValue(0x09)
                 val routeValid = centralEntry?.routeConflict != true &&
@@ -423,6 +431,12 @@ object ElmVagScan {
                     var result: VagOemReadOnly.Faults? = null
                     withTp(route) { channel ->
                         confirmedConnection(Protocol.TP20)
+                        if (identifyEcus) try {
+                            tpIdentity(id, channel)
+                            if (id in udsInfoOverTp) collectDetails(id, VagUdsInfo.scanFields) { channel.request(it) }
+                        } catch (missing: ElmTp20Channel.NoApplicationResponse) {
+                            throw OptionalReadUnavailable(missing)
+                        }
                         val powertrain = if (identifyEcus) {
                             try {
                                 if (saeAttempts.add(id)) saeSupport[id] = VagKwpCapabilities.supportsSaeDtc(channel.request(VagKwpCapabilities.REQUEST))
@@ -436,12 +450,10 @@ object ElmVagScan {
                             saeSupport[id] == true
                         } else id == 1 || id == 2 // Recorded pre-capability test sequences only.
                         result = VagOemReadOnly.kwpFaultMessages(
-                            channel.requestMessages(if (powertrain) "1800FF00" else "1802FF00"), powertrain)
+                            channel.requestMessages(if (powertrain) "1800FF00" else "1802FF00"), powertrain).deduplicated()
                         completedFaults = result
                         publishFaults(requireNotNull(result))
                         if (identifyEcus) try {
-                            tpIdentity(id, channel)
-                            if (id in udsInfoOverTp) collectDetails(id, VagUdsInfo.scanFields) { channel.request(it) }
                             readDtcDetails(VagDtcDetails.Protocol.KWP, requireNotNull(result)) { channel.requestDetails(it) }
                         } catch (missing: ElmTp20Channel.NoApplicationResponse) {
                             event("VAG_ECU_INFO_%02X".format(id), "Дополнительный ответ не получен; основные DTC сохранены", "INCOMPLETE")
@@ -474,18 +486,22 @@ object ElmVagScan {
                         try {
                             channel.open(path)
                             confirmedConnection(Protocol.UDS)
-                            // Publish the useful result in this same connection
-                            // before optional identification and enrichment.
-                            val faults = VagOemReadOnly.udsFaults(channel.read("19028D"))
-                            completedFaults = faults
-                            publishFaults(faults)
+                            // Match the per-ECU source order: identification first,
+                            // then DTC, then DTC-specific enrichment in this session.
                             if (identifyEcus && id !in identityAttempts) {
                                 identityAttempts += id
-                                identities[id] = channel.identifyPart()
+                                identities[id] = try { channel.identifyPart() }
+                                    catch (unsupported: ElmUdsRawTransaction.UnsupportedCommand) {
+                                        event("VAG_ECU_IDENTITY_%02X".format(id), unsupported.message.orEmpty(), "ADAPTER_REJECTED")
+                                        null
+                                    }
                             }
                             if (identifyEcus) collectDetails(id, VagUdsInfo.scanFields + VagUdsInfo.Field.ACCESS_STATUS) {
                                 channel.readOptionalInfo(it)
                             }
+                            val faults = VagOemReadOnly.udsFaults(channel.read("19028D")).deduplicated()
+                            completedFaults = faults
+                            publishFaults(faults)
                             if (identifyEcus && faults.values.isNotEmpty()) {
                                 // This DTC enrichment requires ASAM and revision. A
                                 // failed optional preflight is not a cached success.
@@ -794,26 +810,18 @@ object ElmVagScan {
                     source = if (id in confirmedProtocols) "RESPONSE" else
                         if (entry?.listOwners?.any { it != 0x19 } == true) "INSTALLATION_LIST" else "GATEWAY"))
             }
-            // Gateway's own confirmed transport does not need the chassis probe
-            // used to select protocols for other ECUs. Publish its DTC first.
-            if (queue.firstOrNull() == 0x19 && 0x19 in confirmedProtocols) {
-                next = 1
-                scanUnit(0x19)
-            }
+            // Complete the bounded installation-list procedure before entering
+            // the per-ECU info/DTC loop. Additional ECU discovery is not a second
+            // pass after the results; each listed ECU is then read in one turn.
             identifyCentral()
-            while (true) {
+            discoverAdditional()
+            while (next < queue.size) {
                 currentCoroutineContext().ensureActive()
-                if (next == queue.size) {
-                    if (supplementalAttempted) break
-                    supplementalAttempted = true
-                    discoverAdditional()
-                    if (next == queue.size) break
-                }
                 val id = queue[next++]
                 currentCoroutineContext().ensureActive()
                 scanUnit(id)
             }
-            // DTC results have already been checkpointed before optional metadata.
+            // Annotate relationships only; each ECU retains its own DTC result.
             for (unit in observedUnits.values.toList()) {
                 val host = VagDiagnosticTopology.host(unit, observedUnits, identities) ?: continue
                 onUnit(unit.copy(diagnosticHost = host.address, hostReason = host.reason))
