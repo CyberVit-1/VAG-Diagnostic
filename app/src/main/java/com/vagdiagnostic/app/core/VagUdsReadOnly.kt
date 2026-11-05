@@ -58,7 +58,11 @@ object VagUdsReadOnly {
             return DtcReply.Invalid(ecu, "Неполная запись UDS DTC (3 байта кода + статус)")
         }
         val mask = byte(2)
-        val faults = (3 until payload.size step 4).map { i ->
+        // The complete record structure is checked above. The reserved zero
+        // code is not a DTC; preserve nonzero records irrespective of status.
+        val faults = (3 until payload.size step 4).filter { i ->
+            byte(i) != 0 || byte(i + 1) != 0 || byte(i + 2) != 0
+        }.map { i ->
             Fault(
                 raw24 = "%02X%02X%02X".format(byte(i), byte(i + 1), byte(i + 2)),
                 rawStatus = byte(i + 3),

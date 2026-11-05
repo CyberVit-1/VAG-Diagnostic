@@ -8,7 +8,7 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
     var tx = ""
     var custom = false
     return withSyntheticTpKeepalives(buildList {
-        for ((command, raw) in withoutLegacySilentProbes(rows)) {
+        for ((command, raw) in withExplicit29BitHeaderOrder(withoutLegacySilentProbes(rows))) {
             if (command.startsWith("ATSP")) protocol = command.removePrefix("ATSP")
             if (command == "ATCAF0") uds = false
             if (command == "ATCAF1") uds = true
@@ -91,4 +91,19 @@ private fun withoutLegacySilentProbes(rows: List<Pair<String, String>>): List<Pa
         removed += start until end
     }
     return rows.filterIndexed { index, _ -> index !in removed }
+}
+
+/** Synthetic configuration order only; recorded command/reply rows and ECU
+ * payloads are not edited. Swap only adjacent successful CP/SH confirmations. */
+internal fun withExplicit29BitHeaderOrder(rows: List<Pair<String, String>>): List<Pair<String, String>> = buildList {
+    var i = 0
+    while (i < rows.size) {
+        val first = rows[i]
+        val second = rows.getOrNull(i + 1)
+        if (first.first.matches(Regex("ATCP[0-9A-F]{2}")) &&
+            second?.first?.matches(Regex("ATSH[0-9A-F]{6}")) == true &&
+            first.second.trim() == "OK" && second.second.trim() == "OK") {
+            add(second); add(first); i += 2
+        } else { add(first); i++ }
+    }
 }

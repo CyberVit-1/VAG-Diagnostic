@@ -18,7 +18,7 @@ internal object ElmUdsCanConfiguration {
         val native = !automatic && engine.nativeSegmentation?.enableRoute(target) == true
         for (command in listOf("ATH1", "ATD0", if (native || automatic) "ATCAF1" else "ATCAF0", "ATV0", "ATCEA", "ATAT0")) ok(command)
         if (target.is29Bit) {
-            ok("ATCP%02X".format(tx ushr 24)); ok("ATSH%06X".format(tx and 0xFFFFFF))
+            engine.configureCanHeader29(tx)
             ok("ATCRA%08X".format(rx))
             if (engine.command("ATDPN").trim().uppercase() !in setOf("7", "A7"))
                 throw IOException("ELM не подтвердил CAN 7")

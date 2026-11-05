@@ -42,6 +42,7 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
     fun idleMs(): Long = lastCommandNanos?.let { (clockNanos() - it).coerceAtLeast(0L) / 1_000_000L } ?: 0L
     private val lock = Mutex()
     private val confirmedSettings = ElmSettingCache()
+    private var confirmedCanHeader29: Int? = null
     internal var nativeSegmentation: ElmNativeSegmentation? = null
     internal val automaticCanRoutes = mutableSetOf<Int>()
     // Custom FC from a 29-bit OEM route must not leak into later 11-bit UDS.
@@ -123,12 +124,28 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
     suspend fun configureSetting(text: String, timeoutMs: Long = 5500,
         deferJournal: Boolean = false): Boolean = lock.withLock {
         val command = text.uppercase()
+        if (command.startsWith("ATSH") || command.startsWith("ATCP") || command.startsWith("ATSP") ||
+            command in setOf("ATZ", "ATD", "ATWS")) confirmedCanHeader29 = null
         require(confirmedSettings.setting(command)) { "Настройка не допускает кэширование" }
         coroutineContext.ensureActive()
         if (confirmedSettings.confirmed(command)) return@withLock false
         val raw = commandLocked(command, timeoutMs, deferJournal)
         ElmCompletedCanError.check(raw, command)
         if (!confirmedSettings.confirmed(command)) throw IOException("ELM не подтвердил $command")
+        true
+    }
+    /** Set the full 29-bit TX ID as one acknowledged pair. The researched
+     * driver sends SH before CP; never let an individual cache hit omit CP
+     * after an actual header change. */
+    suspend fun configureCanHeader29(tx: Int): Boolean = lock.withLock {
+        require(tx in 0x800..0x1FFFFFFF)
+        if (confirmedCanHeader29 == tx) return@withLock false
+        for (command in listOf("ATSH%06X".format(tx and 0xFFFFFF), "ATCP%02X".format(tx ushr 24))) {
+            val raw = commandLocked(command, 5500, false)
+            ElmCompletedCanError.check(raw, command)
+            if (!confirmedSettings.confirmed(command)) throw IOException("ELM не подтвердил $command")
+        }
+        confirmedCanHeader29 = tx
         true
     }
     private suspend fun commandLocked(text: String, timeoutMs: Long, deferJournal: Boolean): String {
@@ -311,5 +328,5 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
         }
     }
 
-    fun close() { automaticCanRoutes.clear(); nativeSegmentation = null; confirmedSettings.clear(); vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); needsFlowControlReset = false; link.close() }
+    fun close() { confirmedCanHeader29 = null; automaticCanRoutes.clear(); nativeSegmentation = null; confirmedSettings.clear(); vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); needsFlowControlReset = false; link.close() }
 }

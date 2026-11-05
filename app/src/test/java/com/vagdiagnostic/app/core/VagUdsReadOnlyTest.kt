@@ -10,6 +10,14 @@ import org.junit.Test
  * is claimed, and no request is transmitted to real equipment.
  */
 class VagUdsReadOnlyTest {
+    @Test fun reservedZeroCodeIsNotAFaultButDoesNotHideMalformedRecords() {
+        val result = VagUdsReadOnly.decodeDtcByStatusMask("776", byteArrayOf(
+            0x59, 0x02, 0x19, 0, 0, 0, 1, 0x09, 0x6D, 0x08, 1))
+        assertTrue(result is VagUdsReadOnly.DtcReply.Positive)
+        assertEquals(listOf("096D08"), (result as VagUdsReadOnly.DtcReply.Positive).faults.map { it.raw24 })
+        val broken = VagUdsReadOnly.decodeDtcByStatusMask("776", byteArrayOf(0x59, 0x02, 0x19, 0, 0, 0, 1, 0))
+        assertTrue(broken is VagUdsReadOnly.DtcReply.Invalid)
+    }
     @Test fun reassemblesIsoTpAndKeepsRaw24BitDtcWithStatusAvailabilityMask() {
         val frames = ElmFrames.parse(
             "1902FF",

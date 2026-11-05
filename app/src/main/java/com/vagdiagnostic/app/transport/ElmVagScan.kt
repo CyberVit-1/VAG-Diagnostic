@@ -865,8 +865,7 @@ object ElmVagScan {
             }
             if (target.is29Bit) {
                 engine.needsFlowControlReset = true
-                ok("ATCP%02X".format(tx ushr 24))
-                ok("ATSH%06X".format(tx and 0xFFFFFF))
+                engine.configureCanHeader29(tx)
                 ok("ATCRA%08X".format(rx))
                 // The non-OBD 29-bit route needs its exact FC transmit ID.
                 ok("ATFCSH%08X".format(tx)); ok("ATFCSD300010"); ok("ATFCSM1")
