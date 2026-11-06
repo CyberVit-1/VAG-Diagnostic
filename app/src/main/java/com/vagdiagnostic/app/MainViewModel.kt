@@ -175,7 +175,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 transportTag = when (cfg.type) {
                     "Wi-Fi" -> "WIFI"
                     "Bluetooth Classic" -> "BT_CLASSIC"
-                    "BLE / NUS" -> "BLE_NUS"
+                    "BLE / NUS" -> "BLE_UART"
                     else -> "ELM"
                 }
             )

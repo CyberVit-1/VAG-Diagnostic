@@ -167,7 +167,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
             }
         }
         val tiles = listOf(
-            Triple("Подключение", "Wi-Fi / Bluetooth Classic / BLE NUS", 1),
+            Triple("Подключение", "Wi-Fi / Bluetooth Classic / Bluetooth LE", 1),
             Triple("Диагностика", "Чтение DTC 03 / 07 / 0A", 2),
             Triple("Блоки управления", "Результаты OBD-II и VAG", 3),
             Triple("История диагностики", "Сохранённые результаты", 4),
@@ -209,7 +209,8 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
         Text("Тип адаптера", fontWeight = FontWeight.SemiBold)
         listOf("Wi-Fi", "Bluetooth Classic", "BLE / NUS").forEach { type ->
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { set(s.copy(type = type)) }) {
-                RadioButton(selected = s.type == type, onClick = { set(s.copy(type = type)) }); Text(type)
+                RadioButton(selected = s.type == type, onClick = { set(s.copy(type = type)) })
+                Text(if (type == "BLE / NUS") "Bluetooth LE" else type)
             }
         }
         if (s.type == "Wi-Fi") {
@@ -234,7 +235,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
                         Text("$name — $mac", Modifier.padding(12.dp))
                     }
                 }
-                Text("Поддержан профиль Nordic UART (NUS). Другие GATT-сервисы пока не реализованы.", style = MaterialTheme.typography.bodySmall)
+                Text("Профиль подключения выбирается автоматически по сервисам адаптера.", style = MaterialTheme.typography.bodySmall)
             }
         }
         if (status.adapterConnected || status.carConnected) {
@@ -452,7 +453,7 @@ fun VagDiagnosticApp(vm: MainViewModel, requestPermissions: () -> Unit, search: 
             }
         }
         Text("Версия ${com.vagdiagnostic.app.BuildConfig.VERSION_NAME} · Только чтение", style = MaterialTheme.typography.bodyMedium)
-        Text("В испытании 0.3.3 через Wi-Fi прочитаны 15 из 18 блоков. Профили: Volkswagen 1K; Audi 8P, Škoda 1Z и SEAT 1P — программно проверены, на автомобиле ещё не испытаны. Идентификация Gateway этой версии требует проверки. Запись и сброс DTC отсутствуют. BLE: Nordic UART, аппаратно не проверен.",
+        Text("Диагностика VAG и OBD-II в режиме чтения. Наличие блоков и результаты чтения подтверждаются ответами автомобиля. Подключение через Wi-Fi проверялось на автомобиле; аппаратные испытания Bluetooth Classic и Bluetooth LE ещё не завершены.",
             style = MaterialTheme.typography.bodySmall)
     }
 }

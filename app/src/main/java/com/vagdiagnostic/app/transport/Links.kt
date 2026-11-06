@@ -85,96 +85,142 @@ class BluetoothSppLink(private val context: Context, private val mac: String) : 
     override fun close() { runCatching { socket?.close() }; socket = null; input = null; output = null }
 }
 
-/** V0.1 only supports Nordic UART Service (NUS), not arbitrary BLE ELM GATT layouts. */
+/** BLE UART with service-based selection. The class name remains compatible
+ * with existing settings; each open gets fresh callback and byte-queue state. */
 @SuppressLint("MissingPermission")
 class BleNusLink(private val context: Context, private val mac: String) : ElmLink {
-    override val label = "BLE/NUS $mac"
-    private val serviceId = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
-    private val txId = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e") // phone writes
-    private val rxId = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e") // phone receives
-    private val cccdId = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-    private val queue = kotlinx.coroutines.channels.Channel<Int>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-    private var gatt: android.bluetooth.BluetoothGatt? = null
-    private var writer: android.bluetooth.BluetoothGattCharacteristic? = null
-    private var opening: kotlinx.coroutines.CompletableDeferred<Unit>? = null
-    private var writeFinished: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    override val label = "BLE $mac"
+    private val lifecycle = Any()
+    private var generation = 0L
+    @Volatile private var session: BleUartSession? = null
+    override suspend fun open() {
+        val token = synchronized(lifecycle) {
+            check(session == null) { "BLE-подключение уже открыто" }
+            ++generation
+        }
+        val adapter = context.getSystemService(BluetoothManager::class.java).adapter ?: error("BLE отсутствует")
+        check(adapter.isEnabled) { "Включите Bluetooth" }
+        val device = adapter.getRemoteDevice(mac)
+        val fresh = BleUartSession(AndroidBleUartDriver(context, device), device.name)
+        synchronized(lifecycle) {
+            if (generation != token) { fresh.close(); throw java.io.IOException("BLE-подключение отменено") }
+            session = fresh
+        }
+        try { fresh.open() }
+        catch (problem: Exception) {
+            synchronized(lifecycle) { if (session === fresh) session = null }
+            fresh.close()
+            throw problem
+        }
+    }
+    override suspend fun write(bytes: ByteArray) = requireNotNull(session) { "BLE закрыт" }.write(bytes)
+    override suspend fun readByte(): Int = requireNotNull(session) { "BLE закрыт" }.readByte()
+    override fun close() {
+        val old = synchronized(lifecycle) { ++generation; session.also { session = null } }
+        old?.close()
+    }
+}
+
+@SuppressLint("MissingPermission")
+private class AndroidBleUartDriver(private val context: Context, private val device: BluetoothDevice) : BleUartSession.Driver {
+    private val lifecycle = Any()
+    private var closed = false
+    @Volatile private var gatt: android.bluetooth.BluetoothGatt? = null
+    @Volatile private var events: BleUartSession.Events? = null
+    @Volatile private var service: UUID? = null
+    private fun accepts(value: android.bluetooth.BluetoothGatt): Boolean = synchronized(lifecycle) {
+        if (closed) false else {
+            if (gatt == null) gatt = value
+            gatt === value
+        }
+    }
     private val callback = object : android.bluetooth.BluetoothGattCallback() {
         override fun onConnectionStateChange(g: android.bluetooth.BluetoothGatt, status: Int, newState: Int) {
-            if (status != android.bluetooth.BluetoothGatt.GATT_SUCCESS) {
-                opening?.completeExceptionally(IllegalStateException("BLE GATT status=$status"))
-                queue.close(IllegalStateException("BLE отключён")); return
-            }
-            if (newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
-                if (!g.discoverServices()) opening?.completeExceptionally(IllegalStateException("BLE services не обнаружены"))
-            } else if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) {
-                opening?.completeExceptionally(IllegalStateException("BLE отключён"))
-                queue.close(IllegalStateException("BLE отключён"))
-            }
+            if (!accepts(g)) return
+            if (status != android.bluetooth.BluetoothGatt.GATT_SUCCESS) events?.disconnected("BLE GATT status=$status")
+            else if (newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) events?.connected()
+            else if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) events?.disconnected("BLE отключён")
         }
         override fun onServicesDiscovered(g: android.bluetooth.BluetoothGatt, status: Int) {
-            val service = g.getService(serviceId)
-            val notify = service?.getCharacteristic(rxId)
-            val write = service?.getCharacteristic(txId)
-            val cccd = notify?.getDescriptor(cccdId)
-            if (status != 0 || notify == null || write == null || cccd == null || !g.setCharacteristicNotification(notify, true)) {
-                opening?.completeExceptionally(IllegalStateException("Адаптер не поддерживает BLE Nordic UART")); return
-            }
-            writer = write
-            @Suppress("DEPRECATION")
-            cccd.value = android.bluetooth.BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            @Suppress("DEPRECATION")
-            if (!g.writeDescriptor(cccd)) opening?.completeExceptionally(IllegalStateException("Не удалось включить BLE notifications"))
+            if (accepts(g)) events?.servicesDiscovered(status == android.bluetooth.BluetoothGatt.GATT_SUCCESS)
         }
         override fun onDescriptorWrite(g: android.bluetooth.BluetoothGatt, desc: android.bluetooth.BluetoothGattDescriptor, status: Int) {
-            if (status == 0) opening?.complete(Unit)
-            else opening?.completeExceptionally(IllegalStateException("BLE CCCD status=$status"))
+            if (accepts(g) && desc.characteristic.service?.uuid == service)
+                events?.subscribed(desc.characteristic.uuid, desc.uuid, status == android.bluetooth.BluetoothGatt.GATT_SUCCESS)
+        }
+        override fun onMtuChanged(g: android.bluetooth.BluetoothGatt, mtu: Int, status: Int) {
+            if (accepts(g)) events?.mtuChanged(mtu, status == android.bluetooth.BluetoothGatt.GATT_SUCCESS)
+        }
+        override fun onCharacteristicWrite(g: android.bluetooth.BluetoothGatt, c: android.bluetooth.BluetoothGattCharacteristic, status: Int) {
+            if (accepts(g) && c.service?.uuid == service)
+                events?.written(c.uuid, status == android.bluetooth.BluetoothGatt.GATT_SUCCESS)
         }
         override fun onCharacteristicChanged(g: android.bluetooth.BluetoothGatt, c: android.bluetooth.BluetoothGattCharacteristic, value: ByteArray) {
-            if (c.uuid == rxId) value.forEach { queue.trySend(it.toInt() and 255) }
+            if (accepts(g) && c.service?.uuid == service) events?.received(c.uuid, value)
         }
         @Deprecated("pre API 33")
         override fun onCharacteristicChanged(g: android.bluetooth.BluetoothGatt, c: android.bluetooth.BluetoothGattCharacteristic) {
             @Suppress("DEPRECATION")
-            if (c.uuid == rxId) c.value?.forEach { queue.trySend(it.toInt() and 255) }
-        }
-        override fun onCharacteristicWrite(g: android.bluetooth.BluetoothGatt, c: android.bluetooth.BluetoothGattCharacteristic, status: Int) {
-            if (status == 0) writeFinished?.complete(Unit)
-            else writeFinished?.completeExceptionally(IllegalStateException("BLE write status=$status"))
+            if (accepts(g) && c.service?.uuid == service) c.value?.let { events?.received(c.uuid, it) }
         }
     }
-    override suspend fun open() {
-        val adapter = context.getSystemService(BluetoothManager::class.java).adapter ?: error("BLE отсутствует")
-        check(adapter.isEnabled) { "Включите Bluetooth" }
-        val device = adapter.getRemoteDevice(mac)
-        val ready = kotlinx.coroutines.CompletableDeferred<Unit>()
-        opening = ready
-        gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
-        try { kotlinx.coroutines.withTimeout(12000) { ready.await() } }
-        catch (error: Exception) { close(); throw error }
-    }
-    override suspend fun write(bytes: ByteArray) {
-        val g = requireNotNull(gatt)
-        val c = requireNotNull(writer)
-        for (chunk in bytes.toList().chunked(20)) {
-            val ready = kotlinx.coroutines.CompletableDeferred<Unit>()
-            writeFinished = ready
-            val data = chunk.toByteArray()
-            val ok = if (android.os.Build.VERSION.SDK_INT >= 33) {
-                g.writeCharacteristic(c, data, android.bluetooth.BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == android.bluetooth.BluetoothStatusCodes.SUCCESS
-            } else {
-                @Suppress("DEPRECATION")
-                c.value = data
-                @Suppress("DEPRECATION")
-                g.writeCharacteristic(c)
-            }
-            check(ok) { "BLE write не запущен" }
-            kotlinx.coroutines.withTimeout(4000) { ready.await() }
+    override fun connect(events: BleUartSession.Events): Boolean {
+        synchronized(lifecycle) { if (closed) return false; this.events = events }
+        val created = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE) ?: return false
+        return synchronized(lifecycle) {
+            if (closed) { created.close(); false } else { gatt = created; true }
         }
     }
-    override suspend fun readByte(): Int = kotlinx.coroutines.withTimeoutOrNull(120) { queue.receive() } ?: -2
+    override fun discoverServices(): Boolean = gatt?.discoverServices() == true
+    override fun services(): List<BleUartProfiles.Service> = gatt?.services.orEmpty().map { s ->
+        BleUartProfiles.Service(s.uuid, s.characteristics.map { c ->
+            BleUartProfiles.Characteristic(c.uuid, c.properties, c.descriptors.map { it.uuid }.toSet())
+        })
+    }
+    override fun subscribe(selection: BleUartProfiles.Selection): Boolean {
+        val g = gatt ?: return false
+        val c = g.getService(selection.service)?.getCharacteristic(selection.receive) ?: return false
+        val descriptor = c.getDescriptor(BleUartProfiles.cccd) ?: return false
+        service = selection.service
+        if (!g.setCharacteristicNotification(c, true)) return false
+        val value = if (selection.subscription == BleUartProfiles.Subscription.NOTIFICATION)
+            android.bluetooth.BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            else android.bluetooth.BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+        return if (android.os.Build.VERSION.SDK_INT >= 33)
+            g.writeDescriptor(descriptor, value) == android.bluetooth.BluetoothStatusCodes.SUCCESS
+        else {
+            @Suppress("DEPRECATION")
+            descriptor.value = value
+            @Suppress("DEPRECATION")
+            g.writeDescriptor(descriptor)
+        }
+    }
+    override fun requestMtu(mtu: Int): Boolean = gatt?.requestMtu(mtu) == true
+    override fun write(characteristic: UUID, value: ByteArray, mode: BleUartProfiles.WriteMode): Boolean {
+        val g = gatt ?: return false
+        val selectedService = service ?: return false
+        val c = g.getService(selectedService)?.getCharacteristic(characteristic) ?: return false
+        val type = if (mode == BleUartProfiles.WriteMode.ACKNOWLEDGED)
+            android.bluetooth.BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            else android.bluetooth.BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        return if (android.os.Build.VERSION.SDK_INT >= 33)
+            g.writeCharacteristic(c, value, type) == android.bluetooth.BluetoothStatusCodes.SUCCESS
+        else {
+            @Suppress("DEPRECATION")
+            c.writeType = type
+            @Suppress("DEPRECATION")
+            c.value = value
+            @Suppress("DEPRECATION")
+            g.writeCharacteristic(c)
+        }
+    }
     override fun close() {
-        runCatching { gatt?.disconnect(); gatt?.close() }; gatt = null
-        opening?.cancel(); writeFinished?.cancel(); queue.close()
+        val old = synchronized(lifecycle) {
+            closed = true
+            gatt.also { gatt = null }
+        }
+        runCatching { old?.disconnect() }
+        runCatching { old?.close() }
     }
 }
 

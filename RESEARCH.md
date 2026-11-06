@@ -1,3 +1,23 @@
+## BLE UART и Android GATT —06.11.2026
+
+Добавлены известные полные профили UART FFF0/FFF1/FFF2 иE47C с отдельной
+режимной характеристикой; Nordic UART сохранён. Выбор требует полного
+набораUUID в одном сервисе и подходящих свойств/CCCD; неизвестные сервисы
+не превращаются в произвольный UART. Имя само по себе ничего не разрешает.
+ДляE47C сохранены дополнительная характеристика и точное ограничение имени.
+Начальная запись01 — переключение интерфейса адаптера, не команда ECU.
+
+[Android BluetoothGatt](https://developer.android.com/reference/android/bluetooth/BluetoothGatt)
+и [callback API](https://developer.android.com/reference/android/bluetooth/BluetoothGattCallback):
+результат запуска записи/MTU не заменяет завершения через callback.
+Использованы byte[] overloads API33+ и старые методы для прежнихAndroid.
+Сначала подтверждается CCCD, затем MTU, затем возможная инициализация
+профиля и UART. В принятом, но незавершённом GATT запросе нельзя начинать
+следующий. Отказ optionalMTU сохраняет базовый20-байтовый payload;
+подтверждённый размер ограничен максимумом512байт. Старые callback
+изолированы от нового подключения. Сроки этапов5/8/10/5/15сек сверены
+с исследованными операциями. Это software implementation, не аппаратный тест.
+
 ## Уточнение ELM formatting —04.11.2026
 
 [Первичный datasheet ELM327](https://www.elmelectronics.com/wp-content/uploads/2017/01/ELM327DS.pdf),
