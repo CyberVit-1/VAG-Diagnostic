@@ -134,6 +134,7 @@ private class AndroidSppConnection(private val socket: android.bluetooth.Bluetoo
 @SuppressLint("MissingPermission")
 class BleNusLink(private val context: Context, private val mac: String) : ElmLink {
     override val label = "BLE $mac"
+    override val needsUartReadinessProbe = true
     private val lifecycle = Any()
     private var generation = 0L
     @Volatile private var session: BleUartSession? = null

@@ -1268,6 +1268,50 @@ class ElmVagScanTest {
         assertFalse(link.sent.contains("25C000100003011"))
         assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
     }
+    @Test fun failedRecoveryClosesItsReplacementAndPreservesPreviouslyReadDtcs() = runBlocking<Unit> {
+        for (failure in listOf("open", "vehicle-proof", "cancel-confirmation")) {
+            val old = Link(installedReply = "5A9F0D190000016200000172000001", closedDestination = 0x24,
+                dtcReply = "5801051924")
+            val delegate = Link()
+            val sent = mutableListOf<String>()
+            val pending = ArrayDeque<Int>()
+            var closes = 0
+            val replacement = object : ElmLink {
+                override val label = "Scripted failed recovery"
+                override suspend fun open() {
+                    if (failure == "open") throw IOException("opening failed")
+                    delegate.open()
+                }
+                override suspend fun write(bytes: ByteArray) {
+                    val command = bytes.toString(Charsets.US_ASCII).trim()
+                    sent += command
+                    if (failure == "vehicle-proof" && command == "0100")
+                        pending.addAll("NO DATA\r>".map { it.code })
+                    else delegate.write(bytes)
+                }
+                override suspend fun readByte(): Int = pending.pollFirst() ?: delegate.readByte()
+                override fun close() { closes++; pending.clear(); delegate.close() }
+            }
+            val units = linkedMapOf<String, ControlUnit>()
+            val error = runCatching {
+                ElmVagScan.scan(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it },
+                    { command, _, outcome ->
+                        if (failure == "cancel-confirmation" && command == "VAG_CHANNEL_RECOVERY" && outcome == "CONFIRMED")
+                            throw CancellationException("Stopped after vehicle proof")
+                    }, identifyEcus = false, discoverAdditionalUnits = false,
+                    recreateEngine = { ElmEngine(replacement, { _, _, _, _ -> }) })
+            }.exceptionOrNull()
+            if (failure == "cancel-confirmation") assertTrue(error is CancellationException)
+            else assertTrue("$failure: $error", error is IOException)
+            assertTrue("$failure: replacement leaked", closes > 0)
+            assertFalse(sent.any { it.endsWith("C000100003011") })
+            assertFalse(old.sent.contains("25C000100003011"))
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals(listOf("01305"), units.getValue("VAG-19").dtcs.map { it.code })
+            assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-72").state)
+        }
+    }
+
     @Test fun recoveryFactoryReplacesTheClosedTransportBeforeContinuing() = runBlocking {
         val old = Link(installedReply = "5A9F0D190000016200000172000001", closedDestination = 0x24)
         val fresh = Link()

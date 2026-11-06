@@ -99,13 +99,22 @@ object ElmVagScan {
             // Production supplies a fresh link as well as an engine. A closed
             // BLE notification channel cannot be reopened in the same object.
             currentEngine = recreateEngine?.invoke() ?: currentEngine
-            try { currentEngine.connect() }
-            catch (cancel: CancellationException) { throw cancel }
-            catch (failure: Exception) { throw IOException("Не удалось подтвердить новое соединение после ошибки $key", failure) }
-            if (!currentEngine.vehicleReady) throw IOException("OBD после закрытия TP-канала не подтверждён")
-            currentCoroutineContext().ensureActive()
-            channelRecoveries++
-            event("VAG_CHANNEL_RECOVERY", "$key: OBD подтверждён; очередь продолжается; восстановлений=$channelRecoveries", "CONFIRMED")
+            var restored = false
+            try {
+                try { currentEngine.connect() }
+                catch (cancel: CancellationException) { throw cancel }
+                catch (failure: Exception) { throw IOException("Не удалось подтвердить новое соединение после ошибки $key", failure) }
+                if (!currentEngine.vehicleReady) throw IOException("OBD после закрытия TP-канала не подтверждён")
+                currentCoroutineContext().ensureActive()
+                channelRecoveries++
+                event("VAG_CHANNEL_RECOVERY", "$key: OBD подтверждён; очередь продолжается; восстановлений=$channelRecoveries", "CONFIRMED")
+                restored = true
+            } finally {
+                // Ownership transfers only after the complete recovery succeeds.
+                // Failed vehicle proof, open failure or cancellation must not
+                // depend on a UI caller eventually disposing this fresh link.
+                if (!restored) runCatching { currentEngine.close() }
+            }
         }
         private suspend fun restoreClosedChannel(key: String, cause: ElmTp20Channel.PeerClosedChannel) = restoreConnection(key, cause)
         private suspend fun finishFailedReadStage(key: String, cause: IOException) {

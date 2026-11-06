@@ -10,6 +10,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.yield
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.NonCancellable
@@ -66,6 +67,12 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
     suspend fun connect() {
         link.open()
         try {
+            if (link.needsUartReadinessProbe) {
+                // CCCD success confirms GATT, not a responsive ELM UART. Keep
+                // this BLE-only probe before the common reset/init sequence.
+                delay(200)
+                configureSetting("ATE0")
+            }
             val reset = command("ATZ", 8500)
             check(reset.contains("ELM", true) || reset.contains("OK", true)) { "Нет ответа на ATZ" }
             needsFlowControlReset = false
