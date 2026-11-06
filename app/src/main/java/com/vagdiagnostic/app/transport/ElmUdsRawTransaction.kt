@@ -24,7 +24,11 @@ internal object ElmUdsRawTransaction {
         val rx = requireNotNull(target.udsRx)
         val outgoing = VagIsoTpOutgoing.frames(VagOemReadOnly.bytes(request))
         require(outgoing.size == 1) { "Текущее read-only чтение требует один исходящий CAN кадр" }
-        val wire = outgoing.single().joinToString("") { "%02X".format(it) }
+        // The establishment probe has a separate one-response contract.
+        // Ordinary reads retain their padded frame and unlimited response count:
+        // a count hint there could truncate a multi-frame DTC response.
+        val wire = if (request == "3E00") "023E001"
+            else outgoing.single().joinToString("") { "%02X".format(it) }
         val frames = VagIsoTpCollection(setOf(rx), request, automaticFlowControl)
         var completedSilence = false
         var monitorMode = false

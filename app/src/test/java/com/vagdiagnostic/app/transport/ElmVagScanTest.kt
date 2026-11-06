@@ -64,7 +64,7 @@ class ElmVagScanTest {
             val wire = bytes.toString(Charsets.US_ASCII).trim()
             wireSent += wire
             // The rejection is from the real trace; following replies are synthetic.
-            if (rejectRaw29 && receiveId.length == 8 && wire.matches(Regex("0[1-7][0-9A-F]{14}"))) {
+            if (rejectRaw29 && receiveId.length == 8 && (wire == "023E001" || wire.matches(Regex("0[1-7][0-9A-F]{14}")))) {
                 for (b in "?\r>".toByteArray()) queue.add(b.toInt() and 255)
                 return
             }
@@ -79,6 +79,7 @@ class ElmVagScanTest {
                 return
             }
             val command = if (nativeTx && wire.matches(Regex("(?:[0-9A-F]{2}){2,7}1"))) wire.dropLast(1)
+            else if (rawCan && wire == "023E001") "3E00"
             else if (rawCan && wire.matches(Regex("0[1-7][0-9A-F]{14}"))) {
                 val count = wire.take(2).toInt(16)
                 assertEquals("AA".repeat(7 - count), wire.drop(2 + count * 2))
@@ -406,11 +407,11 @@ class ElmVagScanTest {
             assertEquals(ReadState.COMPLETE, units.getValue(address).state)
             assertEquals(2, units.getValue(address).dtcs.size)
         }
-        assertTrue(link.wireSent.contains("023E00AAAAAAAAAA"))
+        assertTrue(link.wireSent.contains("023E001"))
         assertTrue(link.wireSent.contains("0319028DAAAAAAAA"))
         assertFalse(link.wireSent.contains(ElmUdsRawTransaction.FLOW_CONTROL))
         assertFalse(link.wireSent.contains("19028D"))
-        val udsStart = link.wireSent.indexOf("023E00AAAAAAAAAA")
+        val udsStart = link.wireSent.indexOf("023E001")
         assertFalse(link.wireSent.drop(udsStart).contains("ATCAF1"))
         assertTrue(link.wireSent.take(udsStart).contains("ATCFC1"))
         assertEquals("Unchanged protocol selection must be reused", 1, link.wireSent.count { it == "ATSP6" })
@@ -426,7 +427,7 @@ class ElmVagScanTest {
             identifyEcus = false, discoverAdditionalUnits = false)
         assertEquals(ReadState.COMPLETE, units.getValue("VAG-46").state)
         assertEquals("123456", units.getValue("VAG-46").dtcs.single().code)
-        val rejected = link.wireSent.lastIndexOf("023E00AAAAAAAAAA")
+        val rejected = link.wireSent.lastIndexOf("023E001")
         assertTrue(link.wireSent.drop(rejected + 1).contains("ATCAF1"))
         assertTrue(link.wireSent.drop(rejected + 1).contains("3E00"))
         assertEquals(1, link.wireSent.count { it == "ATZ" })
@@ -558,7 +559,7 @@ class ElmVagScanTest {
         assertFalse(fresh.wireSent.contains("STI"))
         assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
         assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
-        assertTrue(fresh.wireSent.indexOf("0100") < fresh.wireSent.indexOf("023E00AAAAAAAAAA"))
+        assertTrue(fresh.wireSent.indexOf("0100") < fresh.wireSent.indexOf("023E001"))
     }
     @Test fun lyingNativeAcknowledgementsCannotPromoteRawFramesAsNative() = runBlocking {
         val old = UdsLink(rawCan = true, nativeBanner = "STN1170 v5.6.5", nativeAssembledReplies = false)

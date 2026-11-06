@@ -37,6 +37,40 @@ class ElmUdsRawTransactionTest {
         }
     }
     private val gateway = VagOemReadOnly.routes.getValue(0x19)
+    @Test fun presenceUsesOnlyItsShortFrameAndOneResponseHint() = runBlocking {
+        val link = Link("023E001" to "023E001\r77A027E00")
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        assertEquals(listOf(0x7E, 0), ElmUdsRawTransaction.read(engine, gateway, "3E00"))
+        assertEquals(1, link.sent.count { it == "023E001" })
+        assertTrue(link.script.isEmpty())
+        assertFalse(link.closed)
+    }
+    @Test fun shortPresencePendingContinuesReceivingWithoutResending() = runBlocking {
+        val link = Link("023E001" to "77A037F3E78", "ATMA" to "77A027E00", "" to "STOPPED")
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        assertEquals(listOf(0x7E, 0), ElmUdsRawTransaction.read(engine, gateway, "3E00", automaticFlowControl = true))
+        assertEquals(listOf("023E001", "ATCFC0", "ATMA", "", "ATCFC1"),
+            link.sent.dropWhile { it != "023E001" })
+        assertTrue(link.script.isEmpty())
+        assertFalse(link.closed)
+    }
+    @Test fun shortPresenceSilenceAndNegativeAreNotSuccessfulPresence() = runBlocking {
+        for ((raw, expected) in listOf("NO DATA" to null, "77A037F3E31" to listOf(0x7F, 0x3E, 0x31))) {
+            val link = Link("023E001" to raw)
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            assertEquals(expected, ElmUdsRawTransaction.read(engine, gateway, "3E00"))
+            assertFalse(link.closed)
+        }
+    }
+    @Test fun shortPresenceRejectsForeignOwnerAndContradictoryStatuses() = runBlocking {
+        for (raw in listOf("7E8027E00", "NO DATA\r77A027E00", "OK\r77A027E00", "?\r77A027E00")) {
+            val link = Link("023E001" to raw)
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            assertTrue(runCatching { ElmUdsRawTransaction.read(engine, gateway, "3E00") }.exceptionOrNull() is VagProtocolFailure)
+            assertTrue(link.closed)
+            assertEquals(1, link.sent.count { it == "023E001" })
+        }
+    }
     @Test fun rawSingleFrameIncludesPciAndIsReadWithoutAutomaticFormatting() = runBlocking {
         val link = Link("0319028DAAAAAAAA" to "77A0359028D")
         val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
@@ -105,7 +139,7 @@ class ElmUdsRawTransactionTest {
         assertEquals(listOf(0x59, 2, 0x8D), ElmUdsRawTransaction.read(engine, route, "19028D"))
     }
     @Test fun exactQuestionMarkLeavesKnownPromptBoundaryForCapabilityFallback() = runBlocking {
-        val link = Link("023E00AAAAAAAAAA" to "?")
+        val link = Link("023E001" to "?")
         val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
         assertTrue(runCatching { ElmUdsRawTransaction.read(engine, gateway, "3E00") }.exceptionOrNull()
             is ElmUdsRawTransaction.UnsupportedCommand)
