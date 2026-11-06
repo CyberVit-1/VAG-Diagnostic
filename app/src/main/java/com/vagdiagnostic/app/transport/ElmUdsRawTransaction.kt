@@ -18,8 +18,9 @@ internal object ElmUdsRawTransaction {
     const val FLOW_CONTROL = "300010AAAAAAAAAA"
     private const val TRANSACTION_TIMEOUT_MS = 20000L
     suspend fun read(engine: ElmEngine, target: VagOemReadOnly.Route, request: String,
-        pendingMs: Long = 5250, automaticFlowControl: Boolean = false): List<Int>? {
+        pendingMs: Long = 5250, automaticFlowControl: Boolean = false, sessionProbe: Boolean = false): List<Int>? {
         require(ElmUdsReadRequests.allowed(request))
+        require(!sessionProbe || request == "1003")
         check(engine.vehicleReady)
         requireNotNull(target.udsTx)
         val rx = requireNotNull(target.udsRx)
@@ -28,7 +29,7 @@ internal object ElmUdsRawTransaction {
         // The establishment probe has a separate one-response contract.
         // Ordinary reads retain their padded frame and unlimited response count:
         // a count hint there could truncate a multi-frame DTC response.
-        val wire = if (request == "3E00") "023E001"
+        val wire = if (request == "3E00" || sessionProbe) "02${request}1"
             else outgoing.single().joinToString("") { "%02X".format(it) }
         val frames = VagIsoTpCollection(setOf(rx), request, automaticFlowControl)
         var completedSilence = false

@@ -915,7 +915,12 @@ object ElmVagScan {
             }
             if (!(presence == null || presence == listOf(0x7E, 0) ||
                 (presence.size == 3 && presence.take(2) == listOf(0x7F, 0x3E)))) throw VagProtocolFailure("Нет подтверждения присутствия UDS ECU")
-            val reply = readOrNoData("1003", allowNoData = true)
+            // Establishment's best-effort poke is not an ordinary retriable
+            // StartDiagnosticSession command. Keep the presence window/state
+            // and send it once; only later validated reads can confirm DTCs.
+            val reply = try { readOrNoDataOnce("1003", allowNoData = true, sessionProbe = true) }
+                catch (_: ElmCompletedCanError) { null }
+                catch (_: ElmUdsRawTransaction.UnsupportedCommand) { null }
             active = reply?.take(2) == listOf(0x50, 3)
             if (presence == null && reply == null) {
                 cachedPartReply = readOrNoData("22F187", allowNoData = true)
@@ -976,21 +981,26 @@ object ElmVagScan {
             if (result == null && !allowNoData) error("ELM завершил UDS $command без ответа")
             return result
         }
-        private suspend fun readOrNoDataOnce(command: String, allowNoData: Boolean): List<Int>? {
+        private suspend fun readOrNoDataOnce(command: String, allowNoData: Boolean, sessionProbe: Boolean = false): List<Int>? {
             require(ElmUdsReadRequests.allowed(command))
+            require(!sessionProbe || command == "1003")
             val target = requireNotNull(route)
-            engine.configureAdaptiveTiming(ElmUdsReadRequests.allowsAdaptiveTiming(command))
-            ElmUdsRequestTiming.configure(engine, command)
-            if (engine.nativeSegmentation?.enabled == true) return ElmUdsNativeDriver.read(engine, target, command, pendingMs)
+            if (!sessionProbe) {
+                engine.configureAdaptiveTiming(ElmUdsReadRequests.allowsAdaptiveTiming(command))
+                ElmUdsRequestTiming.configure(engine, command)
+            }
+            if (engine.nativeSegmentation?.enabled == true)
+                return ElmUdsNativeDriver.read(engine, target, command, pendingMs, sessionProbe = sessionProbe)
             if (engine.manualUds && target.id !in engine.automaticCanRoutes) {
-                try { return ElmUdsRawTransaction.read(engine, target, command, pendingMs, automaticFlowControl = true) }
+                try { return ElmUdsRawTransaction.read(engine, target, command, pendingMs,
+                    automaticFlowControl = true, sessionProbe = sessionProbe) }
                 catch (unsupported: ElmUdsRawTransaction.UnsupportedCommand) {
                     // A complete '?' is an adapter capability refusal, not an
                     // unfinished ECU reply. Configure the already-supported CAF1
                     // path once for this route on this physical connection.
                     engine.automaticCanRoutes += target.id
                     configure(target)
-                    return readOrNoDataOnce(command, allowNoData)
+                    return readOrNoDataOnce(command, allowNoData, sessionProbe)
                 }
             }
             val result = withTimeoutOrNull(20000) {
@@ -998,7 +1008,10 @@ object ElmVagScan {
                     // Automatic framing still transfers the full CAN response.
                     // Do not expire before a legal STmin-paced CF train; the
                     // enclosing deadline continues to bound the whole read.
-                    var raw = execute(command, 20000)
+                    val wire = if (sessionProbe || command == "3E00") command + "1" else command
+                    var raw = execute(wire, 20000)
+                    if (wire != command) raw = raw.replace('\r', '\n').split('\n')
+                        .filter { it.filterNot(Char::isWhitespace).uppercase() != wire }.joinToString("\r")
                     if (raw.trim() == "?") throw ElmUdsRawTransaction.UnsupportedCommand(command)
                     var pending = 0
                     while (true) {

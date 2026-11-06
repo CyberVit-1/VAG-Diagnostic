@@ -29,10 +29,13 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
             }
             // Explicitly synthetic ACK for the researched 1000ms UDS window;
             // retain the original recording and every ECU payload unchanged.
+            val probeWire = if (uds && command in setOf("3E00", "1003")) command + "1" else command
+            val probeRaw = if (probeWire != command) raw.replace('\r', '\n').split('\n')
+                .joinToString("\r") { if (it.filterNot(Char::isWhitespace) == command) probeWire else it } else raw
             if (command == "ATSTFF" && uds) {
                 check(raw.replace(command, "").replace(">", "").trim() == "OK")
                 add("ATSTFA" to "OK")
-            } else add((if (command == "ATFCSD300000") "ATFCSD300010" else command) to raw)
+            } else add((if (command == "ATFCSD300000") "ATFCSD300010" else probeWire) to probeRaw)
             if (command == "ATSTFF" && uds) add("ATAT0" to "OK")
             // Historic resources contain one completed silent CHANNEL SETUP.
             // Additional attempts are explicitly synthetic silence, not a new
@@ -42,10 +45,10 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
             // Three completed silent physical presence attempts are synthetic
             // extensions; no extra request is inserted after pending/partial data.
             if (uds && command == "3E00" && raw.trim() == "NO DATA")
-                repeat(2) { add(command to "NO DATA") }
+                repeat(2) { add(probeWire to "NO DATA") }
             // Completed command-level silence gets one additional synthetic
             // attempt. Never extend a recorded pending or partial payload.
-            if (uds && VagReadRetry.enabled(command) && raw.trim() == "NO DATA")
+            if (uds && command != "1003" && VagReadRetry.enabled(command) && raw.trim() == "NO DATA")
                 add(command to "NO DATA")
         }
     }))
@@ -59,12 +62,13 @@ private fun withExplicitUdsTiming(rows: List<Pair<String, String>>): List<Pair<S
     val adaptive = setOf("1003", "1001", "22F187", "22F197", "22F189", "22F19E", "22F1A2", "220174")
     val fixed = setOf("3E00", "19028D", "2204A1", "222A26", "222A28")
     for ((command, raw) in rows) {
-        val logical = if (command.matches(Regex("0[1-7][0-9A-F]{14}"))) {
+        val logical = if (command in setOf("3E001", "10031")) command.dropLast(1)
+        else if (command.matches(Regex("0[1-7][0-9A-F]{14}"))) {
             val count = command.take(2).toInt(16)
             command.substring(2, 2 + count * 2)
         } else command
         if (logical in adaptive || logical in fixed || logical.matches(Regex("1906[0-9A-F]{6}FF"))) {
-            val required = if (logical in adaptive) "ATAT1" else "ATAT0"
+            val required = if (logical in adaptive && command != "10031") "ATAT1" else "ATAT0"
             if (timing != required) { add(required to "OK"); timing = required }
         }
         add(command to raw)

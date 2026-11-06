@@ -44,6 +44,32 @@ class ElmUdsRawTransactionTest {
         }
     }
     private val gateway = VagOemReadOnly.routes.getValue(0x19)
+    @Test fun connectionSessionProbeAndOrdinarySessionReadKeepDistinctWireContracts() = runBlocking {
+        val link = Link("0210031" to "0210031\r77A025003", "021003AAAAAAAAAA" to "77A025003")
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        assertEquals(listOf(0x50, 3), ElmUdsRawTransaction.read(engine, gateway, "1003", sessionProbe = true))
+        assertEquals(listOf(0x50, 3), ElmUdsRawTransaction.read(engine, gateway, "1003"))
+        assertTrue(link.script.isEmpty())
+        assertFalse(link.closed)
+    }
+    @Test fun pendingSessionProbeReceivesItsFinalReplyWithoutResending() = runBlocking {
+        val link = Link("0210031" to "77A037F1078", "ATMA" to "77A025003", "" to "STOPPED")
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        assertEquals(listOf(0x50, 3), ElmUdsRawTransaction.read(engine, gateway, "1003",
+            automaticFlowControl = true, sessionProbe = true))
+        assertEquals(1, link.sent.count { it == "0210031" })
+        assertTrue(link.script.isEmpty())
+        assertFalse(link.closed)
+    }
+    @Test fun dtcReadsCannotUseTheConnectionProbeResponseHint() = runBlocking {
+        val link = Link(); val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        val before = link.sent.toList()
+        assertTrue(runCatching { ElmUdsRawTransaction.read(engine, gateway, "19028D", sessionProbe = true) }
+            .exceptionOrNull() is IllegalArgumentException)
+        assertTrue(runCatching { ElmUdsNativeDriver.read(engine, gateway, "19028D", 5250, sessionProbe = true) }
+            .exceptionOrNull() is IllegalArgumentException)
+        assertEquals(before, link.sent)
+    }
     @Test fun maximumDtcReplyWithSixteenMillisecondFrameSpacingCompletesWithinTheTransactionBudget() = runBlocking {
         val data = listOf(0x59, 2, 0x8D) + List(4092) { it and 255 }
         val rows = mutableListOf("77A1FFF" + data.take(6).joinToString("") { "%02X".format(it) })

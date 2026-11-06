@@ -1,7 +1,6 @@
 package com.vagdiagnostic.app.transport
 
 import android.annotation.SuppressLint
-import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.content.Context
@@ -9,6 +8,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.io.OutputStream
@@ -53,36 +53,80 @@ class WifiTcpLink(private val context: Context, private val host: String, privat
     override fun close() { runCatching { socket?.close() }; socket = null; input = null; output = null }
 }
 
-/** RFCOMM/SPP; the phone must already be paired with the device. */
+/** RFCOMM/SPP to the explicitly selected device; Android handles pairing. */
 @SuppressLint("MissingPermission")
 class BluetoothSppLink(private val context: Context, private val mac: String) : ElmLink {
     override val label = "Bluetooth $mac"
     private val sppId: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
-    private var socket: android.bluetooth.BluetoothSocket? = null
-    private var input: InputStream? = null
-    private var output: OutputStream? = null
-    override suspend fun open() = withContext(Dispatchers.IO) {
+    private val lifecycle = Any()
+    private var generation = 0L
+    @Volatile private var session: SppSession? = null
+    override suspend fun open() {
+        val token = synchronized(lifecycle) {
+            check(session == null) { "SPP-подключение уже открыто" }
+            ++generation
+        }
         val manager = context.getSystemService(BluetoothManager::class.java)
         val adapter = manager.adapter ?: error("Bluetooth отсутствует")
         check(adapter.isEnabled) { "Включите Bluetooth" }
         val device = adapter.getRemoteDevice(mac)
-        check(adapter.bondedDevices.any { it.address == device.address }) { "Сначала выполните сопряжение в настройках Android" }
-        adapter.cancelDiscovery()
-        val s = device.createRfcommSocketToServiceRecord(sppId)
-        socket = s // published before connect so a concurrent close() cancels it
-        try { s.connect(); input = s.inputStream; output = s.outputStream }
-        catch (error: Exception) { close(); throw error }
+        val fresh = SppSession(object : SppSession.Driver {
+            override fun cancelDiscovery() { adapter.cancelDiscovery() }
+            override fun create(mode: SppSession.Mode): SppSession.Connection {
+                val socket = if (mode == SppSession.Mode.INSECURE)
+                    device.createInsecureRfcommSocketToServiceRecord(sppId)
+                    else device.createRfcommSocketToServiceRecord(sppId)
+                return AndroidSppConnection(socket)
+            }
+        })
+        synchronized(lifecycle) {
+            if (generation != token) { fresh.close(); throw java.io.IOException("SPP-подключение отменено") }
+            session = fresh
+        }
+        try { fresh.open() }
+        catch (problem: Exception) {
+            synchronized(lifecycle) { if (session === fresh) session = null }
+            fresh.close()
+            throw problem
+        }
     }
     override suspend fun write(bytes: ByteArray) = withContext(Dispatchers.IO) {
-        requireNotNull(output).write(bytes); requireNotNull(output).flush()
+        val stream = requireNotNull(session).output()
+        stream.write(bytes); stream.flush()
     }
     override suspend fun readByte(): Int {
-        val stream = requireNotNull(input)
+        val stream = requireNotNull(session).input()
         // Android BluetoothSocket does not expose a read timeout. Poll for cancel-friendly reads.
         if (withContext(Dispatchers.IO) { stream.available() } == 0) { delay(18); return -2 }
         return withContext(Dispatchers.IO) { stream.read() }
     }
-    override fun close() { runCatching { socket?.close() }; socket = null; input = null; output = null }
+    override fun close() {
+        val old = synchronized(lifecycle) { ++generation; session.also { session = null } }
+        old?.close()
+    }
+}
+
+@SuppressLint("MissingPermission")
+private class AndroidSppConnection(private val socket: android.bluetooth.BluetoothSocket) : SppSession.Connection {
+    override suspend fun connect(): Unit = suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { runCatching { socket.close() } }
+        // Android connect() blocks. Cancellation closes this exact socket, including
+        // after a timeout; an old completion cannot publish into a new session.
+        Dispatchers.IO.dispatch(continuation.context, Runnable {
+            if (!continuation.isActive) { runCatching { socket.close() }; return@Runnable }
+            try {
+                socket.connect()
+                if (continuation.isActive) continuation.resumeWith(Result.success(Unit))
+                else runCatching { socket.close() }
+            } catch (problem: Exception) {
+                if (continuation.isActive) continuation.resumeWith(Result.failure(problem))
+                else runCatching { socket.close() }
+            }
+        })
+    }
+    override fun input(): InputStream = socket.inputStream
+    override fun output(): OutputStream = socket.outputStream
+    override fun close() = socket.close()
 }
 
 /** BLE UART with service-based selection. The class name remains compatible

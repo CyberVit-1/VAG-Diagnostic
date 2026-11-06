@@ -13,8 +13,10 @@ import java.io.IOException
 internal object ElmUdsNativeDriver {
     private const val TRANSACTION_TIMEOUT_MS = 20000L
     private data class NativeReply(val payload: List<Int>?)
-    suspend fun read(engine: ElmEngine, route: VagOemReadOnly.Route, request: String, pendingMs: Long): List<Int>? {
+    suspend fun read(engine: ElmEngine, route: VagOemReadOnly.Route, request: String, pendingMs: Long,
+        sessionProbe: Boolean = false): List<Int>? {
         require(ElmUdsReadRequests.allowed(request))
+        require(!sessionProbe || request == "1003")
         check(engine.vehicleReady)
         val mode = requireNotNull(engine.nativeSegmentation)
         check(mode.enabled)
@@ -26,12 +28,13 @@ internal object ElmUdsNativeDriver {
                 val rows = raw.uppercase().replace('>', '\n').replace('\r', '\n').split('\n')
                     .map { it.filterNot(Char::isWhitespace) }.filter { it.isNotEmpty() && it != wire }
                 if (rows == listOf("NODATA")) return@withTimeoutOrNull NativeReply(null)
+                if (sessionProbe && rows == listOf("?")) return@withTimeoutOrNull NativeReply(null)
                 val result = VagUdsNativeTransaction.decode(rows.joinToString("\r"), requireNotNull(route.udsRx), request)
                 result.payload?.let { return@withTimeoutOrNull NativeReply(it) }
                 mode.disable()
                 val final = ElmUdsPending.read(engine, route, request, null, pendingMs, result.pendingCount)
                 if (!mode.enableRoute(route)) throw VagProtocolFailure("Не восстановлен формат native CAN после ожидания")
-                mode.setResponseTimeout(if (request == "3E00") 1000 else 2000)
+                mode.setResponseTimeout(if (request == "3E00" || sessionProbe) 1000 else 2000)
                 NativeReply(final)
             } ?: throw VagProtocolFailure("Не завершён native UDS ответ")
             return reply.payload

@@ -32,8 +32,9 @@ class ElmVagCandidateDiscoveryTest {
             }.joinToString("\r")
         }
         override suspend fun write(bytes: ByteArray) {
-            val cmd = bytes.toString(Charsets.US_ASCII).trim()
-            sent += cmd
+            val wire = bytes.toString(Charsets.US_ASCII).trim()
+            val cmd = if (wire in setOf("3E001", "10031")) wire.dropLast(1) else wire
+            sent += wire
             if (cmd.startsWith("ATCRA") && cmd.length > 5) rx = cmd.drop(5).toInt(16)
             val id = byRx[rx]?.id
             if (!cmd.startsWith("AT")) addressed += id to cmd
@@ -148,7 +149,7 @@ class ElmVagCandidateDiscoveryTest {
             if (cancel) assertTrue(failure is CancellationException) else assertTrue(failure is IOException)
             assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
             assertFalse(units.containsKey("VAG-FFFF"))
-            assertEquals("3E00", link.sent.last())
+            assertEquals("3E001", link.sent.last())
         }
     }
 }

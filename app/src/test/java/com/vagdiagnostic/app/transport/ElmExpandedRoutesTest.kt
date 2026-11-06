@@ -47,8 +47,9 @@ class ElmExpandedRoutesTest {
             return frames.removeFirst()
         }
         override suspend fun write(bytes: ByteArray) {
-            val cmd = bytes.toString(Charsets.US_ASCII).trim()
-            sent += cmd
+            val wire = bytes.toString(Charsets.US_ASCII).trim()
+            val cmd = if (wire in setOf("3E001", "10031")) wire.dropLast(1) else wire
+            sent += wire
             val raw = when {
                 cmd == "ATZ" -> "ELM327"
                 cmd == "0100" -> "7E8064100BE3EA813"
@@ -122,7 +123,7 @@ class ElmExpandedRoutesTest {
         assertFalse(link.sent.contains("ATSH70D"))
         assertFalse(link.sent.contains("ATSH718"))
         assertEquals(2, units.getValue("VAG-46").dtcs.size)
-        assertTrue(link.sent.indexOf("ATFCSM1") < link.sent.indexOf("1003", link.sent.indexOf("ATSP7")))
+        assertTrue(link.sent.indexOf("ATFCSM1") < link.sent.indexOf("10031", link.sent.indexOf("ATSP7")))
         val next11 = link.sent.indexOf("ATSH70C")
         assertTrue(link.sent.indexOf("ATFCSM0", link.sent.indexOf("ATSP7")) in link.sent.indexOf("ATSP7") until next11)
         assertFalse(link.sent.any { it == "04" || it.startsWith("27") || it.startsWith("2E") })
@@ -143,7 +144,7 @@ class ElmExpandedRoutesTest {
         assertTrue(runCatching { scan(link, units) }.exceptionOrNull() is IOException)
         assertTrue(units.isEmpty())
         assertTrue(link.sent.last().endsWith("1A9F"))
-        assertFalse(link.sent.any { it.endsWith("2204A1") || it == "A80" || it == "1003" })
+        assertFalse(link.sent.any { it.endsWith("2204A1") || it == "A80" || it in setOf("1003", "10031") })
     }
     @Test fun conflictingAdvertisedTpAddressIsNeitherGuessedNorUsed() = runBlocking(VagRetryBackoff { }) {
         val link = Link(mismatchedList = true)
@@ -157,7 +158,7 @@ class ElmExpandedRoutesTest {
         for (link in listOf(Link(wrong29 = true), Link(fail29 = true))) {
             val units = linkedMapOf<String, ControlUnit>()
             try { scan(link, units); fail("Expected strict 29-bit failure") } catch (_: IOException) {}
-            assertEquals("3E00", link.sent.last())
+            assertEquals("3E001", link.sent.last())
             assertEquals(ReadState.NO_RESPONSE, units.getValue("VAG-46").state)
             assertFalse(link.sent.contains("22C000100003011"))
         }
