@@ -921,11 +921,9 @@ object ElmVagScan {
                 cachedPartReply = readOrNoData("22F187", allowNoData = true)
                         if (cachedPartReply == null) throw UdsNoResponse()
             }
-            if (active && reply != null && reply.size >= 6) {
-                val star = ((reply[4] shl 8) or reply[5]) * 10L
-                if (star !in 1..5750) throw VagProtocolFailure("UDS P2* вне поддержанного диапазона")
-                pendingMs = star + 250
-            }
+            // The researched session operation returns an empty success model
+            // after the matching positive envelope. Optional timing bytes do
+            // not gate the following read; retain the bounded reader policy.
         }
         suspend fun close() {
             if (!active) return

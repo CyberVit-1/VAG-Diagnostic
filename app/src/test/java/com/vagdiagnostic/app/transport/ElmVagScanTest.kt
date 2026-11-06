@@ -452,6 +452,18 @@ class ElmVagScanTest {
         assertEquals(64, units.getValue("VAG-19").dtcs.size)
         assertEquals(1, link.wireSent.count { it == "19028D1" })
     }
+    @Test fun optionalSessionTimingBytesDoNotPreventAnImmediateCompleteDtcRead() = runBlocking {
+        for (session in listOf("5003003203E8", "500300320000", "50030032FFFF")) {
+            val link = UdsLink(sessionReply = session, dtcReply = "59028D12345608")
+            val units = linkedMapOf<String, ControlUnit>()
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertEquals(session, ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+            assertEquals(1, link.sent.count { it == "19028D" })
+        }
+    }
     @Test fun rejectedRaw29CommandUsesConfirmedAutomaticFormattingWithoutReconnect() = runBlocking {
         val link = UdsLink(rawCan = true, includeConvenience = true, rejectRaw29 = true,
             dtcReply = "59028D12345608")
