@@ -23,9 +23,8 @@ internal object ElmUdsCanConfiguration {
             if (engine.command("ATDPN").trim().uppercase() !in setOf("7", "A7"))
                 throw IOException("ELM не подтвердил CAN 7")
         } else { ok("ATSH%03X".format(tx)); ok("ATCRA%03X".format(rx)) }
-        if (native) requireNotNull(engine.nativeSegmentation).setResponseTimeout(2000)
-        else {
-            ok("ATSTFF")
+        if (!native) {
+            ok("ATSTFA")
             ok((if (target.is29Bit) "ATFCSH%08X" else "ATFCSH%03X").format(tx))
             ok("ATFCSD300010"); ok("ATFCSM1")
             engine.needsFlowControlReset = true

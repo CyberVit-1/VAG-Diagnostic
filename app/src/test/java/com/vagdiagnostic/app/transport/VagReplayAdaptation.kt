@@ -27,7 +27,12 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
                 add("ATFCSM1" to "OK")
                 custom = true
             }
-            add((if (command == "ATFCSD300000") "ATFCSD300010" else command) to raw)
+            // Explicitly synthetic ACK for the researched 1000ms UDS window;
+            // retain the original recording and every ECU payload unchanged.
+            if (command == "ATSTFF" && uds) {
+                check(raw.replace(command, "").replace(">", "").trim() == "OK")
+                add("ATSTFA" to "OK")
+            } else add((if (command == "ATFCSD300000") "ATFCSD300010" else command) to raw)
             if (command == "ATSTFF" && uds) add("ATAT0" to "OK")
             // Historic resources contain one completed silent CHANNEL SETUP.
             // Additional attempts are explicitly synthetic silence, not a new

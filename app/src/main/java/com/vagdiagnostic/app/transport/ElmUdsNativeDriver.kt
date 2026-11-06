@@ -31,7 +31,7 @@ internal object ElmUdsNativeDriver {
                 mode.disable()
                 val final = ElmUdsPending.read(engine, route, request, null, pendingMs, result.pendingCount)
                 if (!mode.enableRoute(route)) throw VagProtocolFailure("Не восстановлен формат native CAN после ожидания")
-                mode.setResponseTimeout(2000)
+                mode.setResponseTimeout(if (request == "3E00") 1000 else 2000)
                 NativeReply(final)
             } ?: throw VagProtocolFailure("Не завершён native UDS ответ")
             return reply.payload

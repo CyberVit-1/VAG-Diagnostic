@@ -1,3 +1,28 @@
+## Adapter receive windows и FC/CF —06.11.2026
+
+Проверены ctor TimeoutSpec(1000,{1000,800,600,500},2000), native vtable
+supportsLongTimeouts=isObdLink||isVLinker и setTimeout: generic ms/4,
+STN STPTO, VT<=2.2.77 STPTO, VT>=2.2.78 VTTOST REP. Длинное окно не
+зависит от возможности RX/TX segmentation. Для presence используется
+первое поле1000, для обычных команд generic getCommandTimeout(0)=1000,
+long-capable adapter — последнее поле2000.
+
+runCommand выбирает800/600/500 только после конкретного предыдущего
+состояния-17=OBD2_RESPONSE_PENDING, а не после любого NO DATA(-11).
+Следовательно, уменьшать окна всех обычных повторов по этим константам
+необоснованно. Pending reception остаётся отдельной bounded адаптацией;
+полное совпадение этого участка по одной таблице не объявляется.
+
+Из setObdLinkFcCfTimeouts и его call-site извлечено STCTOR1000,1000 для
+STN>=5.6.5. Prefix'ctor ' отправляется через runStCommand. Настройка требует
+реального ACK; cache отдельно от response timeout. Полные442 локальных
+проверки в JVM/Android прошли, аппаратных замеров этого среза нет.
+
+Дополнительная сверка установила: onEstablishCommSuccess передаёт literal
+1003 в pokeEcu с expected-count1. Poke не использует обычный CanProtocol
+padding и не является StartDiagnosticSessionCommand. Контекст этого вызова
+нужно перенести отдельно, не распространяя CAN response-count1 на DTC.
+
 ## Session acceptance и static TimeoutSpec —06.11.2026
 
 StartDiagnosticSessionCommand::processPayload возвращает EmptyModel без

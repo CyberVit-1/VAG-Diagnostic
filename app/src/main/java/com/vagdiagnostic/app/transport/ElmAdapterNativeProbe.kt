@@ -10,7 +10,7 @@ internal object ElmAdapterNativeProbe {
             .filter { it.trim().uppercase() != "STI" }.joinToString("\n")
         val info = ElmNativeSegmentation.identify(rows) ?: run {
             val vt = engine.command("VTI", 1500)
-            ElmNativeSegmentation.identifyVt(vt) ?: return false
+            ElmNativeSegmentation.identifyVtAdapter(vt) ?: return false
         }
         engine.nativeSegmentation = ElmNativeSegmentation(info) { engine.command(it) }
         return true

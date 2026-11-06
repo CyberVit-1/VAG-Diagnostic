@@ -30,11 +30,13 @@ class ElmVagScanTest {
         val rejectRaw29: Boolean = false, val automatic29Status: String? = null,
         val automatic29StatusCommands: Set<String> = setOf("3E00", "1003", "22F187", "19028D", "1001"),
         val includeSteering: Boolean = false, val infoFailureCommand: String? = null,
-        val pacedDtc: Boolean = false, val pacedNativeDtc: Boolean = false) : ElmLink {
+        val pacedDtc: Boolean = false, val pacedNativeDtc: Boolean = false,
+        val requiredDtcTimeoutMs: Int = 0, val legacyTimeoutReply: String? = null) : ElmLink {
         override val label = "Scripted UDS link"
         val sent = mutableListOf<String>()
         val wireSent = mutableListOf<String>()
         val addressedRequests = mutableListOf<Pair<String, String>>()
+        val requestTimeouts = mutableListOf<Pair<String, Int>>()
         private val queue = ArrayDeque<Int>()
         private var hasDtcReply = false
         private var receiveId = "77A"
@@ -48,6 +50,7 @@ class ElmVagScanTest {
         private var canProtocol = "6"
         private var delayDtcRows = false
         private var delayedDtcBytes = 0
+        private var adapterTimeoutMs = 1000
         override suspend fun open() {}
         override fun close() { queue.clear() }
         override suspend fun readByte(): Int {
@@ -102,6 +105,7 @@ class ElmVagScanTest {
             if (command.startsWith("ATCRA")) receiveId = command.removePrefix("ATCRA")
             val id = if (wrongId) "77B" else receiveId
             if (!command.startsWith("AT") && !command.startsWith("ST") && !command.startsWith("VT")) addressedRequests += receiveId to command
+            if (!command.startsWith("AT") && !command.startsWith("ST") && !command.startsWith("VT")) requestTimeouts += command to adapterTimeoutMs
             if (command == "ATMA") {
                 if (functionalReceiveFailure) {
                     "BUFFER FULL\r".toByteArray(Charsets.US_ASCII).forEach { queue.add(it.toInt() and 255) }
@@ -121,6 +125,7 @@ class ElmVagScanTest {
                 command == "ATDPN" -> canProtocol
                 command == "STI" -> nativeBanner
                 command == "VTI" -> vtBanner
+                command.startsWith("STPTO") && legacyTimeoutReply != null -> legacyTimeoutReply
                 command.startsWith("ST") -> {
                     if ((nativeBanner == "?" && !(vtBanner != "?" && command.startsWith("STPTO"))) || command in nativeRejected) "?" else {
                         when (command) {
@@ -176,13 +181,18 @@ class ElmVagScanTest {
                     if (detailsFailure == "cancel") throw CancellationException("Stop during details")
                     payload(id, detailsReply)
                 }
-                command == "19028D" -> { hasDtcReply = true; when (pending) {
+                command == "19028D" -> { hasDtcReply = true; if (adapterTimeoutMs < requiredDtcTimeoutMs) "NO DATA" else when (pending) {
                     1 -> payload(id, "7F1978") + "\r" + payload(id, "590299")
                     2, 3 -> payload(id, "7F1978")
                     else -> payload(id, dtcReplies.getOrNull(dtcIndex++) ?: dtcReply ?: "59028D")
                 } }
                 command == "" -> "STOPPED"
                 else -> error("Unexpected UDS command $command")
+            }
+            if (reply == "OK") when {
+                command.matches(Regex("ATST[0-9A-F]{2}")) -> adapterTimeoutMs = command.takeLast(2).toInt(16) * 4
+                command.startsWith("STPTO") -> adapterTimeoutMs = command.removePrefix("STPTO").toInt()
+                command.startsWith("VTTOST REP:") -> adapterTimeoutMs = command.removePrefix("VTTOST REP:").toInt()
             }
             for (b in (reply + ">").toByteArray(Charsets.US_ASCII)) queue.add(b.toInt() and 255)
         }
@@ -464,6 +474,37 @@ class ElmVagScanTest {
             assertEquals(1, link.sent.count { it == "19028D" })
         }
     }
+    @Test fun adapterLongTimeoutSurvivesRejectedNativeAssembly() = runBlocking {
+        for (vt in listOf(false, true)) {
+            val link = UdsLink(rawCan = true, nativeBanner = if (vt) "?" else "STN1170 v5.6.5",
+                vtBanner = if (vt) "Synthetic Adapter v2.2.78" else "?",
+                nativeRejected = setOf(if (vt) "VTSWGP GR1, BZF1" else "STCSEGR1"),
+                requiredDtcTimeoutMs = 1500, dtcReply = "59028D12345608")
+            val units = linkedMapOf<String, ControlUnit>()
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+            ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+            assertTrue(link.wireSent.contains(if (vt) "VTTOST REP:2000" else "STPTO2000"))
+            assertFalse(link.wireSent.contains("19028D1"))
+            assertTrue(link.requestTimeouts.filter { it.first == "3E00" }.all { it.second == 1000 })
+            assertTrue(link.requestTimeouts.filter { it.first == "19028D" }.all { it.second == 2000 })
+        }
+    }
+    @Test fun olderVtKeepsItsConfirmedLongTimeoutWithoutTryingUnsupportedNativeAssembly() = runBlocking {
+        val link = UdsLink(rawCan = true, vtBanner = "Synthetic Adapter v2.2.59",
+            requiredDtcTimeoutMs = 1500, legacyTimeoutReply = "OK", dtcReply = "59028D12345608")
+        val units = linkedMapOf<String, ControlUnit>()
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+        assertTrue(link.wireSent.contains("STPTO2000"))
+        assertFalse(link.wireSent.any { it.startsWith("VTSWGP") })
+        assertFalse(link.wireSent.contains("19028D1"))
+    }
     @Test fun rejectedRaw29CommandUsesConfirmedAutomaticFormattingWithoutReconnect() = runBlocking {
         val link = UdsLink(rawCan = true, includeConvenience = true, rejectRaw29 = true,
             dtcReply = "59028D12345608")
@@ -562,7 +603,11 @@ class ElmVagScanTest {
         assertEquals(3, link.wireSent.count { it == "19028D1" })
         assertFalse(link.wireSent.contains("0319028DAAAAAAAA"))
         assertTrue(link.wireSent.contains(if (vt) "VTFCTRA 17FC008B, 17FE008B" else "STCFCPA17FC008B,17FE008B"))
-        assertEquals(2, link.wireSent.count { it == if (vt) "VTTOST REP:2000" else "STPTO2000" })
+        // Three listed sessions plus the bounded central-unit preflight each
+        // switch from the 1000ms presence window to the 2000ms command window.
+        assertEquals(4, link.wireSent.count { it == if (vt) "VTTOST REP:2000" else "STPTO2000" })
+        assertTrue(link.requestTimeouts.filter { it.first == "3E00" }.all { it.second == 1000 })
+        assertTrue(link.requestTimeouts.filter { it.first == "19028D" }.all { it.second == 2000 })
         }
     }
     @Test fun rejectedNativeFeatureFallsBackOnceToGenericRawWithoutLosingEcus() = runBlocking {
@@ -1389,10 +1434,11 @@ class ElmVagScanTest {
         assertTrue(units.getValue("VAG-19").note.contains("ПО 9999"))
         assertTrue(events.contains("VAG_ECU_INFO_19" to "PARSED"))
     }
-    @Test fun physicalUdsEnablesAdaptiveTimingForAllowedRequestsWithTheExistingMaximum() = runBlocking {
+    @Test fun physicalUdsEnablesAllowedAdaptiveRequestsWithItsOneSecondWindow() = runBlocking {
         val link = UdsLink()
         ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> })
-        assertTrue(link.sent.indexOf("ATSTFF") < link.sent.indexOf("ATAT1"))
+        assertTrue(link.sent.indexOf("ATSTFA") >= 0)
+        assertTrue(link.sent.indexOf("ATSTFA") < link.sent.indexOf("ATAT1"))
         assertTrue(link.sent.indexOf("3E00") < link.sent.indexOf("ATAT1"))
         assertTrue(link.sent.indexOf("ATAT1") < link.sent.indexOf("1003"))
     }

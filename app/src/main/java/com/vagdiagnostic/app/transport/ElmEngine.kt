@@ -175,13 +175,14 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
     private suspend fun commandLocked(text: String, timeoutMs: Long, deferJournal: Boolean): String {
         require(text.matches(Regex("[A-Z0-9]+", RegexOption.IGNORE_CASE)) ||
             text.matches(Regex("STCFCPA(?:[0-9A-F]{3},[0-9A-F]{3}|[0-9A-F]{8},[0-9A-F]{8})", RegexOption.IGNORE_CASE)) ||
-            text.matches(Regex("VTSWGP (?:GR1, BZF1|GR0|GT[01])|VTFCTRA (?:[0-9A-F]{3}, [0-9A-F]{3}|[0-9A-F]{8}, [0-9A-F]{8})|VTTOST REP:[0-9]{1,4}", RegexOption.IGNORE_CASE))) { "Недопустимая команда" }
+            text.matches(Regex("VTSWGP (?:GR1, BZF1|GR0|GT[01])|VTFCTRA (?:[0-9A-F]{3}, [0-9A-F]{3}|[0-9A-F]{8}, [0-9A-F]{8})|VTTOST REP:[0-9]{1,4}|STCTOR 1000, 1000", RegexOption.IGNORE_CASE))) { "Недопустимая команда" }
         val command = text.uppercase()
         if (command in setOf("ATZ", "ATD", "ATWS")) {
             automaticCanRoutes.clear()
             adaptiveTimingUnavailable = false
         }
         confirmedSettings.beforeCommand(command)
+        nativeSegmentation?.onTimingSetting(command)
         if (command.matches(Regex("ATSP[0-9A-C]"))) nativeSegmentation?.onProtocolSelection()
         val start = System.nanoTime()
         val collected = StringBuilder()

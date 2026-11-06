@@ -11,6 +11,7 @@ internal class ElmSettingCache {
         val key = key(command)
         val compact = command.filterNot(Char::isWhitespace)
         if (compact.matches(Regex("STCSEGR[01]|STCSEGT[01]|VTSWGP(?:GR1,BZF1|GR0|GT[01])"))) return
+        if (compact == "STCTOR1000,1000") return // Separate native FC/CF timer; not the response timeout.
         if (command == "STCFCPC" || command.startsWith("STCFCPA") || command.startsWith("VTFCTRA ")) {
             values.remove("ATFCSH"); values.remove("ATFCSD"); values.remove("ATFCSM")
         } else if (compact.matches(Regex("STPTO[0-9]+|VTTOSTREP:[0-9]+"))) {

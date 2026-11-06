@@ -862,7 +862,7 @@ object ElmVagScan {
             }
             val protocol = if (target.is29Bit) "7" else "6"
             // Keep automatic FC disabled until the new ID/filter/mode is ready.
-            for (cmd in listOf("ATSP$protocol", "ATH1", "ATD0", "ATCAF1", "ATCFC0", "ATV0", "ATCEA", "ATSTFF", "ATAT0")) ok(cmd)
+            for (cmd in listOf("ATSP$protocol", "ATH1", "ATD0", "ATCAF1", "ATCFC0", "ATV0", "ATCEA", "ATSTFA", "ATAT0")) ok(cmd)
             // Per-request timing below applies equally to CAF1, RAW and native
             // paths. A DTC request must not inherit an identification setting.
             if (target.is29Bit) {
@@ -980,6 +980,7 @@ object ElmVagScan {
             require(ElmUdsReadRequests.allowed(command))
             val target = requireNotNull(route)
             engine.configureAdaptiveTiming(ElmUdsReadRequests.allowsAdaptiveTiming(command))
+            ElmUdsRequestTiming.configure(engine, command)
             if (engine.nativeSegmentation?.enabled == true) return ElmUdsNativeDriver.read(engine, target, command, pendingMs)
             if (engine.manualUds && target.id !in engine.automaticCanRoutes) {
                 try { return ElmUdsRawTransaction.read(engine, target, command, pendingMs, automaticFlowControl = true) }

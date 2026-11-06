@@ -10,6 +10,42 @@ import org.junit.Test
 class ElmNativeSegmentationTest {
     private val info = ElmNativeSegmentation.Info(1170, 5, 6, 5)
     private val gateway = VagOemReadOnly.routes.getValue(0x19)
+    @Test fun modernStnConfirmsItsFcAndCfTimeoutsBeforeNativeUseAndAfterProtocolChange() = runBlocking {
+        for (patch in listOf(4, 5)) {
+            val sent = mutableListOf<String>()
+            val mode = ElmNativeSegmentation(ElmNativeSegmentation.Info(1170, 5, 6, patch)) { sent += it; "OK" }
+            assertTrue(mode.enableRoute(gateway))
+            assertEquals(if (patch == 5) 1 else 0, sent.count { it == "STCTOR 1000, 1000" })
+            val after = sent.toList()
+            assertTrue(mode.enableRoute(gateway)); assertEquals(after, sent)
+            if (patch == 5) {
+                mode.onTimingSetting("STCTOR 1000, 1000")
+                assertTrue(mode.enableRoute(gateway))
+                assertEquals(2, sent.count { it == "STCTOR 1000, 1000" })
+            }
+            mode.onProtocolSelection()
+            assertTrue(mode.enableRoute(gateway))
+            assertEquals(if (patch == 5) 3 else 0, sent.count { it == "STCTOR 1000, 1000" })
+        }
+    }
+    @Test fun rejectedFcTimeoutRollsBackNativeButKeepsIndependentLongTiming() = runBlocking {
+        val sent = mutableListOf<String>()
+        val mode = ElmNativeSegmentation(info) { sent += it; if (it == "STCTOR 1000, 1000") "?" else "OK" }
+        assertFalse(mode.enableRoute(gateway))
+        assertFalse(mode.enabled)
+        assertEquals(listOf("STCTOR 1000, 1000", "STCSEGR0", "STCSEGT0"), sent.takeLast(3))
+        assertTrue(mode.setOptionalResponseTimeout(2000))
+        assertEquals("STPTO2000", sent.last())
+        assertFalse(mode.enabled)
+    }
+    @Test fun ambiguousFcTimeoutReplyRequiresANewConnection() = runBlocking {
+        val sent = mutableListOf<String>()
+        val mode = ElmNativeSegmentation(info) { sent += it; if (it == "STCTOR 1000, 1000") "OK\r?" else "OK" }
+        assertTrue(runCatching { mode.enableRoute(gateway) }.exceptionOrNull() is VagProtocolFailure)
+        val after = sent.toList()
+        assertTrue(runCatching { mode.enableRoute(gateway) }.isFailure)
+        assertEquals(after, sent)
+    }
     @Test fun bannerOnlyIdentifiesCandidateAndDoesNotEnableAnything() {
         assertEquals(info, ElmNativeSegmentation.identify("STN1170 v5.6.5\r>"))
         for (raw in listOf("OK", "?", "ELM327 v1.5", "STN1170", "STN1170 v5.6.5\rUNKNOWN"))
@@ -20,7 +56,7 @@ class ElmNativeSegmentationTest {
         val mode = ElmNativeSegmentation(info) { sent += it; "OK" }
         assertTrue(mode.enableRoute(gateway))
         assertTrue(mode.enabled)
-        assertEquals(listOf("STCSEGR1", "STCSEGT1", "STCFCPC", "STCFCPA710,77A"), sent)
+        assertEquals(listOf("STCSEGR1", "STCSEGT1", "STCFCPC", "STCFCPA710,77A", "STCTOR 1000, 1000"), sent)
         mode.disable()
         assertFalse(mode.enabled)
         assertEquals(listOf("STCSEGR0", "STCSEGT0"), sent.takeLast(2))
@@ -30,7 +66,7 @@ class ElmNativeSegmentationTest {
         val sent = mutableListOf<String>()
         val mode = ElmNativeSegmentation(info) { sent += it; "OK" }
         assertTrue(mode.enableRoute(route))
-        assertEquals("STCFCPA%08X,%08X".format(route.udsTx, route.udsRx), sent.last())
+        assertEquals(listOf("STCFCPA%08X,%08X".format(route.udsTx, route.udsRx), "STCTOR 1000, 1000"), sent.takeLast(2))
     }
     @Test fun rejectedRxNeverPromotesTheFormatOrChangesOtherSettings() = runBlocking {
         val sent = mutableListOf<String>()
@@ -66,6 +102,16 @@ class ElmNativeSegmentationTest {
     }
     @Test fun vtFirmwareGateAndTimeoutSyntaxMatchTheConfirmedBoundaries() = runBlocking {
         assertNull(ElmNativeSegmentation.identifyVt("Synthetic Adapter v2.2.59"))
+        assertEquals(20259, ElmNativeSegmentation.identifyVtAdapter("Synthetic Adapter v2.2.59")!!.version)
+        val oldSent = mutableListOf<String>()
+        val old = ElmNativeSegmentation(ElmNativeSegmentation.identifyVtAdapter("Synthetic Adapter v2.2.59")!!) {
+            oldSent += it; "OK"
+        }
+        old.disable()
+        assertFalse(old.enableRoute(gateway))
+        assertTrue(oldSent.isEmpty())
+        assertTrue(old.setOptionalResponseTimeout(2000))
+        assertEquals(listOf("STPTO2000"), oldSent)
         assertEquals(20260, ElmNativeSegmentation.identifyVt("Synthetic Adapter v2.2.60")!!.version)
         assertEquals(20300, ElmNativeSegmentation.identifyVt("Synthetic Adapter BT3.0+ v2.3.0")!!.version)
         assertNull(ElmNativeSegmentation.identifyVt("Synthetic Adapter v2.3.0\rSynthetic Adapter v2.4.0"))
