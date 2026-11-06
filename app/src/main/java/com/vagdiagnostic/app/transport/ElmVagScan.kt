@@ -996,7 +996,10 @@ object ElmVagScan {
             }
             val result = withTimeoutOrNull(20000) {
                     val rx = requireNotNull(target.udsRx)
-                    var raw = execute(command, 8500)
+                    // Automatic framing still transfers the full CAN response.
+                    // Do not expire before a legal STmin-paced CF train; the
+                    // enclosing deadline continues to bound the whole read.
+                    var raw = execute(command, 20000)
                     if (raw.trim() == "?") throw ElmUdsRawTransaction.UnsupportedCommand(command)
                     var pending = 0
                     while (true) {

@@ -2,6 +2,7 @@ package com.vagdiagnostic.app.transport
 
 import com.vagdiagnostic.app.core.VagOemReadOnly
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
 import org.junit.Assert.*
 import org.junit.Test
 import java.util.ArrayDeque
@@ -14,8 +15,14 @@ class ElmUdsRawTransactionTest {
         val sent = mutableListOf<String>()
         val bytes = ArrayDeque<Int>()
         var closed = false
+        var rowDelayMs = 0L
         override suspend fun open() { }
-        override suspend fun readByte(): Int = if (bytes.isEmpty()) -2 else bytes.removeFirst()
+        override suspend fun readByte(): Int {
+            if (bytes.isEmpty()) return -2
+            val next = bytes.removeFirst()
+            if (next == '\r'.code && bytes.isNotEmpty() && rowDelayMs > 0) delay(rowDelayMs)
+            return next
+        }
         override fun close() { closed = true }
         override suspend fun write(bytes: ByteArray) {
             val command = bytes.toString(Charsets.US_ASCII).trim()
@@ -37,6 +44,22 @@ class ElmUdsRawTransactionTest {
         }
     }
     private val gateway = VagOemReadOnly.routes.getValue(0x19)
+    @Test fun maximumDtcReplyWithSixteenMillisecondFrameSpacingCompletesWithinTheTransactionBudget() = runBlocking {
+        val data = listOf(0x59, 2, 0x8D) + List(4092) { it and 255 }
+        val rows = mutableListOf("77A1FFF" + data.take(6).joinToString("") { "%02X".format(it) })
+        data.drop(6).chunked(7).forEachIndexed { index, chunk ->
+            rows += "77A2%X".format((index + 1) and 15) + chunk.joinToString("") { "%02X".format(it) }.padEnd(14, 'A')
+        }
+        val link = Link("0319028DAAAAAAAA" to rows.joinToString("\r"))
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        // Synthetic STmin=0x10 pacing; no measured vehicle timing is implied.
+        link.rowDelayMs = 16
+        val reply = requireNotNull(ElmUdsRawTransaction.read(engine, gateway, "19028D", automaticFlowControl = true))
+        assertEquals(data, reply)
+        assertEquals(1023, VagOemReadOnly.udsFaults(reply).values.size)
+        assertEquals(1, link.sent.count { it == "0319028DAAAAAAAA" })
+        assertFalse(link.closed)
+    }
     @Test fun presenceUsesOnlyItsShortFrameAndOneResponseHint() = runBlocking {
         val link = Link("023E001" to "023E001\r77A027E00")
         val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()

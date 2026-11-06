@@ -3,6 +3,7 @@ package com.vagdiagnostic.app.transport
 import com.vagdiagnostic.app.core.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 import org.junit.Assert.*
@@ -28,7 +29,8 @@ class ElmVagScanTest {
         val nativeProbeFailure: Boolean = false, val latePendingFirstFrame: Boolean = false,
         val rejectRaw29: Boolean = false, val automatic29Status: String? = null,
         val automatic29StatusCommands: Set<String> = setOf("3E00", "1003", "22F187", "19028D", "1001"),
-        val includeSteering: Boolean = false, val infoFailureCommand: String? = null) : ElmLink {
+        val includeSteering: Boolean = false, val infoFailureCommand: String? = null,
+        val pacedDtc: Boolean = false, val pacedNativeDtc: Boolean = false) : ElmLink {
         override val label = "Scripted UDS link"
         val sent = mutableListOf<String>()
         val wireSent = mutableListOf<String>()
@@ -44,17 +46,24 @@ class ElmVagScanTest {
         private var nativeRx = false
         private var nativeTx = false
         private var canProtocol = "6"
+        private var delayDtcRows = false
+        private var delayedDtcBytes = 0
         override suspend fun open() {}
         override fun close() { queue.clear() }
-        override suspend fun readByte(): Int = queue.pollFirst() ?: -2
+        override suspend fun readByte(): Int {
+            val next = queue.pollFirst() ?: return -2
+            if (delayDtcRows && pacedNativeDtc && ++delayedDtcBytes % 512 == 0) delay(600)
+            if (delayDtcRows && next == '\r'.code && queue.isNotEmpty()) delay(16)
+            return next
+        }
         private fun payload(id: String, hex: String): String {
             if (hex in setOf("NO DATA", "CAN ERROR")) return hex
             if (nativeRx && nativeAssembledReplies) return id + hex
             val length = hex.length / 2
             if (length <= 7) return id + "%02X".format(length) + hex
-            val response = id + "10%02X".format(length) + hex.take(12) + "\r" +
+            val response = id + "%04X".format(0x1000 or length) + hex.take(12) + "\r" +
                 hex.drop(12).chunked(14).mapIndexed { index, chunk ->
-                    id + "2%X".format(index + 1) + chunk.padEnd(14, '0')
+                    id + "2%X".format((index + 1) and 15) + chunk.padEnd(14, '0')
                 }.joinToString("\r")
             if (!rawCan || automaticRawFlow) return response
             rawTail = response.substringAfter('\r')
@@ -86,6 +95,8 @@ class ElmVagScanTest {
                 wire.substring(2, 2 + count * 2)
             } else wire
             sent += command
+            delayDtcRows = (pacedDtc || pacedNativeDtc) && command == "19028D"
+            delayedDtcBytes = 0
             if (command == "STI" && nativeProbeFailure) throw IOException("Synthetic adapter-info stream failure")
             if (command in setOf("ATSP6", "ATSP7")) canProtocol = command.last().toString()
             if (command.startsWith("ATCRA")) receiveId = command.removePrefix("ATCRA")
@@ -417,6 +428,29 @@ class ElmVagScanTest {
         assertEquals("Unchanged protocol selection must be reused", 1, link.wireSent.count { it == "ATSP6" })
         assertEquals("Gateway header must survive its completed discovery/read boundary", 1, link.wireSent.count { it == "ATSH710" })
         assertEquals("Every actual ECU DTC request must still be transmitted", 2, link.wireSent.count { it == "0319028DAAAAAAAA" })
+    }
+    @Test fun automaticFormattingKeepsTheCompleteMaximumDtcReplyAtConfiguredFrameSpacing() = runBlocking {
+        val data = listOf(0x59, 2, 0x8D) + List(4092) { it and 255 }
+        val link = UdsLink(dtcReply = data.joinToString("") { "%02X".format(it) }, pacedDtc = true)
+        val units = linkedMapOf<String, ControlUnit>()
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(64, units.getValue("VAG-19").dtcs.size) // First occurrence of each code, not lost tail records.
+        assertEquals(1, link.sent.count { it == "19028D" })
+    }
+    @Test fun nativeAssemblyAllowsASlowCompleteMaximumMessageWithoutRequestResend() = runBlocking {
+        val data = listOf(0x59, 2, 0x8D) + List(4092) { it and 255 }
+        val link = UdsLink(rawCan = true, nativeBanner = "STN1170 v5.6.5",
+            dtcReply = data.joinToString("") { "%02X".format(it) }, pacedNativeDtc = true)
+        val units = linkedMapOf<String, ControlUnit>()
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(64, units.getValue("VAG-19").dtcs.size)
+        assertEquals(1, link.wireSent.count { it == "19028D1" })
     }
     @Test fun rejectedRaw29CommandUsesConfirmedAutomaticFormattingWithoutReconnect() = runBlocking {
         val link = UdsLink(rawCan = true, includeConvenience = true, rejectRaw29 = true,

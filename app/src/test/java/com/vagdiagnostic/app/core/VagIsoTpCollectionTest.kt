@@ -4,6 +4,38 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VagIsoTpCollectionTest {
+    private fun maximumReply(id: Int): Pair<List<Int>, List<String>> {
+        val data = listOf(0x59, 2, 0x8D) + List(4092) { it and 255 }
+        val rows = mutableListOf("%03X1FFF".format(id) + data.take(6).joinToString("") { "%02X".format(it) })
+        data.drop(6).chunked(7).forEachIndexed { index, chunk ->
+            rows += "%03X2%X".format(id, (index + 1) and 15) + chunk.joinToString("") { "%02X".format(it) }.padEnd(14, 'A')
+        }
+        return data to rows
+    }
+    @Test fun maximumClassicIsoTpReplySurvivesSequenceWraps() {
+        val (data, rows) = maximumReply(0x77A)
+        assertEquals(586, rows.size)
+        val c = VagIsoTpCollection(setOf(0x77A), "19028D", automaticFlowControl = true)
+        c.accept(rows.joinToString("\r"))
+        assertEquals(data, c.payloads[0x77A])
+        assertTrue(c.unfinished.isEmpty())
+    }
+    @Test fun fourMaximumOwnersRemainSeparateAndFifthExceedsTheByteBudget() {
+        val owners = (0x770..0x774).toList()
+        val c = VagIsoTpCollection(owners.toSet(), "19028D", automaticFlowControl = true)
+        for (id in owners.take(4)) {
+            val (data, rows) = maximumReply(id)
+            c.accept(rows.joinToString("\r"))
+            assertEquals(data, c.payloads[id])
+        }
+        assertTrue(runCatching { c.accept(maximumReply(owners.last()).second.first()) }.isFailure)
+        assertEquals(owners.take(4).toSet(), c.payloads.keys)
+    }
+    @Test fun repeatedSingleFramesStillHaveAFiniteFrameBudget() {
+        val c = VagIsoTpCollection(setOf(0x77A), "19028D")
+        repeat(4096) { c.accept("77A0359028D") }
+        assertTrue(runCatching { c.accept("77A0359028D") }.isFailure)
+    }
     @Test fun interleavedOwnersDoNotSharePayloadOrSequence() {
         val c = VagIsoTpCollection(setOf(0x77A, 0x7B4), "222A26")
         c.accept("77A100A622A26010203\r7B404622A2680")

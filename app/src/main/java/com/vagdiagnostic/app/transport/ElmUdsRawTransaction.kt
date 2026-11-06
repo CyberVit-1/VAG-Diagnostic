@@ -16,6 +16,7 @@ internal object ElmUdsRawTransaction {
     /** Complete adapter rejection before any ECU/ISO-TP response. */
     class UnsupportedCommand(val request: String? = null) : IllegalStateException("Адаптер отклонил CAN запрос" + (request?.let { ": $it" } ?: ""))
     const val FLOW_CONTROL = "300010AAAAAAAAAA"
+    private const val TRANSACTION_TIMEOUT_MS = 20000L
     suspend fun read(engine: ElmEngine, target: VagOemReadOnly.Route, request: String,
         pendingMs: Long = 5250, automaticFlowControl: Boolean = false): List<Int>? {
         require(ElmUdsReadRequests.allowed(request))
@@ -32,7 +33,10 @@ internal object ElmUdsRawTransaction {
         val frames = VagIsoTpCollection(setOf(rx), request, automaticFlowControl)
         var completedSilence = false
         var monitorMode = false
-        suspend fun send(command: String): String = engine.command(command, 8500, deferJournal = true)
+        // 586 frames at the configured STmin=0x10 already exceed 8.5 seconds.
+        // Share the existing outer deadline instead of cutting off a legal
+        // long reply; this does not extend the total transaction budget.
+        suspend fun send(command: String): String = engine.command(command, TRANSACTION_TIMEOUT_MS, deferJournal = true)
             .also { ElmCompletedCanError.check(it, command) }
         fun accept(raw: String, echo: String) {
             val rows = raw.uppercase().replace('>', '\n').replace('\r', '\n').split('\n')
@@ -42,7 +46,7 @@ internal object ElmUdsRawTransaction {
             frames.accept(raw, echo)
         }
         try {
-            return withTimeoutOrNull(20000) {
+            return withTimeoutOrNull(TRANSACTION_TIMEOUT_MS) {
                 val initial = send(wire)
                 val rows = initial.uppercase().replace('>', '\n').replace('\r', '\n').split('\n')
                     .map { it.filterNot(Char::isWhitespace) }.filter { it.isNotEmpty() && it != wire }

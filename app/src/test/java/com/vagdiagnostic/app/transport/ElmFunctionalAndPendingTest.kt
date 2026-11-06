@@ -4,6 +4,7 @@ import com.vagdiagnostic.app.core.*
 import java.util.ArrayDeque
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -14,9 +15,14 @@ class ElmFunctionalAndPendingTest {
         val sent = mutableListOf<String>()
         val queue = ArrayDeque<Int>()
         var closed = false
+        var rowDelayMs = 0L
         override suspend fun open() {}
         override fun close() { closed = true; queue.clear() }
-        override suspend fun readByte() = queue.pollFirst() ?: -2
+        override suspend fun readByte(): Int {
+            val next = queue.pollFirst() ?: return -2
+            if (next == '\r'.code && queue.isNotEmpty() && rowDelayMs > 0) delay(rowDelayMs)
+            return next
+        }
         override suspend fun write(bytes: ByteArray) {
             val cmd = bytes.toString(Charsets.US_ASCII).trim()
             sent += cmd
@@ -140,6 +146,40 @@ class ElmFunctionalAndPendingTest {
             assertTrue(runCatching { ElmUdsPending.read(ElmEngine(link, { _, _, _, _ -> }), target,
                 "19028D", "${rx}037F1978", 100, 1) }.isFailure)
             assertTrue(link.closed)
+        }
+    }
+    @Test fun pendingWindowDoesNotCutOffTheConsecutiveFramesOfAMaximumDtcReply() = runBlocking {
+        val data = listOf(0x59, 2, 0x8D) + List(4092) { it and 255 }
+        val tail = data.drop(6).chunked(7).mapIndexed { index, chunk ->
+            "77A2%X".format((index + 1) and 15) + hex(chunk).padEnd(14, 'A')
+        }.joinToString("\r")
+        val link = Link { cmd -> when (cmd) {
+            "ATMA" -> "77A1FFF" + hex(data.take(6)) + "\r"
+            "" -> "STOPPED\r>"
+            "3000100000000000" -> tail + "\r>"
+            else -> "OK\r>"
+        } }
+        link.rowDelayMs = 16 // Synthetic configured STmin, not vehicle evidence.
+        val reply = ElmUdsPending.read(ElmEngine(link, { _, _, _, _ -> }),
+            VagOemReadOnly.routes.getValue(0x19), "19028D", "77A037F1978", 100, 1)
+        assertEquals(data, reply)
+        assertEquals(1023, VagOemReadOnly.udsFaults(reply).values.size)
+        assertEquals(listOf("ATCFC0", "ATCAF0", "ATMA", "", "3000100000000000", "ATCAF1", "ATCFC1"), link.sent)
+        assertFalse(link.closed)
+    }
+    @Test fun pendingFlowControlCannotHideContradictoryStatusOrAForeignOwner() = runBlocking {
+        for (prefix in listOf("OK", "NO DATA", "7E80359028D")) {
+            val link = Link { cmd -> when (cmd) {
+                "ATMA" -> "77A100B59028D123456\r"
+                "" -> "STOPPED\r>"
+                "3000100000000000" -> "$prefix\r77A21246543212400\r>"
+                else -> "OK\r>"
+            } }
+            val result = runCatching { ElmUdsPending.read(ElmEngine(link, { _, _, _, _ -> }),
+                VagOemReadOnly.routes.getValue(0x19), "19028D", "77A037F1978", 100, 1) }
+            assertTrue(prefix, result.exceptionOrNull() is VagProtocolFailure)
+            assertTrue(link.closed)
+            assertFalse(link.sent.contains("ATCAF1"))
         }
     }
     @Test fun pendingCancellationClosesWithoutFcOrSessionClose() = runBlocking {

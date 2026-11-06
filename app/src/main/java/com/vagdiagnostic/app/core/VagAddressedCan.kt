@@ -168,7 +168,9 @@ object VagAddressedCan {
                 errors += "Некорректные байты ISO-TP"
                 continue
             }
-            pciFrames += packed.chunked(2).map { it.toInt(16) }
+            val frame = packed.chunked(2).map { it.toInt(16) }
+            if (frame.size !in 1..8) errors += "Неверная длина CAN кадра"
+            else pciFrames += frame
         }
 
         if (usedCaf || expectedCafLength != null) {
@@ -190,7 +192,7 @@ object VagAddressedCan {
             if (first.size - 1 < pci) return Reply(null, listOf("Обрезан Single Frame"))
             return Reply(first.drop(1).take(pci).map { it.toByte() }.toByteArray(), emptyList())
         }
-        if ((pci and 0xF0) != 0x10 || first.size < 2)
+        if ((pci and 0xF0) != 0x10 || first.size != 8)
             return Reply(null, listOf("Ожидался ISO-TP Single Frame или First Frame"))
         val length = ((pci and 0x0F) shl 8) or first[1]
         if (length !in 8..4095) return Reply(null, listOf("Некорректная длина FF: " + length))
@@ -202,6 +204,10 @@ object VagAddressedCan {
                 break
             }
             val fragment = pciFrames[i]
+            if (fragment.size !in 2..8 || fragment.size - 1 < minOf(7, length - collected.size)) {
+                errors += "Короткий Consecutive Frame"
+                break
+            }
             if (fragment.isEmpty() || (fragment[0] and 0xF0) != 0x20 ||
                 (fragment[0] and 0x0F) != nextSeq) {
                 errors += "Неверный номер Consecutive Frame"

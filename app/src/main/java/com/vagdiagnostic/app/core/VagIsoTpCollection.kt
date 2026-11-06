@@ -71,7 +71,10 @@ class VagIsoTpCollection(val expectedIds: Set<Int>, val request: String,
             require(id in 0..0x1FFFFFFF && (headerSize != 3 || id <= 0x7FF)) { "Неверный CAN ID" }
             val frame = VagOemReadOnly.bytes(clean.drop(headerSize))
             require(frame.size in 1..8) { "Неверная длина CAN кадра" }
-            require(++frames <= 256) { "Превышен предел CAN кадров" }
+            // A legal 4095-byte classic ISO-TP reply needs 586 frames. Leave
+            // room for all replies within the separate 16 KiB payload budget
+            // and bounded pending traffic, while still rejecting endless rows.
+            require(++frames <= 4096) { "Превышен предел CAN кадров" }
             val owner = id.toInt()
             if (owner !in expectedIds) { unknown += owner; continue }
             require(owner !in invalid) { "Ответ уже признан противоречивым" }

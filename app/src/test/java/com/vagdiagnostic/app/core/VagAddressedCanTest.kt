@@ -110,6 +110,18 @@ class VagAddressedCanTest {
             assertTrue(sample, r.problems.isNotEmpty())
         }
     }
+    @Test fun shortOrOversizedFramesCannotBorrowBytesFromLaterPadding() {
+        for (raw in listOf(
+            "7E8100B5902FF12\r7E82134567F89ABCD01",
+            "7E8100F5902FF123456\r7E8217F89\r7E822ABCD0102030405",
+            "7E8100B5902FF123456\r7E8217F89ABCD0100000000",
+            "7E8035902FF0000000000"
+        )) {
+            val result = VagAddressedCan.decodeSingleEcu(raw, 0x7E8)
+            assertFalse(raw, result.valid)
+            assertTrue(result.problems.isNotEmpty())
+        }
+    }
 
     @Test fun wrongOrMissingEcuHeaderNeverAccepted() {
         val cases = listOf(
