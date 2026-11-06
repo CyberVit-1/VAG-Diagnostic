@@ -43,6 +43,7 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
     private val lock = Mutex()
     private val confirmedSettings = ElmSettingCache()
     private var confirmedCanHeader29: Int? = null
+    private var adaptiveTimingUnavailable = false
     internal var nativeSegmentation: ElmNativeSegmentation? = null
     internal val automaticCanRoutes = mutableSetOf<Int>()
     // Custom FC from a 29-bit OEM route must not leak into later 11-bit UDS.
@@ -134,6 +135,29 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
         if (!confirmedSettings.confirmed(command)) throw IOException("ELM не подтвердил $command")
         true
     }
+    /** Per-request UDS timing; a completed adapter refusal may select the
+     * fixed fallback, while ambiguous replies remain communication errors. */
+    suspend fun configureAdaptiveTiming(enabled: Boolean): Boolean = lock.withLock {
+        coroutineContext.ensureActive()
+        suspend fun fixed() {
+            if (confirmedSettings.confirmed("ATAT0")) return
+            val raw = commandLocked("ATAT0", 5500, false)
+            ElmCompletedCanError.check(raw, "ATAT0")
+            if (!confirmedSettings.confirmed("ATAT0")) throw IOException("ELM не подтвердил ATAT0")
+        }
+        if (!enabled || adaptiveTimingUnavailable) { fixed(); return@withLock false }
+        if (confirmedSettings.confirmed("ATAT1")) return@withLock true
+        val raw = commandLocked("ATAT1", 5500, false)
+        ElmCompletedCanError.check(raw, "ATAT1")
+        if (confirmedSettings.confirmed("ATAT1")) return@withLock true
+        if (replyRows("ATAT1", raw) != listOf("?")) throw IOException("ELM не подтвердил ATAT1")
+        adaptiveTimingUnavailable = true
+        fixed()
+        false
+    }
+    private fun replyRows(command: String, raw: String): List<String> =
+        raw.uppercase().replace('>', '\n').replace('\r', '\n').split('\n')
+            .map { it.filterNot(Char::isWhitespace) }.filter { it.isNotEmpty() && it != command }
     /** Set the full 29-bit TX ID as one acknowledged pair. The researched
      * driver sends SH before CP; never let an individual cache hit omit CP
      * after an actual header change. */
@@ -153,7 +177,10 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
             text.matches(Regex("STCFCPA(?:[0-9A-F]{3},[0-9A-F]{3}|[0-9A-F]{8},[0-9A-F]{8})", RegexOption.IGNORE_CASE)) ||
             text.matches(Regex("VTSWGP (?:GR1, BZF1|GR0|GT[01])|VTFCTRA (?:[0-9A-F]{3}, [0-9A-F]{3}|[0-9A-F]{8}, [0-9A-F]{8})|VTTOST REP:[0-9]{1,4}", RegexOption.IGNORE_CASE))) { "Недопустимая команда" }
         val command = text.uppercase()
-        if (command in setOf("ATZ", "ATD", "ATWS")) automaticCanRoutes.clear()
+        if (command in setOf("ATZ", "ATD", "ATWS")) {
+            automaticCanRoutes.clear()
+            adaptiveTimingUnavailable = false
+        }
         confirmedSettings.beforeCommand(command)
         if (command.matches(Regex("ATSP[0-9A-C]"))) nativeSegmentation?.onProtocolSelection()
         val start = System.nanoTime()
@@ -174,6 +201,10 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
             }
             val raw = collected.toString()
             confirmedSettings.observe(command, raw)
+            if (command == "ATAT1") when (replyRows(command, raw)) {
+                listOf("OK") -> adaptiveTimingUnavailable = false
+                listOf("?") -> adaptiveTimingUnavailable = true
+            }
             lastCommandNanos = clockNanos()
             if (raw.contains("BUFFER FULL", true) || raw.contains("STOPPED", true) || raw.contains("CAN ERROR", true)) {
                 status = "ADAPTER_ERROR"
@@ -328,5 +359,5 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
         }
     }
 
-    fun close() { confirmedCanHeader29 = null; automaticCanRoutes.clear(); nativeSegmentation = null; confirmedSettings.clear(); vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); needsFlowControlReset = false; link.close() }
+    fun close() { confirmedCanHeader29 = null; adaptiveTimingUnavailable = false; automaticCanRoutes.clear(); nativeSegmentation = null; confirmedSettings.clear(); vehicleReady = false; adapterReady = false; isCanVehicle = null; observedCanResponderIds = emptySet(); needsFlowControlReset = false; link.close() }
 }

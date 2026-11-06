@@ -1342,25 +1342,30 @@ class ElmVagScanTest {
         assertTrue(units.getValue("VAG-19").note.contains("ПО 9999"))
         assertTrue(events.contains("VAG_ECU_INFO_19" to "PARSED"))
     }
-    @Test fun physicalUdsEnablesAdaptiveTimingWithTheExistingMaximum() = runBlocking {
+    @Test fun physicalUdsEnablesAdaptiveTimingForAllowedRequestsWithTheExistingMaximum() = runBlocking {
         val link = UdsLink()
         ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> })
         assertTrue(link.sent.indexOf("ATSTFF") < link.sent.indexOf("ATAT1"))
-        assertTrue(link.sent.indexOf("ATAT1") < link.sent.indexOf("3E00"))
+        assertTrue(link.sent.indexOf("3E00") < link.sent.indexOf("ATAT1"))
+        assertTrue(link.sent.indexOf("ATAT1") < link.sent.indexOf("1003"))
     }
-    @Test fun unsupportedAdaptiveTimingFallsBackBeforeAnyUdsRequest() = runBlocking {
+    @Test fun unsupportedAdaptiveTimingFallsBackBeforeItsFirstSessionRequest() = runBlocking {
         val link = UdsLink(adaptiveReply = "?")
         val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> })
         assertTrue(result.complete)
         val position = link.sent.indexOf("ATAT1")
         assertTrue(position >= 0)
+        assertTrue(link.sent.indexOf("3E00") < position)
         assertEquals("ATAT0", link.sent[position + 1])
+        assertTrue(position + 1 < link.sent.indexOf("1003"))
     }
-    @Test fun malformedAdaptiveReplyCannotStartPhysicalUdsTraffic() = runBlocking {
+    @Test fun malformedAdaptiveReplyCannotStartTheSessionOrDtcRead() = runBlocking {
         val link = UdsLink(adaptiveReply = "BUFFER FULL")
         val failure = runCatching { ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> }) }.exceptionOrNull()
         assertTrue(failure.toString(), failure is IOException)
-        assertFalse(link.sent.contains("3E00"))
+        assertTrue(link.sent.contains("3E00"))
+        assertFalse(link.sent.contains("1003"))
+        assertFalse(link.sent.contains("19028D"))
     }
     @Test fun tpPreflightIoCannotInventAnUnreadDtc() = runBlocking {
         val link = Link(failIdentity = true, dtcReply = "5801051924")
@@ -1527,7 +1532,10 @@ class ElmVagScanTest {
         assertEquals(1, link.sent.count { it == "19028D" })
         val readIndex = link.sent.indexOf("19028D")
         val closeIndex = link.sent.drop(readIndex + 1).indexOf("1001") + readIndex + 1
-        assertEquals(listOf("ATCFC0", "ATCAF0", "ATMA", "", "ATCAF1", "ATCFC1", "1001"), link.sent.subList(readIndex + 1, closeIndex + 1))
+        // Restore the allowed session-close timing only after the final reply
+        // has ended receive-only monitoring and restored the framing backend.
+        assertEquals(listOf("ATCFC0", "ATCAF0", "ATMA", "", "ATCAF1", "ATCFC1", "ATAT1", "1001"),
+            link.sent.subList(readIndex + 1, closeIndex + 1))
         assertTrue(journal.contains("ATMA"))
     }
     @Test fun repeatedPendingIsBoundedWithoutResendOrPrematureSessionClose() = runBlocking {
@@ -1718,6 +1726,28 @@ class ElmVagScanTest {
         assertEquals(2, link.addressedRequests.count { it == ("778" to "1003") })
         assertEquals(2, link.addressedRequests.count { it == ("778" to "22F187") })
         assertFalse(link.addressedRequests.contains("778" to "19028D"))
+    }
+    @Test fun rawUdsMetadataUsesAdaptiveTimingWhileDtcKeepsTheFixedWindow() = runBlocking {
+        val link = UdsLink(rawCan = true, includeSteering = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true)
+        engine.connect()
+        ElmVagScan.scan(engine, {}, { _, _, _ -> }, discoverAdditionalUnits = false)
+        var timing = ""
+        var metadata = 0
+        var faults = 0
+        for (command in link.sent) {
+            if (command in setOf("ATAT0", "ATAT1")) timing = command
+            if (command in setOf("22F187", "22F197", "22F189", "22F19E", "220174", "1003", "1001")) {
+                assertEquals("$command must use its allowed adaptive timing", "ATAT1", timing)
+                metadata++
+            }
+            if (command == "19028D") {
+                assertEquals("DTC must retain the non-adaptive receive window", "ATAT0", timing)
+                faults++
+            }
+        }
+        assertTrue(metadata > 5)
+        assertTrue(faults >= 2)
     }
     @Test fun gatewayDiscoveryDoesNotRequireALegislatedElevenBitObdPair() = runBlocking {
         for (protocol in listOf("7", "8", "9", "?")) {

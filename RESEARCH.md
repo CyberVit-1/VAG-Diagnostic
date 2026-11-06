@@ -1,3 +1,22 @@
+## UDS adaptive timing —06.11.2026
+
+В исследованных конструкторах identification F187/F197/F189/F19E/F1A2/0174
+и StartDiagnosticSession присутствует OPT_ALLOW_ADAPTIVE_TIMEOUT. У ReadDTC
+by status mask, списка и extended DTC records такого разрешения нет.
+Это основание выбора ATAT перед запросом, не глобальной настройки ECU.
+
+[Первичный ELM327 datasheet](https://www.elmelectronics.com/wp-content/uploads/2017/01/ELM327DS.pdf),
+AT0/AT1/AT2: адаптивное ожидание использует наблюдаемые ответы, сохраняя
+ATST как верхнюю границу. В реализации ATAT1 требует реального ACK;
+только завершённый '?' допускает подтверждённый ATAT0. Режим не меняется
+во время незавершённого pending. Это не измерение нового аппаратного времени.
+
+Отдельный3E00 в исходном установлении связи имеет expected response count1.
+Обычные ISO-TP SF этого же драйвера паддируются и передаются без такого
+ограничения. Обобщать count1 на многофреймовые DTC нельзя. Exactvtable:
+0x30=setResponses,0x34=setHeadersEnabled,0x94=setCanAutoFormat,
+0x9C=setCanAutoFlowControl. Старые пометки "possible slot" не доказательство.
+
 ## BLE UART и Android GATT —06.11.2026
 
 Добавлены известные полные профили UART FFF0/FFF1/FFF2 иE47C с отдельной

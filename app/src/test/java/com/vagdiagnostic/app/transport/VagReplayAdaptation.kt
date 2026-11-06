@@ -7,13 +7,13 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
     var uds = false
     var tx = ""
     var custom = false
-    return withSyntheticTpKeepalives(buildList {
+    return withExplicitUdsTiming(withSyntheticTpKeepalives(buildList {
         for ((command, raw) in withExplicit29BitHeaderOrder(withoutLegacySilentProbes(rows))) {
             if (command.startsWith("ATSP")) protocol = command.removePrefix("ATSP")
             if (command == "ATCAF0") uds = false
             if (command == "ATCAF1") uds = true
-            // Physical UDS now uses adaptive timing. The recorded raw TP ACK
-            // windows remain fixed; only adapter setup is synthetic here.
+            // UDS starts fixed; per-request timing is added explicitly below.
+            // The original TP ACK windows and ECU payloads remain unchanged.
             if (command == "ATAT0" && uds) continue
             if (command == "ATFCSM0") custom = false
             if (command == "ATFCSM1") custom = true
@@ -28,7 +28,7 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
                 custom = true
             }
             add((if (command == "ATFCSD300000") "ATFCSD300010" else command) to raw)
-            if (command == "ATSTFF" && uds) add("ATAT1" to "OK")
+            if (command == "ATSTFF" && uds) add("ATAT0" to "OK")
             // Historic resources contain one completed silent CHANNEL SETUP.
             // Additional attempts are explicitly synthetic silence, not a new
             // physical recording or evidence that the ECU remains absent.
@@ -43,7 +43,29 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
             if (uds && VagReadRetry.enabled(command) && raw.trim() == "NO DATA")
                 add(command to "NO DATA")
         }
-    })
+    }))
+}
+
+/** Synthetic AT confirmations only. The eight adaptive command options are
+ * independently listed from the audited read constructors; no ECU response,
+ * DTC record, pending frame or timing observation is synthesized here. */
+private fun withExplicitUdsTiming(rows: List<Pair<String, String>>): List<Pair<String, String>> = buildList {
+    var timing: String? = null
+    val adaptive = setOf("1003", "1001", "22F187", "22F197", "22F189", "22F19E", "22F1A2", "220174")
+    val fixed = setOf("3E00", "19028D", "2204A1", "222A26", "222A28")
+    for ((command, raw) in rows) {
+        val logical = if (command.matches(Regex("0[1-7][0-9A-F]{14}"))) {
+            val count = command.take(2).toInt(16)
+            command.substring(2, 2 + count * 2)
+        } else command
+        if (logical in adaptive || logical in fixed || logical.matches(Regex("1906[0-9A-F]{6}FF"))) {
+            val required = if (logical in adaptive) "ATAT1" else "ATAT0"
+            if (timing != required) { add(required to "OK"); timing = required }
+        }
+        add(command to raw)
+        if (command.startsWith("ATSP") || command in setOf("ATZ", "ATD", "ATWS")) timing = null
+        if (command in setOf("ATAT0", "ATAT1")) timing = command.takeIf { raw.trim() == "OK" }
+    }
 }
 
 /** Recorded responses are unchanged. Added idle A3/A1 exchanges explicitly

@@ -862,15 +862,9 @@ object ElmVagScan {
             }
             val protocol = if (target.is29Bit) "7" else "6"
             // Keep automatic FC disabled until the new ID/filter/mode is ready.
-            for (cmd in listOf("ATSP$protocol", "ATH1", "ATD0", "ATCAF1", "ATCFC0", "ATV0", "ATCEA", "ATSTFF")) ok(cmd)
-            // Keep the conservative maximum, but let ELM adapt the idle wait
-            // after complete replies. Raw TP2.0 still uses fixed ACK timing.
-            val adaptive = execute("ATAT1").uppercase().replace("ATAT1", "").filterNot { it.isWhitespace() }
-            when (adaptive) {
-                "OK" -> Unit
-                "?" -> ok("ATAT0")
-                else -> throw IOException("ELM не подтвердил адаптивный тайминг UDS")
-            }
+            for (cmd in listOf("ATSP$protocol", "ATH1", "ATD0", "ATCAF1", "ATCFC0", "ATV0", "ATCEA", "ATSTFF", "ATAT0")) ok(cmd)
+            // Per-request timing below applies equally to CAF1, RAW and native
+            // paths. A DTC request must not inherit an identification setting.
             if (target.is29Bit) {
                 engine.needsFlowControlReset = true
                 engine.configureCanHeader29(tx)
@@ -987,6 +981,7 @@ object ElmVagScan {
         private suspend fun readOrNoDataOnce(command: String, allowNoData: Boolean): List<Int>? {
             require(ElmUdsReadRequests.allowed(command))
             val target = requireNotNull(route)
+            engine.configureAdaptiveTiming(ElmUdsReadRequests.allowsAdaptiveTiming(command))
             if (engine.nativeSegmentation?.enabled == true) return ElmUdsNativeDriver.read(engine, target, command, pendingMs)
             if (engine.manualUds && target.id !in engine.automaticCanRoutes) {
                 try { return ElmUdsRawTransaction.read(engine, target, command, pendingMs, automaticFlowControl = true) }
