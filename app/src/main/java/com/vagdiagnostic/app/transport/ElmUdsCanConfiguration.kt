@@ -1,0 +1,34 @@
+package com.vagdiagnostic.app.transport
+
+import com.vagdiagnostic.app.core.VagOemReadOnly
+import java.io.IOException
+
+/** One physical route, with automatic FC disabled until all headers and
+ * framing modes have been positively acknowledged. */
+internal object ElmUdsCanConfiguration {
+    suspend fun configure(engine: ElmEngine, target: VagOemReadOnly.Route) {
+        check(engine.vehicleReady)
+        val tx = requireNotNull(target.udsTx)
+        val rx = requireNotNull(target.udsRx)
+        suspend fun ok(command: String) { engine.configureSetting(command) }
+        ok(if (target.is29Bit) "ATSP7" else "ATSP6")
+        ok("ATCFC0")
+        if (engine.needsFlowControlReset) { ok("ATFCSM0"); engine.needsFlowControlReset = false }
+        val automatic = target.id in engine.automaticCanRoutes
+        val native = !automatic && engine.nativeSegmentation?.enableRoute(target) == true
+        for (command in listOf("ATH1", "ATD0", if (native || automatic) "ATCAF1" else "ATCAF0", "ATV0", "ATCEA", "ATAT0")) ok(command)
+        if (target.is29Bit) {
+            engine.configureCanHeader29(tx)
+            ok("ATCRA%08X".format(rx))
+            if (engine.command("ATDPN").trim().uppercase() !in setOf("7", "A7"))
+                throw IOException("ELM не подтвердил CAN 7")
+        } else { ok("ATSH%03X".format(tx)); ok("ATCRA%03X".format(rx)) }
+        if (!native) {
+            ok("ATSTFA")
+            ok((if (target.is29Bit) "ATFCSH%08X" else "ATFCSH%03X").format(tx))
+            ok("ATFCSD300010"); ok("ATFCSM1")
+            engine.needsFlowControlReset = true
+        }
+        ok("ATCFC1")
+    }
+}
