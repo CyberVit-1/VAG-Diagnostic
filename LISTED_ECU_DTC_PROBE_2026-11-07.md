@@ -1,5 +1,19 @@
 # Проверка памяти DTC после молчания служебных запросов — 07.11.2026
 
+## Программная проверка исходного среза
+
+Commit`a862b1a7d84107cd9a51563752cc5ecf19fa41be`,
+tree`b5abcbe1b57a64a5256b757505d63b11f158d9d3`.
+[Push CI42355016128](https://github.com/CyberVit-1/VAG-Diagnostic/actions/runs/42355016128)
+(job128351097976) и
+[PR CI42355019271](https://github.com/CyberVit-1/VAG-Diagnostic/actions/runs/42355019271)
+(job128351108136) —оба completed/success. В каждом фактически54 suites,
+479 tests,0 failures/errors/skips; assembleDebug и DEX783/max112/10894,
+oversized[] прошли. Это проверка именно данного source, не автомобильный тест.
+Push artifact13567436413,18118478байт, с именем internal-not-for-vehicle-test
+и полным commit SHA; он не выдавался пользователю и не устанавливался.
+Собственное физическое чтение04/46 этим не подтверждено.
+
 Внутренняя разработка поверх программно проверенного53e1dde и документации
 97eccdb. Новая пользовательская версия не назначена, APK не выдаётся.
 

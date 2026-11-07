@@ -83,6 +83,10 @@ object ElmVagScan {
         private var discoveryReconnectNeeded = false
         private var diagnosticAccess: VagDiagnosticAccess.Status? = null
         private var currentEngine = engine
+        // Protocol drivers may close the damaged engine before recovery is
+        // called. Retain only this recognition fact, never its capability object.
+        private var nativeFamilyRecognized = false
+        private var nativeSegmentationRejected = false
         private var channelRecoveries = 0
         private var listConfirmed = false
         private var candidateRoutes: Map<Int, VagOemReadOnly.Route> = emptyMap()
@@ -98,6 +102,8 @@ object ElmVagScan {
             // Do not turn failures of four different ECUs into a global limit
             // that prevents the remaining verified installation scope being read.
             currentCoroutineContext().ensureActive()
+            if (cause is ElmNativeFramingMismatch) nativeSegmentationRejected = true
+            val reprobeNative = currentEngine.manualUds && nativeFamilyRecognized
             event("VAG_CHANNEL_RECOVERY", "$key: новое подключение перед продолжением очереди", "RECOVERING")
             withContext(NonCancellable) { currentEngine.flushJournal() }
             currentEngine.close()
@@ -111,6 +117,17 @@ object ElmVagScan {
                 catch (cancel: CancellationException) { throw cancel }
                 catch (failure: Exception) { throw IOException("Не удалось подтвердить новое соединение после ошибки $key", failure) }
                 if (!currentEngine.vehicleReady) throw IOException("OBD после закрытия TP-канала не подтверждён")
+                // close() discards native configuration. Identify the replacement
+                // itself before any route is retried; never reuse the old
+                // transport's capability object or silently lose its RX window.
+                // An unidentified generic ELM must not be sent the same failed
+                // vendor probe again after recovering from that probe itself.
+                nativeFamilyRecognized = reprobeNative && currentEngine.manualUds &&
+                    ElmAdapterNativeProbe.inspect(currentEngine)
+                if (nativeSegmentationRejected) currentEngine.nativeSegmentation?.let { mode ->
+                    mode.rejectSegmentation()
+                    event("VAG_ADAPTER_FORMAT_FALLBACK", "Native-сборка не подтверждена; обычный ISO-TP, настройки ожидания проверяются отдельно", "GENERIC")
+                }
                 currentCoroutineContext().ensureActive()
                 channelRecoveries++
                 event("VAG_CHANNEL_RECOVERY", "$key: OBD подтверждён; очередь продолжается; восстановлений=$channelRecoveries", "CONFIRMED")
@@ -712,6 +729,7 @@ object ElmVagScan {
         suspend fun run(): Outcome {
             if (currentEngine.manualUds) try {
                 val nativeCandidate = ElmAdapterNativeProbe.inspect(currentEngine)
+                nativeFamilyRecognized = nativeCandidate
                 event("VAG_ADAPTER_NATIVE_CANDIDATE", if (nativeCandidate) "Семейство адаптера распознано; команды режима требуют подтверждения"
                     else "Общая ветвь ELM", if (nativeCandidate) "CANDIDATE" else "GENERIC")
             } catch (cancel: CancellationException) { throw cancel }

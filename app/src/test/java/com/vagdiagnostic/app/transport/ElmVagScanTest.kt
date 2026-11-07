@@ -44,7 +44,8 @@ class ElmVagScanTest {
         val requiredDtcTimeoutMs: Int = 0, val legacyTimeoutReply: String? = null,
         val echoConnectionProbe: Boolean = false,
         val includeSteeringAngle: Boolean = false, val quietPreflightReceivers: Set<String> = emptySet(),
-        val dtcByReceiver: Map<String, String> = emptyMap()) : ElmLink {
+        val dtcByReceiver: Map<String, String> = emptyMap(), val nativeFirstFrameOnly: Boolean = false,
+        val quietPreflightCommands: Set<String> = setOf("3E00", "1003", "22F187")) : ElmLink {
         override val label = "Scripted UDS link"
         val sent = mutableListOf<String>()
         val wireSent = mutableListOf<String>()
@@ -81,6 +82,9 @@ class ElmVagScanTest {
                 hex.drop(12).chunked(14).mapIndexed { index, chunk ->
                     id + "2%X".format((index + 1) and 15) + chunk.padEnd(14, '0')
                 }.joinToString("\r")
+            // A lying native mode with expected-response-count=1 may stop
+            // after a raw FirstFrame rather than deliver an assembled message.
+            if (nativeRx && !nativeAssembledReplies && nativeFirstFrameOnly) return response.substringBefore('\r')
             if (!rawCan || automaticRawFlow) return response
             rawTail = response.substringAfter('\r')
             return response.substringBefore('\r')
@@ -168,7 +172,7 @@ class ElmVagScanTest {
                 functionalComplete && command == rejectAfterFunctional -> "?"
                 command.startsWith("AT") -> "OK"
                 command.endsWith("C000100003011") -> "NO DATA"
-                command in setOf("3E00", "1003", "22F187") && id in quietPreflightReceivers -> "NO DATA"
+                command in quietPreflightCommands && id in quietPreflightReceivers -> "NO DATA"
                 command in setOf("3E00", "1003", "22F187") && id == "778" && (!includeCentral || centralSilent) -> "NO DATA"
                 command == "3E00" -> payload(id, presenceReplies.getOrNull(presenceIndex++) ?: presenceReply)
                 command == "1003" -> payload(id, sessionReply)
@@ -704,7 +708,7 @@ class ElmVagScanTest {
     }
     @Test fun adapterInfoStreamFailureUsesFreshObdProofBeforeAnyEcuRead() = runBlocking {
         val old = UdsLink(rawCan = true, nativeProbeFailure = true)
-        val fresh = UdsLink(rawCan = true, includeEngine = true)
+        val fresh = UdsLink(rawCan = true, includeEngine = true, nativeProbeFailure = true)
         val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = true); engine.connect()
         val units = linkedMapOf<String, ControlUnit>()
         var replacements = 0
@@ -718,8 +722,17 @@ class ElmVagScanTest {
         assertTrue(fresh.wireSent.indexOf("0100") < fresh.wireSent.indexOf("023E001"))
     }
     @Test fun lyingNativeAcknowledgementsCannotPromoteRawFramesAsNative() = runBlocking {
-        val old = UdsLink(rawCan = true, nativeBanner = "STN1170 v5.6.5", nativeAssembledReplies = false)
-        val fresh = UdsLink(rawCan = true, includeEngine = true)
+        for (vt in listOf(false, true)) for (firstFrameOnly in listOf(false, true)) {
+        val banner = if (vt) "?" else "STN1170 v5.6.5"
+        val vtInfo = if (vt) "Synthetic Adapter v2.3.0" else "?"
+        val quiet = if (firstFrameOnly) setOf("77A") else emptySet()
+        val identity = if (firstFrameOnly) partReply("1K0907530") else "7F2231"
+        val old = UdsLink(rawCan = true, nativeBanner = banner, vtBanner = vtInfo, nativeAssembledReplies = false,
+            nativeFirstFrameOnly = firstFrameOnly, quietPreflightReceivers = quiet, identityReply = identity,
+            quietPreflightCommands = setOf("3E00", "1003"))
+        val fresh = UdsLink(rawCan = true, includeEngine = true, nativeBanner = banner, vtBanner = vtInfo,
+            nativeAssembledReplies = false, requiredDtcTimeoutMs = 1500, nativeFirstFrameOnly = firstFrameOnly,
+            quietPreflightReceivers = quiet, identityReply = identity, quietPreflightCommands = setOf("3E00", "1003"))
         val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = true); engine.connect()
         val units = linkedMapOf<String, ControlUnit>()
         var replacements = 0
@@ -731,8 +744,12 @@ class ElmVagScanTest {
             })
         assertEquals(1, replacements)
         assertFalse(old.wireSent.contains("19028D1"))
+        assertTrue(fresh.wireSent.contains("STI"))
+        assertTrue(fresh.wireSent.contains(if (vt) "VTTOST REP:2000" else "STPTO2000"))
+        assertFalse(fresh.wireSent.contains(if (vt) "VTSWGP GR1, BZF1" else "STCSEGR1"))
         assertEquals(2, fresh.wireSent.count { it == "0319028DAAAAAAAA" })
         for (address in listOf("VAG-19", "VAG-01")) assertEquals(ReadState.COMPLETE, units.getValue(address).state)
+        }
     }
     @Test fun nativeLateFirstFrameGetsOnePhysicalFcAndKeepsBothDtcRecords() = runBlocking {
         for (vt in listOf(false, true)) {
@@ -779,6 +796,70 @@ class ElmVagScanTest {
         assertFalse(fresh.sent.contains("2204A1"))
         }
     }
+    @Test fun freshEnhancedAdapterMustRegainItsOwnCapabilitiesBeforeRetryingDtc() = runBlocking {
+        for (vt in listOf(false, true)) {
+            val stn = if (vt) "?" else "STN1170 v5.6.5"
+            val vtInfo = if (vt) "Synthetic Adapter v2.3.0" else "?"
+            val old = UdsLink(rawCan = true, nativeBanner = stn, vtBanner = vtInfo,
+                dtcReplies = listOf("59038D"))
+            val fresh = UdsLink(rawCan = true, nativeBanner = stn, vtBanner = vtInfo,
+                requiredDtcTimeoutMs = 1500)
+            val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = true)
+            engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            var replacements = 0
+            val result = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                discoverAdditionalUnits = false,
+                recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }, manualUds = true) })
+            assertTrue("vt=$vt: ${result.note}", result.complete)
+            assertEquals(1, replacements)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            val enable = if (vt) "VTSWGP GR1, BZF1" else "STCSEGR1"
+            val window = if (vt) "VTTOST REP:2000" else "STPTO2000"
+            assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOf("STI"))
+            assertTrue(fresh.sent.indexOf("STI") in 0 until fresh.sent.indexOf(enable))
+            assertTrue(fresh.sent.contains(window))
+            assertEquals(1, fresh.sent.count { it == "19028D" })
+        }
+    }
+
+    @Test fun failedAdapterReprobeClosesReplacementWithoutDiscardingEarlierDtc() = runBlocking {
+        for (mode in listOf("io", "cancel")) {
+            val old = UdsLink(rawCan = true, includeEngine = true, nativeBanner = "STN1170 v5.6.5",
+                dtcReplies = listOf("59028D12345608", "59038D"))
+            val delegate = UdsLink(rawCan = true)
+            val sent = mutableListOf<String>()
+            var closes = 0
+            val replacement = object : ElmLink {
+                override val label = "Synthetic failed adapter reprobe"
+                override suspend fun open() = delegate.open()
+                override suspend fun readByte() = delegate.readByte()
+                override fun close() { closes++; delegate.close() }
+                override suspend fun write(bytes: ByteArray) {
+                    val cmd = bytes.toString(Charsets.US_ASCII).trim()
+                    sent += cmd
+                    if (cmd == "STI") {
+                        if (mode == "cancel") throw CancellationException("Stopped during adapter reprobe")
+                        throw IOException("Adapter stream failed during reprobe")
+                    }
+                    delegate.write(bytes)
+                }
+            }
+            val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = true)
+            engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            val failure = runCatching { ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                discoverAdditionalUnits = false,
+                recreateEngine = { ElmEngine(replacement, { _, _, _, _ -> }, manualUds = true) }) }.exceptionOrNull()
+            if (mode == "cancel") assertTrue(failure is CancellationException) else assertTrue(failure is IOException)
+            assertTrue(closes > 0)
+            assertEquals("STI", sent.last())
+            assertFalse(sent.any { it == "19028D1" || it == "0319028DAAAAAAAA" })
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals(listOf("123456"), units.getValue("VAG-19").dtcs.map { it.code })
+        }
+    }
+
     @Test fun expiredPendingRecoversOnlyAfterAbandoningOldUdsStream() = runBlocking {
         for (backend in 0..3) {
         val manual = backend != 0
