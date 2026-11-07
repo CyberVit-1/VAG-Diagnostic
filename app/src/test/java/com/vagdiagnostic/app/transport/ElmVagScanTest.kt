@@ -747,6 +747,10 @@ class ElmVagScanTest {
         assertTrue(fresh.wireSent.contains("STI"))
         assertTrue(fresh.wireSent.contains(if (vt) "VTTOST REP:2000" else "STPTO2000"))
         assertFalse(fresh.wireSent.contains(if (vt) "VTSWGP GR1, BZF1" else "STCSEGR1"))
+        val firstRawRequest = fresh.wireSent.indexOf("023E001")
+        assertTrue(firstRawRequest >= 0)
+        for (off in if (vt) listOf("VTSWGP GR0", "VTSWGP GT0") else listOf("STCSEGR0", "STCSEGT0"))
+            assertTrue("$off must be confirmed before raw reception", fresh.wireSent.indexOf(off) in 0 until firstRawRequest)
         assertEquals(2, fresh.wireSent.count { it == "0319028DAAAAAAAA" })
         for (address in listOf("VAG-19", "VAG-01")) assertEquals(ReadState.COMPLETE, units.getValue(address).state)
         }

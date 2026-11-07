@@ -28,9 +28,10 @@ internal class ElmNativeSegmentation(val info: Info, private val send: suspend (
     private val needsFcTimeouts get() = info.family == Family.STN && info.version >= 50605
     val enabled: Boolean get() = state == State.ON
 
-    /** Apply a scan-local format rejection only to a fresh, inactive mode.
+    /** Confirm hardware OFF before applying the scan-local format rejection.
      * Family timing support remains independent of segmentation support. */
-    fun rejectSegmentation() {
+    suspend fun rejectSegmentation() {
+        disable()
         check(state == State.OFF)
         unavailable = true
     }
