@@ -1340,6 +1340,44 @@ class ElmVagScanTest {
         }
     }
 
+    @Test fun listedDtcProbeSurvivesFreshConnectionAfterDamagedOwnReply() = runBlocking {
+        for (backend in 0..3) for (rx in listOf("7BB", "17FE008B"))
+            for (reply in listOf("59028D12345608", "59028D", "7F1933", "NO DATA")) {
+            fun link(reply: String) = UdsLink(rawCan = backend != 0,
+                includeSteeringAngle = rx == "7BB", includeConvenience = rx != "7BB",
+                quietPreflightReceivers = setOf(rx), dtcByReceiver = mapOf(rx to reply),
+                nativeBanner = if (backend == 2) "STN1170 v5.6.5" else "?",
+                vtBanner = if (backend == 3) "Synthetic Adapter v2.3.0" else "?")
+            val old = link("59038D") // Wrong subfunction: no usable fault memory.
+            val fresh = link(reply)
+            val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = backend != 0)
+            engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            var replacements = 0
+            val outcome = runCatching { ElmVagScan.scan(engine, { units[it.address] = it },
+                { _, _, _ -> }, discoverAdditionalUnits = false,
+                recreateEngine = {
+                    check(++replacements == 1) { "Unexpected second replacement" }
+                    ElmEngine(fresh, { _, _, _, _ -> }, manualUds = backend != 0)
+                }) }
+            val complete = reply.startsWith("5902")
+            assertEquals("backend=$backend rx=$rx reply=$reply: $outcome", complete,
+                outcome.getOrNull()?.complete == true)
+            assertTrue("A finished refusal must remain local", outcome.isSuccess)
+            val address = if (rx == "7BB") "VAG-04" else "VAG-46"
+            assertEquals(1, replacements)
+            if (complete) assertEquals(ReadState.COMPLETE, units.getValue(address).state)
+            else assertNotEquals(ReadState.COMPLETE, units.getValue(address).state)
+            assertEquals(if (reply == "59028D12345608") listOf("123456") else emptyList<String>(),
+                units.getValue(address).dtcs.map { it.raw.take(6) })
+            assertEquals(1, old.addressedRequests.count { it == rx to "19028D" })
+            assertEquals(if (reply == "NO DATA") 2 else 1,
+                fresh.addressedRequests.count { it == rx to "19028D" })
+            assertFalse(fresh.addressedRequests.contains(rx to "1001"))
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        }
+    }
+
     @Test fun unansweredListedDtcProbeDoesNotConfirmAnEcuOrBlockOtherReads() = runBlocking {
         val quiet = setOf("7BB", "17FE008B")
         val link = UdsLink(includeSteeringAngle = true, includeConvenience = true,

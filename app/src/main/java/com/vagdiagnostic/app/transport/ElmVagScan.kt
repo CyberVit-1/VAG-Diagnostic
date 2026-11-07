@@ -909,6 +909,7 @@ object ElmVagScan {
         private var pendingMs = 5250L
         private var cachedPartReply: List<Int>? = null
         private var opening = false
+        private var listedDtcProbeAllowed = false
         private suspend fun configure(target: VagOemReadOnly.Route) {
             if (engine.manualUds) {
                 ElmUdsCanConfiguration.configure(engine, target)
@@ -951,6 +952,7 @@ object ElmVagScan {
         }
         suspend fun restoreConfiguration() = configure(requireNotNull(route))
         suspend fun open(target: VagOemReadOnly.Route, allowListedDtcProbe: Boolean = false): Boolean {
+            listedDtcProbeAllowed = allowListedDtcProbe
             repeat(4) { attempt ->
                 opening = true
                 try { return openOnce(target, allowListedDtcProbe) }
@@ -1038,7 +1040,11 @@ object ElmVagScan {
                     val target = requireNotNull(route)
                     engine = requireNotNull(recoverEngine).invoke(target.key, failure)
                     if (!engine.vehicleReady) throw IOException("Связь после восстановления UDS не подтверждена")
-                    open(target)
+                    // Recovery must preserve this route's confirmed-list DTC
+                    // permission. Otherwise a cleanly silent preflight can
+                    // consume the retry before the own-memory request is sent.
+                    // Optional reads never acquire the extra permission here.
+                    open(target, allowListedDtcProbe = command == "19028D" && listedDtcProbeAllowed)
                 }
             }) {
                 try { Result.success(readOrNoDataOnce(command, allowNoData = true)) }
