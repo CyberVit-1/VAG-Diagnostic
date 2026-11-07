@@ -7,6 +7,8 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
     var uds = false
     var tx = ""
     var custom = false
+    var silentPresence = false
+    var silentSession = false
     return withExplicitUdsTiming(withSyntheticTpKeepalives(buildList {
         for ((command, raw) in withExplicit29BitHeaderOrder(withoutLegacySilentProbes(rows))) {
             if (command.startsWith("ATSP")) protocol = command.removePrefix("ATSP")
@@ -18,6 +20,8 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
             if (command == "ATFCSM0") custom = false
             if (command == "ATFCSM1") custom = true
             if (command.startsWith("ATSH")) {
+                silentPresence = false
+                silentSession = false
                 if (uds && protocol == "6" && custom) { add("ATFCSM0" to "OK"); custom = false }
                 tx = command.removePrefix("ATSH")
             }
@@ -46,10 +50,18 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
             // extensions; no extra request is inserted after pending/partial data.
             if (uds && command == "3E00" && raw.trim() == "NO DATA")
                 repeat(2) { add(probeWire to "NO DATA") }
+            if (uds && command == "3E00") silentPresence = raw.trim() == "NO DATA"
+            if (uds && command == "1003") silentSession = raw.trim() == "NO DATA"
             // Completed command-level silence gets one additional synthetic
             // attempt. Never extend a recorded pending or partial payload.
             if (uds && command != "1003" && VagReadRetry.enabled(command) && raw.trim() == "NO DATA")
                 add(command to "NO DATA")
+            // These confirmed-list recordings stopped before a DTC request
+            // when all preflight services were silent. Extend only that case
+            // with explicitly SYNTHETIC silence; never invent a DTC or edit
+            // any recorded ECU payload. The old physical result stays unknown.
+            if (uds && command == "22F187" && raw.trim() == "NO DATA" && silentPresence && silentSession)
+                repeat(2) { add("19028D" to "NO DATA") }
         }
     }))
 }

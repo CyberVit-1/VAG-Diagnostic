@@ -18,7 +18,9 @@ object ElmVagScan {
     enum class Protocol { TP20, UDS }
     data class Outcome(val protocol: Protocol?, val listConfirmed: Boolean, val complete: Boolean, val note: String)
     private class OptionalReadUnavailable(cause: Throwable) : IllegalStateException("Дополнительная информация не получена; DTC требуют нового канала", cause)
-    private class UdsNoResponse : IllegalStateException("ECU не ответил на 3E00, 1003 и F187")
+    private class UdsNoResponse(dtcAttempted: Boolean = false) : IllegalStateException(
+        if (dtcAttempted) "ECU не ответил на служебные запросы и ограниченное чтение DTC"
+        else "ECU не ответил на 3E00, 1003 и F187")
 
     suspend fun scan(engine: ElmEngine,
         onUnit: suspend (ControlUnit) -> Unit,
@@ -512,12 +514,13 @@ object ElmVagScan {
                         var healthy = true
                         optionalBeforeDtc = false
                         try {
-                            channel.open(path)
-                            confirmedConnection(Protocol.UDS)
-                            optionalBeforeDtc = true
+                            val responseConfirmed = channel.open(path, allowListedDtcProbe = declared)
+                            if (responseConfirmed) confirmedConnection(Protocol.UDS)
+                            else event("VAG_LISTED_DTC_PROBE", "${route.key}: служебные ответы не получены; проверка собственной памяти DTC по маршруту из подтверждённого списка", "READING")
+                            optionalBeforeDtc = responseConfirmed
                             // Keep the minimal identity before DTC. Optional
                             // descriptions cannot delay publishing the fault memory.
-                            if (identifyEcus && readSupplementalInfo && id !in identityAttempts) {
+                            if (responseConfirmed && identifyEcus && readSupplementalInfo && id !in identityAttempts) {
                                 identityAttempts += id
                                 identities[id] = try { channel.identifyPart() }
                                     catch (unsupported: ElmUdsRawTransaction.UnsupportedCommand) {
@@ -526,7 +529,12 @@ object ElmVagScan {
                                     }
                             }
                             optionalBeforeDtc = false
-                            val faults = VagOemReadOnly.udsFaults(channel.read("19028D")).deduplicated()
+                            val reply = if (responseConfirmed) channel.read("19028D")
+                                else channel.readListedFaultMemory() ?: throw UdsNoResponse(dtcAttempted = true)
+                            // The list authorizes the route, but is not response
+                            // evidence. Promote only after this ECU actually replies.
+                            if (!responseConfirmed) confirmedConnection(Protocol.UDS)
+                            val faults = VagOemReadOnly.udsFaults(reply).deduplicated()
                             completedFaults = faults
                             publishFaults(faults)
                             if (identifyEcus && readSupplementalInfo) collectDetails(id, VagUdsInfo.scanFields + VagUdsInfo.Field.ACCESS_STATUS) {
@@ -924,18 +932,19 @@ object ElmVagScan {
             route = target
         }
         suspend fun restoreConfiguration() = configure(requireNotNull(route))
-        suspend fun open(target: VagOemReadOnly.Route) {
+        suspend fun open(target: VagOemReadOnly.Route, allowListedDtcProbe: Boolean = false): Boolean {
             repeat(4) { attempt ->
                 opening = true
-                try { openOnce(target); return }
+                try { return openOnce(target, allowListedDtcProbe) }
                 catch (failure: VagProtocolFailure) {
                     if (recoverEngine == null || attempt == 3) throw failure
                     engine = recoverEngine.invoke(target.key, failure)
                     if (!engine.vehicleReady) throw IOException("Связь после восстановления UDS не подтверждена")
                 } finally { opening = false }
             }
+            error("Исчерпан предел открытия UDS")
         }
-        private suspend fun openOnce(target: VagOemReadOnly.Route) {
+        private suspend fun openOnce(target: VagOemReadOnly.Route, allowListedDtcProbe: Boolean): Boolean {
             active = false
             pendingMs = 5250L
             cachedPartReply = null
@@ -959,11 +968,18 @@ object ElmVagScan {
             active = reply?.take(2) == listOf(0x50, 3)
             if (presence == null && reply == null) {
                 cachedPartReply = readOrNoData("22F187", allowNoData = true)
-                        if (cachedPartReply == null) throw UdsNoResponse()
+                if (cachedPartReply == null) {
+                    // Only complete silence on finished transactions reaches
+                    // here. Pending, damaged framing, cancellation and physical
+                    // IO still propagate; they never authorize another command.
+                    if (allowListedDtcProbe) return false
+                    throw UdsNoResponse()
+                }
             }
             // The researched session operation returns an empty success model
             // after the matching positive envelope. Optional timing bytes do
             // not gate the following read; retain the bounded reader policy.
+            return true
         }
         suspend fun close() {
             if (!active) return
@@ -974,6 +990,7 @@ object ElmVagScan {
         }
         suspend fun read(command: String): List<Int> =
             (if (command == "22F187") cachedPartReply else null) ?: requireNotNull(readOrNoData(command, false))
+        suspend fun readListedFaultMemory(): List<Int>? = readOrNoData("19028D", true)
         suspend fun identifyPart(): VagEcuIdentification.Identity? =
             (cachedPartReply ?: readOrNoData("22F187", true))?.let { VagEcuIdentification.udsPartNumber(it) }
         suspend fun readOptionalInfo(command: String): List<Int>? {
