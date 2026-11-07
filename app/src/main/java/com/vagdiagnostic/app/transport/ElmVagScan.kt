@@ -28,10 +28,13 @@ object ElmVagScan {
         discoverAdditionalUnits: Boolean = true,
         identifyEcus: Boolean = true,
         recreateEngine: (() -> ElmEngine)? = null,
-        allowGatewayIdentityFallback: Boolean = true
+        allowGatewayIdentityFallback: Boolean = true,
+        // Supplemental protocol regression seam. The application does not
+        // enable it: normal scans need ECU names/routes and DTC, not inventory.
+        readSupplementalInfo: Boolean = false
     ): Outcome = ScanSession(engine, onUnit, event, allowCandidateFallback,
         readGatewayIdentity, discoverAdditionalUnits, identifyEcus, recreateEngine,
-        allowGatewayIdentityFallback).run()
+        allowGatewayIdentityFallback, readSupplementalInfo).run()
 
     /** A scan owns its state. Keeping it off coroutine local-variable spills
      * avoids a huge DEX state machine, including its exception-resume paths. */
@@ -43,7 +46,8 @@ object ElmVagScan {
         private val discoverAdditionalUnits: Boolean,
         private val identifyEcus: Boolean,
         private val recreateEngine: (() -> ElmEngine)?,
-        private val allowGatewayIdentityFallback: Boolean
+        private val allowGatewayIdentityFallback: Boolean,
+        private val readSupplementalInfo: Boolean
     ) {
         private val observedUnits = linkedMapOf<String, ControlUnit>()
         private suspend fun onUnit(unit: ControlUnit) {
@@ -200,7 +204,7 @@ object ElmVagScan {
                     VagUdsInfo.Value(VagUdsInfo.State.ADAPTER_REJECTED)
                 }
             }) }
-                catch (bad: IllegalArgumentException) { throw IOException("Неверная идентификация ECU: ${bad.message}", bad) }
+                catch (bad: IllegalArgumentException) { throw VagProtocolFailure("Неверная идентификация ECU: ${bad.message}", bad) }
             event("VAG_ECU_INFO_%02X".format(id), result.entries.joinToString { "${it.key.name}: ${it.value.state}" },
                 if (result.values.all { it.state == VagUdsInfo.State.PRESENT }) "PARSED" else "INCOMPLETE")
         }
@@ -403,6 +407,17 @@ object ElmVagScan {
                 return
             }
             var completedFaults: VagOemReadOnly.Faults? = null
+            // A failed optional preflight must not consume this ECU's DTC turn.
+            // Keep the marker outside the transport action: IOException must
+            // still reach withTp/UDS cleanup as a damaged stream, not be wrapped.
+            var optionalBeforeDtc = false
+            fun canResumeDtc() = optionalBeforeDtc && completedFaults == null &&
+                optionalRetries.getOrDefault(id, 0) < 3
+            suspend fun resumeDtc() {
+                optionalRetries[id] = optionalRetries.getOrDefault(id, 0) + 1
+                queue.add(next, id)
+                event("VAG_OPTIONAL_READ_RECOVERY", "${route.key}: новый канал; уже проверенные необязательные поля пропускаются, DTC ещё не прочитаны", "RETRYING")
+            }
             var faultsPublished = false
             suspend fun publishFaults(result: VagOemReadOnly.Faults) {
                 unit = unit.copy(state = ReadState.COMPLETE, dtcs = result.values, answeredModes = setOf(DtcKind.OEM),
@@ -438,11 +453,12 @@ object ElmVagScan {
                 }
                 suspend fun tpReadOnce(): VagOemReadOnly.Faults {
                     var result: VagOemReadOnly.Faults? = null
+                    optionalBeforeDtc = false
                     withTp(route) { channel ->
                         confirmedConnection(Protocol.TP20)
-                        if (identifyEcus) try {
+                        optionalBeforeDtc = true
+                        if (identifyEcus && readSupplementalInfo) try {
                             tpIdentity(id, channel)
-                            if (id in udsInfoOverTp) collectDetails(id, VagUdsInfo.scanFields) { channel.request(it) }
                         } catch (missing: ElmTp20Channel.NoApplicationResponse) {
                             throw OptionalReadUnavailable(missing)
                         }
@@ -458,11 +474,13 @@ object ElmVagScan {
                             }
                             saeSupport[id] == true
                         } else id == 1 || id == 2 // Recorded pre-capability test sequences only.
+                        optionalBeforeDtc = false
                         result = VagOemReadOnly.kwpFaultMessages(
                             channel.requestMessages(if (powertrain) "1800FF00" else "1802FF00"), powertrain).deduplicated()
                         completedFaults = result
                         publishFaults(requireNotNull(result))
-                        if (identifyEcus) try {
+                        if (identifyEcus && readSupplementalInfo) try {
+                            if (id in udsInfoOverTp) collectDetails(id, VagUdsInfo.scanFields) { channel.request(it) }
                             readDtcDetails(VagDtcDetails.Protocol.KWP, requireNotNull(result)) { channel.requestDetails(it) }
                         } catch (missing: ElmTp20Channel.NoApplicationResponse) {
                             event("VAG_ECU_INFO_%02X".format(id), "Дополнительный ответ не получен; основные DTC сохранены", "INCOMPLETE")
@@ -492,12 +510,14 @@ object ElmVagScan {
                     for ((index, path) in paths.withIndex()) {
                         val channel = newUds()
                         var healthy = true
+                        optionalBeforeDtc = false
                         try {
                             channel.open(path)
                             confirmedConnection(Protocol.UDS)
-                            // Match the per-ECU source order: identification first,
-                            // then DTC, then DTC-specific enrichment in this session.
-                            if (identifyEcus && id !in identityAttempts) {
+                            optionalBeforeDtc = true
+                            // Keep the minimal identity before DTC. Optional
+                            // descriptions cannot delay publishing the fault memory.
+                            if (identifyEcus && readSupplementalInfo && id !in identityAttempts) {
                                 identityAttempts += id
                                 identities[id] = try { channel.identifyPart() }
                                     catch (unsupported: ElmUdsRawTransaction.UnsupportedCommand) {
@@ -505,24 +525,26 @@ object ElmVagScan {
                                         null
                                     }
                             }
-                            if (identifyEcus) collectDetails(id, VagUdsInfo.scanFields + VagUdsInfo.Field.ACCESS_STATUS) {
-                                channel.readOptionalInfo(it)
-                            }
+                            optionalBeforeDtc = false
                             val faults = VagOemReadOnly.udsFaults(channel.read("19028D")).deduplicated()
                             completedFaults = faults
                             publishFaults(faults)
-                            if (identifyEcus && faults.values.isNotEmpty()) {
-                                // This DTC enrichment requires ASAM and revision. A
-                                // failed optional preflight is not a cached success.
-                                if (details[id]?.get(VagUdsInfo.Field.ASAM)?.state != VagUdsInfo.State.PRESENT) {
+                            if (identifyEcus && readSupplementalInfo) collectDetails(id, VagUdsInfo.scanFields + VagUdsInfo.Field.ACCESS_STATUS) {
+                                channel.readOptionalInfo(it)
+                            }
+                            if (identifyEcus && readSupplementalInfo && faults.values.isNotEmpty()) {
+                                // A completed refusal is already evidence of an
+                                // unavailable field; do not ask for it twice in
+                                // the same session just because faults exist.
+                                if (VagUdsInfo.Field.ASAM !in details[id].orEmpty()) {
                                     val asam = try { VagUdsInfo.decode(VagUdsInfo.Field.ASAM, channel.readOptionalInfo("22F19E")) }
-                                        catch (bad: IllegalArgumentException) { throw IOException("Неверная идентификация ASAM", bad) }
+                                        catch (bad: IllegalArgumentException) { throw VagProtocolFailure("Неверная идентификация ASAM", bad) }
                                     details[id] = details[id].orEmpty() + (VagUdsInfo.Field.ASAM to asam)
                                 }
                             }
-                            if (identifyEcus && faults.values.isNotEmpty() && details[id]?.get(VagUdsInfo.Field.ASAM)?.state == VagUdsInfo.State.PRESENT) {
+                            if (identifyEcus && readSupplementalInfo && faults.values.isNotEmpty() && details[id]?.get(VagUdsInfo.Field.ASAM)?.state == VagUdsInfo.State.PRESENT) {
                                 val revision = try { VagUdsInfo.decode(VagUdsInfo.Field.ASAM_REVISION, channel.readOptionalInfo("22F1A2")) }
-                                    catch (bad: IllegalArgumentException) { throw IOException("Неверная ревизия ASAM", bad) }
+                                    catch (bad: IllegalArgumentException) { throw VagProtocolFailure("Неверная ревизия ASAM", bad) }
                                 details[id] = details[id].orEmpty() + (VagUdsInfo.Field.ASAM_REVISION to revision)
                                 if (revision.state == VagUdsInfo.State.PRESENT)
                                     readDtcDetails(VagDtcDetails.Protocol.UDS, faults) { channel.readDtcDetails(it) }
@@ -592,13 +614,15 @@ object ElmVagScan {
             }
             catch (can: ElmCompletedCanError) {
                 completedFaults?.takeIf { !faultsPublished }?.let { publishFaults(it) }
-                if (completedFaults == null) failed = true
+                val resume = canResumeDtc()
+                if (completedFaults == null && !resume) failed = true
                 onUnit(unit.copy(state = if (completedFaults != null) ReadState.COMPLETE else
                     if (unit.source == "RESPONSE") ReadState.PARTIAL else ReadState.NO_RESPONSE,
                     note = if (completedFaults != null) "DTC прочитаны; дополнительные данные не подтверждены: CAN ERROR"
                         else "DTC не подтверждены: CAN ERROR; предел повторов команды исчерпан"))
                 event("VAG_DTC_%02X".format(id), "CAN ERROR; остальные ECU после восстановления соединения", "INCOMPLETE")
                 restoreConnection(route.key, can)
+                if (resume) resumeDtc()
             }
             catch (unsupported: ElmUdsRawTransaction.UnsupportedCommand) {
                 completedFaults?.takeIf { !faultsPublished }?.let { publishFaults(it) }
@@ -619,9 +643,11 @@ object ElmVagScan {
                 // transaction can be replaced. Production always supplies it.
                 if (recreateEngine == null) throw VagProtocolFailure(
                     "${route.key}: ${protocolFailure.message}", protocolFailure, protocolFailure.noData)
-                if (completedFaults == null) failed = true
+                val resume = canResumeDtc()
+                if (completedFaults == null && !resume) failed = true
                 restoreConnection(route.key, protocolFailure)
-                event("VAG_ECU_READ_INCOMPLETE", "${route.key}: остальные ECU после подтверждённого нового соединения", "INCOMPLETE")
+                if (resume) resumeDtc()
+                else event("VAG_ECU_READ_INCOMPLETE", "${route.key}: остальные ECU после подтверждённого нового соединения", "INCOMPLETE")
             }
             catch (io: IOException) {
                 completedFaults?.takeIf { !faultsPublished }?.let { result ->
@@ -655,7 +681,7 @@ object ElmVagScan {
                 val retries = optionalRetries.getOrDefault(id, 0)
                 if (retries >= 3) throw IOException("Исчерпан предел дополнительного чтения ${route.key}", optional)
                 optionalRetries[id] = retries + 1
-                queue += id
+                queue.add(next, id)
                 onUnit(unit.copy(state = ReadState.PARTIAL, note = optional.message.orEmpty(), source = "RESPONSE"))
                 event("VAG_OPTIONAL_READ_INCOMPLETE", route.key + "; следующий канал пропустит уже проверенные необязательные данные", "INCOMPLETE")
             }

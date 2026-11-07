@@ -355,7 +355,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                                     timestamp = System.currentTimeMillis(), connection = cfg.type,
                                                     command = command, raw = detail, elapsedMs = 0, outcome = outcome))
                                             }, allowCandidateFallback = tp20Profile.allowCandidateFallback,
-                                            readGatewayIdentity = true,
+                                            readGatewayIdentity = false,
+                                            readSupplementalInfo = false,
                                             recreateEngine = { createEngine(cfg).also { replacement ->
                                                 disposable = replacement
                                                 engine = replacement
