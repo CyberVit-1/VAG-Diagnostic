@@ -73,21 +73,24 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                 delay(200)
                 configureSetting("ATE0")
             }
-            val reset = command("ATZ", 8500)
-            check(reset.contains("ELM", true) || reset.contains("OK", true)) { "Нет ответа на ATZ" }
+            val reset = replyRows("ATZ", command("ATZ", 8500))
+            val resetErrors = setOf("?", "NODATA", "ERROR", "CANERROR", "BUSERROR", "DATAERROR",
+                "RXERROR", "BUFFERFULL", "UNABLETOCONNECT", "STOPPED")
+            if (reset.isEmpty() || reset.any { it in resetErrors || (it.startsWith("BUSINIT:") && it.endsWith("ERROR")) })
+                throw IOException("Нет достоверного завершения ATZ")
+            // Reset banners vary by adapter. Actual setting acknowledgments,
+            // followed by a valid 0100 reply, establish readiness independently.
             needsFlowControlReset = false
-            adapterReady = true
             for (cmd in listOf("ATE0", "ATL0", "ATS0", "ATH1", "ATSP0")) {
-                val result = command(cmd)
-                check(result.contains("OK", true)) { "Адаптер не подтвердил $cmd: $result" }
+                configureSetting(cmd)
             }
             // An unsupported ATAT1 must still finish with the ELM '>' prompt.
             // Swallowing a transport timeout here would desynchronize the next 0100.
             val adaptive = command("ATAT1")
-            if (!adaptive.contains("OK", ignoreCase = true) &&
-                !adaptive.contains("?", ignoreCase = true)) {
+            if (replyRows("ATAT1", adaptive) !in listOf(listOf("OK"), listOf("?"))) {
                 throw IOException("Ответ ATAT1 не подтверждён: ${adaptive.take(100)}")
             }
+            adapterReady = true
             val response = command("0100", 9000)
             val parsed = ElmFrames.parse("0100", response)
             vehicleReady = ObdDecoder.hasValidVehicleResponse(parsed)
