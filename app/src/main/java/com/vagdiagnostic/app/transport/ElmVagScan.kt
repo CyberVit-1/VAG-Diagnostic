@@ -96,6 +96,7 @@ object ElmVagScan {
         private val queue = mutableListOf<Int>()
         private var next = 0
         private val retriedAfterClose = mutableSetOf<Int>()
+        private val retriedPrimaryDtcNoData = mutableSetOf<Int>()
 
         private suspend fun restoreConnection(key: String, cause: Throwable) {
             // Each discovery stage is finite and each ECU has bounded retries.
@@ -430,6 +431,7 @@ object ElmVagScan {
             // Keep the marker outside the transport action: IOException must
             // still reach withTp/UDS cleanup as a damaged stream, not be wrapped.
             var optionalBeforeDtc = false
+            var primaryTpDtcInProgress = false
             fun canResumeDtc() = optionalBeforeDtc && completedFaults == null &&
                 optionalRetries.getOrDefault(id, 0) < 3
             suspend fun resumeDtc() {
@@ -473,6 +475,7 @@ object ElmVagScan {
                 suspend fun tpReadOnce(): VagOemReadOnly.Faults {
                     var result: VagOemReadOnly.Faults? = null
                     optionalBeforeDtc = false
+                    primaryTpDtcInProgress = false
                     withTp(route) { channel ->
                         confirmedConnection(Protocol.TP20)
                         optionalBeforeDtc = true
@@ -494,6 +497,7 @@ object ElmVagScan {
                             saeSupport[id] == true
                         } else id == 1 || id == 2 // Recorded pre-capability test sequences only.
                         optionalBeforeDtc = false
+                        primaryTpDtcInProgress = true
                         result = VagOemReadOnly.kwpFaultMessages(
                             channel.requestMessages(if (powertrain) "1800FF00" else "1802FF00"), powertrain).deduplicated()
                         completedFaults = result
@@ -522,6 +526,7 @@ object ElmVagScan {
                         tpReadOnce()
                     }
                 suspend fun udsRead(): VagOemReadOnly.Faults {
+                    primaryTpDtcInProgress = false
                     val paths = route.udsPaths(listConfirmed)
                     check(paths.isNotEmpty()) { "Нет проверенного UDS-маршрута" }
                     var lastFailure: RuntimeException? = null
@@ -669,9 +674,21 @@ object ElmVagScan {
                 if (recreateEngine == null) throw VagProtocolFailure(
                     "${route.key}: ${protocolFailure.message}", protocolFailure, protocolFailure.noData)
                 val resume = canResumeDtc()
-                if (completedFaults == null && !resume) failed = true
+                // A live TP session may ACK a primary DTC request, then fall
+                // silent. Consecutive NO_DATA can exhaust the command budget
+                // before its inner recovery hook runs. Return this ECU once
+                // after the outer fresh-stream proof; never retry mere setup
+                // silence, UDS absence, malformed data, IO or cancellation here.
+                val primaryResume = primaryTpDtcInProgress && protocolFailure.noData &&
+                    completedFaults == null && confirmedProtocols[id] == Protocol.TP20 &&
+                    retriedPrimaryDtcNoData.add(id)
+                if (completedFaults == null && !resume && !primaryResume) failed = true
                 restoreConnection(route.key, protocolFailure)
                 if (resume) resumeDtc()
+                else if (primaryResume) {
+                    queue.add(next, id)
+                    event("VAG_PRIMARY_DTC_RECOVERY", "${route.key}: основной DTC не получен; один повтор на новом подтверждённом канале", "RETRYING")
+                }
                 else event("VAG_ECU_READ_INCOMPLETE", "${route.key}: остальные ECU после подтверждённого нового соединения", "INCOMPLETE")
             }
             catch (io: IOException) {

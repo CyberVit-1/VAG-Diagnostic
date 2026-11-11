@@ -234,7 +234,8 @@ class ElmVagScanTest {
         val closeAfterReplyAt: Int = 1, val silentEngineSessions: Int = 0,
         val identityByDestination: Map<Int, String> = emptyMap(), val silentDestinations: Set<Int> = emptySet(),
         val centralSetupReplies: List<String> = emptyList(), val dtcReplies: List<String> = emptyList(),
-        val obdReply: String = "7E8064100BE3EA813", val initialCanProtocol: String = "6") : ElmLink {
+        val obdReply: String = "7E8064100BE3EA813", val initialCanProtocol: String = "6",
+        val dtcByDestination: Map<Int, String> = emptyMap()) : ElmLink {
         override val label = "Scripted ELM"
         val sent = mutableListOf<String>()
         private val bytes = ArrayDeque<Int>()
@@ -353,8 +354,8 @@ class ElmVagScanTest {
                         "1A9B" -> if (failIdentity || (destination == 0x33 && failSupplemental)) throw IOException("identity stream lost") else identityByDestination[destination] ?: identityReply
                         "1A9F" -> installedReply ?: if (longList || rejectService1A) "7F1A11" else "5A9F090100000119000001"
                         "2204A1" -> if (rejectService1A) "6204A1191F010001010100" else "6204A1" + (1..65).joinToString("") { "%02X%02X0100".format(it, it) }
-                        "1800FF00" -> dtcReplies.getOrNull(dtcIndex++) ?: dtcReply ?: "5801029908"
-                        "1802FF00" -> dtcReplies.getOrNull(dtcIndex++) ?: dtcReply ?: "5800"
+                        "1800FF00" -> dtcByDestination[destination] ?: dtcReplies.getOrNull(dtcIndex++) ?: dtcReply ?: "5801029908"
+                        "1802FF00" -> dtcByDestination[destination] ?: dtcReplies.getOrNull(dtcIndex++) ?: dtcReply ?: "5800"
                         else -> if (request.matches(Regex("120004[0-9A-F]{4}"))) detailsReply else error("Unexpected service $request")
                     }
                     remaining.clear()
@@ -1534,6 +1535,104 @@ class ElmVagScanTest {
         assertTrue(outcome.note, outcome.complete)
         assertTrue(fresh.sent.contains("25C000100003011"))
         assertEquals(0, fresh.identityDestinations.count { it == 0x25 }) // Failed metadata is not repeated.
+    }
+
+    @Test fun recordedPrimaryDtcSilenceGetsOneExtraScanTurn() = runBlocking {
+        for (reply in listOf("5801051924", "5800", "7F1833", "NO DATA", "IO", "CANCEL", "UNREADY")) {
+            val recorded = javaClass.getResourceAsStream("/replay/vehicle-0314-72-primary-dtc-failure.tsv")!!
+                .bufferedReader().useLines { lines -> lines.map { line ->
+                    val fields = line.split('\t', limit = 2)
+                    fields[0] to String(java.util.Base64.getDecoder().decode(fields.getOrNull(1).orEmpty()), Charsets.UTF_8)
+                }.toList() }
+            // Only these 25 exchanges are recorded vehicle evidence. Gateway,
+            // installation scope and all replacement responses are synthetic.
+            val delegate = Link(installedReply = "5A9F0D190000017200000101000001", dtcReply = "5801051924")
+            val pending = ArrayDeque<Int>()
+            var row = 0
+            var replaying = false
+            val old = object : ElmLink {
+                override val label = "Recorded primary-DTC failure; synthetic surrounding scan"
+                override suspend fun open() = delegate.open()
+                override suspend fun readByte(): Int = pending.pollFirst() ?: delegate.readByte()
+                override fun close() { pending.clear(); delegate.close() }
+                override suspend fun write(bytes: ByteArray) {
+                    val cmd = bytes.toString(Charsets.US_ASCII).trim()
+                    if (cmd == recorded.first().first) replaying = true
+                    if (!replaying) delegate.write(bytes)
+                    else {
+                        check(row < recorded.size) { "Command on abandoned stream: $cmd" }
+                        val expected = recorded[row++]
+                        check(cmd == expected.first) { "Recorded row $row: expected ${expected.first}, got $cmd" }
+                        pending.addAll((expected.second + ">").map { it.code })
+                    }
+                }
+            }
+            val fresh = Link(obdReply = if (reply == "UNREADY") "NO DATA" else "7E8064100BE3EA813",
+                dtcReply = "5800", dtcByDestination = mapOf(0x25 to reply))
+            val secondFresh = Link(dtcReply = "5800", dtcByDestination = mapOf(0x25 to reply))
+            val terminal = Link(dtcReply = "5800")
+            var freshClosed = false
+            val replacement = object : ElmLink {
+                override val label = "Synthetic replacement failure boundary"
+                override suspend fun open() { freshClosed = false; fresh.open() }
+                override fun close() { freshClosed = true; fresh.close() }
+                override suspend fun readByte() = fresh.readByte()
+                override suspend fun write(bytes: ByteArray) {
+                    val cmd = bytes.toString(Charsets.US_ASCII).trim()
+                    if (cmd.endsWith("1802FF00")) {
+                        if (reply == "IO") throw IOException("Synthetic lost replacement stream")
+                        if (reply == "CANCEL") throw CancellationException("Synthetic cancelled replacement read")
+                    }
+                    fresh.write(bytes)
+                }
+            }
+            val units = linkedMapOf<String, ControlUnit>()
+            var replacements = 0
+            val events = mutableListOf<String>()
+            var ownedReplacement: ElmEngine? = null
+            // Production's MainViewModel owns the current replacement and
+            // closes it in finally, including physical IO and cancellation.
+            val call = runCatching { try { ElmVagScan.scan(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it },
+                { name, _, _ -> events += name }, discoverAdditionalUnits = false,
+                recreateEngine = {
+                    val next: ElmLink = when (++replacements) { 1 -> replacement; 2 -> secondFresh; 3 -> terminal; else -> error("Unbounded primary retry") }
+                    ElmEngine(next, { _, _, _, _ -> }).also { ownedReplacement = it }
+                }) } finally { ownedReplacement?.close() } }
+            assertEquals(recorded.size, row)
+            if (reply in setOf("IO", "CANCEL", "UNREADY")) {
+                if (reply == "CANCEL") assertTrue("$reply: $call", call.exceptionOrNull() is CancellationException)
+                else assertTrue("$reply: $call", call.exceptionOrNull() is IOException)
+                assertEquals(1, replacements)
+                assertTrue(freshClosed)
+                assertEquals(listOf("01305"), units.getValue("VAG-19").dtcs.map { it.code })
+                assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-72").state)
+                assertTrue(units.getValue("VAG-72").dtcs.isEmpty())
+                assertEquals(ReadState.NOT_QUERIED, units.getValue("VAG-01").state)
+                if (reply == "UNREADY") assertFalse(fresh.sent.contains("25C000100003011"))
+                continue
+            }
+            val outcome = call.getOrThrow()
+            assertTrue("The affected ECU must be retried on a fresh channel", fresh.sent.contains("25C000100003011"))
+            assertFalse(terminal.sent.contains("25C000100003011"))
+            assertEquals(1, events.count { it == "VAG_PRIMARY_DTC_RECOVERY" })
+            assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOf("25C000100003011"))
+            assertEquals(listOf("01305"), units.getValue("VAG-19").dtcs.map { it.code })
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+            if (reply.startsWith("58")) {
+                assertTrue(outcome.note, outcome.complete)
+                assertEquals(ReadState.COMPLETE, units.getValue("VAG-72").state)
+                assertEquals(if (reply == "5800") emptyList<String>() else listOf("01305"),
+                    units.getValue("VAG-72").dtcs.map { it.code })
+                assertEquals(1, replacements)
+            } else {
+                assertFalse(outcome.complete)
+                assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-72").state)
+                assertTrue(units.getValue("VAG-72").dtcs.isEmpty())
+                // The existing command-level budget can replace one stream
+                // inside the additional turn; no third scan turn is permitted.
+                assertEquals(if (reply == "NO DATA") 3 else 1, replacements)
+            }
+        }
     }
 
     @Test fun silentOptionalCapabilityGetsOneNewChannelForActualDtcRead() = runBlocking {
