@@ -19,7 +19,7 @@ internal object VagReadRetry {
     enum class Outcome { COMPLETE, NO_DATA, BUSY, CAN_ERROR, PROTOCOL_ERROR }
     fun enabled(command: String): Boolean = command in setOf(
         "1089", "1003", "1001", "1A9F", "1A9B", "2204A1", "1800FF00", "1802FF00",
-        "19028D", "222A26", "222A28", "22F187", "22F197", "22F189", "22F19E", "22F1A2", "220174", "22539B"
+        "19028D", "222A26", "222A28", "222A2A", "2204A3", "22F1B7", "22F187", "22F197", "22F189", "22F19E", "22F1A2", "220174", "22539B"
     ) || command.matches(Regex("120004[0-9A-F]{4}")) || command.matches(Regex("1906[0-9A-F]{6}FF"))
 
     fun response(command: String, payload: List<Int>?): Outcome = when {

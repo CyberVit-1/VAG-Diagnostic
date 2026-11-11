@@ -59,10 +59,18 @@ object VagOemReadOnly {
     ).associateBy { it.id }
     val routes = initialRoutes + VagOemRouteCatalog.routes.filterNot { it.id in initialRoutes }.associateBy { it.id }
     val gateway get() = routes.getValue(0x19)
+    enum class DiscoverySource(val description: String, val confirmsInstallation: Boolean) {
+        LEGACY("список установленных блоков", true), LOGICAL_LIST("список адресов Gateway", true),
+        ADDRESS_INDEX("адресный список Gateway", true), CODED("кодировка Gateway", false),
+        EVENTS("события Gateway", false), AMBIGUOUS_INDEX("неоднозначный адрес Gateway", false)
+    }
     data class Installed(val id: Int, val rawStatus: Int?, val hasFaultFlag: Boolean,
         val tpDestination: Int? = null, val extraStatus: Int? = null,
         val observations: List<List<Int>> = emptyList(), val routeConflict: Boolean = false,
-        val mappedRoute: Route? = null, val listOwners: Set<Int> = setOf(0x19))
+        val mappedRoute: Route? = null, val listOwners: Set<Int> = setOf(0x19),
+        val discoverySources: Set<DiscoverySource> = setOf(DiscoverySource.LEGACY)) {
+        val installationConfirmed: Boolean get() = discoverySources.any { it.confirmsInstallation }
+    }
     data class Faults(val values: List<Dtc>, val service: String) {
         /** Operation-level policy: retain the first record for each code in this
          * ECU, without combining status bits. Raw decoders keep all records. */

@@ -42,6 +42,12 @@ application, its build workflow, transports, protocols, storage, or UI.
 
 ## Mandatory data-loss warning before user actions
 
+- **Latest user agreement, 11.11.2026:** routine test builds are installed
+  cleanly after the user sends the exported TXT in chat. Do not recommend
+  installing over the existing app or repeat the standard backup/update
+  boilerplate on every build. The user knows the clean-install workflow.
+  The warnings below apply when a **new material data-loss risk** is introduced,
+  not as a reason to repeat already acknowledged routine instructions.
 - **Warn BEFORE recommending any potentially destructive step.** This includes
   uninstalling/reinstalling an APK, clearing app storage or cache when data may
   be affected, changing Android package ID/applicationId/signing identity,

@@ -53,8 +53,13 @@ object ElmVagScan {
     ) {
         private val observedUnits = linkedMapOf<String, ControlUnit>()
         private suspend fun onUnit(unit: ControlUnit) {
-            observedUnits[unit.address] = unit
-            emitUnit(unit)
+            val id = unit.address.takeIf { it.startsWith("VAG-") }?.drop(4)?.toIntOrNull(16)
+            val hint = installed?.firstOrNull { it.id == id }?.takeIf { !it.installationConfirmed }
+                ?.discoverySources?.joinToString { it.description }
+            val shown = if (unit.source == "CANDIDATE" && hint != null && !unit.note.contains(hint))
+                unit.copy(note = "$hint; ${unit.note}") else unit
+            observedUnits[shown.address] = shown
+            emitUnit(shown)
         }
         private var protocol: Protocol? = null
         private var installed: List<VagOemReadOnly.Installed>? = null
@@ -398,11 +403,14 @@ object ElmVagScan {
             val listEntry = installed?.firstOrNull { it.id == id }
             val route = listEntry?.mappedRoute ?: if (listConfirmed) VagOemReadOnly.routes[id] else candidateRoutes[id]
             val responseConfirmed = id in confirmedProtocols
-            val declared = listConfirmed && id in ids
+            val declared = listConfirmed && id in ids && listEntry?.installationConfirmed != false
+            val discoveryHint = listEntry?.takeIf { !it.installationConfirmed }?.discoverySources
+                ?.joinToString { it.description }
             var unit = ControlUnit("VAG-%02X".format(id), route?.name ?: "Блок VAG",
                 ReadState.NOT_QUERIED, note = if (declared) "Подтверждён списком ECU " +
                     (listEntry?.listOwners ?: setOf(0x19)).joinToString { "%02X".format(it) } + "; чтение DTC ещё не выполнено"
                 else if (responseConfirmed) "Ответ ECU подтверждён; DTC ещё не прочитаны"
+                else if (discoveryHint != null) "$discoveryHint; наличие и DTC ещё не подтверждены"
                 else "Кандидат профиля; наличие не подтверждено", source = if (responseConfirmed) "RESPONSE" else if (declared)
                     if (listEntry?.listOwners?.any { it != 0x19 } == true) "INSTALLATION_LIST" else "GATEWAY" else "CANDIDATE")
             onUnit(unit)
@@ -820,19 +828,31 @@ object ElmVagScan {
                                 event("VAG_INSTALLATION_FORMAT", "2A26; mk8; owners=" + collected.respondingOwners.joinToString { "%02X".format(it) },
                                     if (collected.complete) "PARSED" else "INCOMPLETE")
                             } else {
-                            val decoded = VagInstallationBitmap.decode(0x19, part, channel.read("222A26"))
-                            installed = decoded.entries.map { entry ->
-                                val name = VagOemReadOnly.routes[entry.id]?.name ?: "Блок VAG"
-                                VagOemReadOnly.Installed(entry.id, null, false, mappedRoute =
-                                    VagOemReadOnly.Route(entry.id, name, entry.tp, entry.udsTx, installedOnly = true))
-                            }.takeIf { it.isNotEmpty() }
-                            event("VAG_INSTALLATION_FORMAT", "2A26; ${decoded.format}; owner=19", "PARSED")
-                            if (decoded.unknownBits.isNotEmpty())
-                                listLimitations += "Неизвестные позиции списка: ${decoded.unknownBits.joinToString()}"
+                                val bitmapReply = channel.readGatewaySource("222A26")
+                                if (bitmapReply != null) {
+                                    val decoded = VagInstallationBitmap.decode(0x19, part, bitmapReply)
+                                    installed = decoded.entries.map { entry ->
+                                        val name = VagOemReadOnly.routes[entry.id]?.name ?: "Блок VAG"
+                                        VagOemReadOnly.Installed(entry.id, null, false, mappedRoute =
+                                            VagOemReadOnly.Route(entry.id, name, entry.tp, entry.udsTx, installedOnly = true))
+                                    }.takeIf { it.isNotEmpty() }
+                                    event("VAG_INSTALLATION_FORMAT", "2A26; ${decoded.format}; owner=19", "PARSED")
+                                    if (decoded.unknownBits.isNotEmpty())
+                                        listLimitations += "Неизвестные позиции списка: ${decoded.unknownBits.joinToString()}"
+                                }
                             }
                             if (listLimitations.isNotEmpty())
                                 event("VAG_INSTALLATION_LIMITATIONS", listLimitations.joinToString("; "), "INCOMPLETE")
-                        } else installed = VagOemReadOnly.installed04A1(channel.read("2204A1"))
+                        } else installed = channel.readGatewaySource("2204A1")?.let(VagOemReadOnly::installed04A1)
+                        if (installed.isNullOrEmpty() && !discoveryReconnectNeeded) {
+                            val extra = ElmGatewayListFallback.read(part, channel::readGatewaySource) { command, result ->
+                                event("VAG_INSTALLATION_SOURCE", "$command: " + (result?.entries?.joinToString { entry ->
+                                    "%02X".format(entry.id) + " (" + entry.discoverySources.joinToString { it.description } + ")"
+                                } ?: "нет поддерживаемого ответа"), if (result != null) "PARSED" else "UNSUPPORTED")
+                            }
+                            installed = extra.entries.takeIf { it.isNotEmpty() }
+                            listLimitations += extra.limitations
+                        }
                     } catch (cancel: CancellationException) { healthy = false; throw cancel }
                     catch (io: IOException) { healthy = false; throw io }
                     finally { if (healthy && currentCoroutineContext().isActive) channel.close() }
@@ -851,7 +871,7 @@ object ElmVagScan {
             }
             // Identification has its own short-lived session; a negative or
             // unknown identification does not change a confirmed installation list.
-            listConfirmed = installed != null
+            listConfirmed = installed?.any { it.installationConfirmed } == true
             if (!listConfirmed && !candidateFallbackPermitted && allowGatewayIdentityFallback) {
                 // A validated, whitelisted Gateway part is direct platform evidence;
                 // the fixed catalog must not depend solely on optional VIN service09.
@@ -861,6 +881,10 @@ object ElmVagScan {
                     event("VAG_DISCOVERY_SCOPE", "Подтверждена поддерживаемая идентификация Gateway; разрешён фиксированный каталог без VIN", "CONFIRMED")
                 }
             }
+            // Preserve an independently permitted platform catalog. When only
+            // hints authorize discovery, limit that scope to the reported routes.
+            val hintsOnlyScope = !listConfirmed && !candidateFallbackPermitted && !installed.isNullOrEmpty()
+            if (hintsOnlyScope) candidateFallbackPermitted = true
             if (!listConfirmed && !candidateFallbackPermitted) {
                 collectIdentity()
                 event("VAG_INSTALLATION_LIST", "Формат списка не подтверждён; кандидаты для этой платформы не опрашиваются", "UNSUPPORTED")
@@ -871,8 +895,11 @@ object ElmVagScan {
             }
             // Filter status alone does not prove that read services are blocked.
             // Keep the verified manufacturer's fixed discovery scope unchanged.
-            candidateRoutes = if (listConfirmed) emptyMap() else VagOemCandidateCatalog.routes
-            event("VAG_INSTALLATION_LIST", if (listConfirmed) "Подтверждены ID: " + installed!!.joinToString { "%02X".format(it.id) }
+            val hintedRoutes = installed.orEmpty().mapNotNull { it.mappedRoute ?: VagOemReadOnly.routes[it.id] }.associateBy { it.id }
+            candidateRoutes = if (listConfirmed) emptyMap() else if (hintsOnlyScope)
+                (listOf(gateway) + installed!!.mapNotNull { it.mappedRoute ?: VagOemReadOnly.routes[it.id] }).associateBy { it.id }
+                else VagOemCandidateCatalog.routes + hintedRoutes
+            event("VAG_INSTALLATION_LIST", if (listConfirmed) "Подтверждены ID: " + installed!!.filter { it.installationConfirmed }.joinToString { "%02X".format(it.id) }
                 else "Список не получен; фиксированный каталог ${candidateRoutes.size} кандидатов, наличие требует ответа ECU", if (listConfirmed) "CONFIRMED" else "INCONCLUSIVE")
             ids = if (listConfirmed) (listOf(0x19) + installed!!.map { it.id }).distinct()
                 else candidateRoutes.keys.toList()
@@ -884,8 +911,11 @@ object ElmVagScan {
                 val entry = installed?.firstOrNull { it.id == id }
                 val route = entry?.mappedRoute ?: VagOemReadOnly.routes[id]
                 onUnit(ControlUnit("VAG-%02X".format(id), route?.name ?: "Блок VAG", ReadState.NOT_QUERIED,
-                    note = "Наличие подтверждено; чтение DTC ещё не выполнено",
+                    note = if (entry?.installationConfirmed == false)
+                        entry.discoverySources.joinToString { it.description } + "; наличие и DTC не подтверждены"
+                        else "Наличие подтверждено; чтение DTC ещё не выполнено",
                     source = if (id in confirmedProtocols) "RESPONSE" else
+                        if (entry?.installationConfirmed == false) "CANDIDATE" else
                         if (entry?.listOwners?.any { it != 0x19 } == true) "INSTALLATION_LIST" else "GATEWAY"))
             }
             // Complete the bounded installation-list procedure before entering
@@ -1042,6 +1072,15 @@ object ElmVagScan {
             require(route?.id == 0x19)
             return try { VagDiagnosticAccess.decode(readOrNoData(VagDiagnosticAccess.REQUEST, true)) }
                 catch (bad: IllegalArgumentException) { throw IOException("Некорректный статус доступа: ${bad.message}", bad) }
+        }
+        suspend fun readGatewaySource(command: String): List<Int>? {
+            require(route?.id == 0x19 && command in setOf("2204A1", "222A26", "222A2A", "22F1B7", "2204A3", "222A28"))
+            val reply = readOrNoData(command, true) ?: return null
+            if (reply.take(2) == listOf(0x7F, 0x22)) {
+                if (reply.size == 3 && reply[2] in setOf(0x11, 0x12, 0x31)) return null
+                VagOemReadOnly.positive(reply, 0x22)
+            }
+            return reply
         }
 
         private suspend fun readOrNoData(command: String, allowNoData: Boolean): List<Int>? {
