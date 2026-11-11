@@ -8,6 +8,9 @@ package com.vagdiagnostic.app.core
  * protocol/addressing support is enabled.
  */
 object VagUdsReadOnly {
+    // Failure/history flags only. Readiness flags 0x10/0x40 alone are not faults.
+    const val FAULT_STATUS_MASK = 0xAF
+    const val DTC_REQUEST = "1902AF"
     data class Fault(
         val raw24: String,
         val rawStatus: Int,
@@ -23,6 +26,8 @@ object VagUdsReadOnly {
                 if (supportedStatus and 0x08 != 0) "Подтверждена ECU" else "Не подтверждена ECU"
             else parts += "Признак подтверждения ECU не поддерживается"
             if (supportedStatus and 0x04 != 0) parts += "Ожидающая"
+            if (supportedStatus and 0x02 != 0) parts += "Сбой в текущем цикле"
+            if (supportedStatus and 0x20 != 0) parts += "Сбой после последнего стирания"
             if (supportedStatus and 0x80 != 0) parts += "Запрошен индикатор неисправности"
             return parts.joinToString("; ") + "; UDS: статус 0x%02X; маска 0x%02X".format(rawStatus, availableStatusMask)
         }

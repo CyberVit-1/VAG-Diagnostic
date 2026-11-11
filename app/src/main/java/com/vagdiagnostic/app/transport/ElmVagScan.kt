@@ -559,7 +559,7 @@ object ElmVagScan {
                                     }
                             }
                             optionalBeforeDtc = false
-                            val reply = if (responseConfirmed) channel.read("19028D")
+                            val reply = if (responseConfirmed) channel.read(VagUdsReadOnly.DTC_REQUEST)
                                 else channel.readListedFaultMemory() ?: throw UdsNoResponse(dtcAttempted = true)
                             // The list authorizes the route, but is not response
                             // evidence. Promote only after this ECU actually replies.
@@ -1057,7 +1057,7 @@ object ElmVagScan {
         }
         suspend fun read(command: String): List<Int> =
             (if (command == "22F187") cachedPartReply else null) ?: requireNotNull(readOrNoData(command, false))
-        suspend fun readListedFaultMemory(): List<Int>? = readOrNoData("19028D", true)
+        suspend fun readListedFaultMemory(): List<Int>? = readOrNoData(VagUdsReadOnly.DTC_REQUEST, true)
         suspend fun identifyPart(): VagEcuIdentification.Identity? =
             (cachedPartReply ?: readOrNoData("22F187", true))?.let { VagEcuIdentification.udsPartNumber(it) }
         suspend fun readOptionalInfo(command: String): List<Int>? {
@@ -1100,7 +1100,7 @@ object ElmVagScan {
                     // permission. Otherwise a cleanly silent preflight can
                     // consume the retry before the own-memory request is sent.
                     // Optional reads never acquire the extra permission here.
-                    open(target, allowListedDtcProbe = command == "19028D" && listedDtcProbeAllowed)
+                    open(target, allowListedDtcProbe = command == VagUdsReadOnly.DTC_REQUEST && listedDtcProbeAllowed)
                 }
             }) {
                 try { Result.success(readOrNoDataOnce(command, allowNoData = true)) }

@@ -1,5 +1,7 @@
 package com.vagdiagnostic.app.transport
 
+import com.vagdiagnostic.app.core.VagUdsReadOnly
+
 import com.vagdiagnostic.app.core.VagOemReadOnly as Wire
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
@@ -208,7 +210,7 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
     }
 
     private suspend fun requestPacketsOnce(command: String, allowMultiple: Boolean): List<List<Int>> {
-        require(Regex("120004[0-9A-F]{4}").matches(command) || command in setOf("1089", "1A9F", "2204A1", "1800FF00", "1802FF00", "19028D", "1A9B", "22F187", "31B80000") ||
+        require(Regex("120004[0-9A-F]{4}").matches(command) || command in setOf("1089", "1A9F", "2204A1", "1800FF00", "1802FF00", VagUdsReadOnly.DTC_REQUEST, "1A9B", "22F187", "31B80000") ||
             command in com.vagdiagnostic.app.core.VagUdsInfo.scanFields.map { it.request })
         if (!active && peerClosedAfterReply) throw GracefullyClosedChannel()
         check(active)
@@ -381,7 +383,7 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
                                 (result.size == 3 && result.take(2) == listOf(0x7F, bytes[0]))) { "TP2.0 ответ другому сервису" }
                             if (messages.isEmpty() && result.firstOrNull() != 0x7F) {
                                 val echo = when (command) {
-                                    "1089", "1A9F", "1A9B", "19028D", "31B80000" -> bytes.drop(1).take(1)
+                                    "1089", "1A9F", "1A9B", VagUdsReadOnly.DTC_REQUEST, "31B80000" -> bytes.drop(1).take(1)
                                     "2204A1", "22F187", "22F197", "22F189", "22F19E" -> bytes.drop(1).take(2)
                                     else -> emptyList()
                                 }

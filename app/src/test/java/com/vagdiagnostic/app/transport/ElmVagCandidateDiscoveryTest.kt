@@ -59,7 +59,7 @@ class ElmVagCandidateDiscoveryTest {
                 cmd in setOf("222A26", "2204A1") -> payload("7F2231")
                 cmd == "22539B" && activeFilter -> payload("62539B0101")
                 cmd in setOf("22F197", "22F189", "22F19E", "220174", "22539B") -> payload("7F2231")
-                cmd == "19028D" -> payload(if (id == 0xFFFF) "59028D12345608" else "59028D")
+                cmd == "1902AF" -> payload(if (id == 0xFFFF) "59028D12345608" else "59028D")
                 else -> error("Unexpected $id/$cmd")
             }
             (answer + ">").toByteArray(Charsets.US_ASCII).forEach { queue.add(it.toInt() and 255) }
@@ -79,7 +79,7 @@ class ElmVagCandidateDiscoveryTest {
         assertTrue(units.values.filter { it.source == "CANDIDATE" }.all { it.state == ReadState.NO_RESPONSE && it.dtcs.isEmpty() })
         assertTrue(link.sent.contains("ATFCSH17FC0077"))
         assertFalse(link.sent.contains("ATSH718")) // No additional radio address.
-        assertEquals(1, link.addressed.count { it == (0xFFFF to "19028D") })
+        assertEquals(1, link.addressed.count { it == (0xFFFF to "1902AF") })
     }
     @Test fun activeFilterDoesNotHideRespondingFallbackEcus() = runBlocking(VagRetryBackoff { }) {
         val link = Link(activeFilter = true)
@@ -113,7 +113,7 @@ class ElmVagCandidateDiscoveryTest {
             allowCandidateFallback = false, allowGatewayIdentityFallback = false)
         assertFalse(result.complete)
         assertTrue(units.isEmpty())
-        assertFalse(link.sent.contains("19028D"))
+        assertFalse(link.sent.contains("1902AF"))
         assertFalse(link.sent.contains("ATFCSH17FC0077"))
     }
     @Test fun unverifiedManufacturerAndUnknownGatewayCannotStartCatalogFallback() = runBlocking(VagRetryBackoff { }) {
@@ -122,7 +122,7 @@ class ElmVagCandidateDiscoveryTest {
         val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units += it }, { _, _, _ -> }, allowCandidateFallback = false)
         assertFalse(result.listConfirmed)
         assertTrue(units.isEmpty())
-        assertFalse(link.sent.contains("19028D"))
+        assertFalse(link.sent.contains("1902AF"))
         assertFalse(link.sent.contains("ATFCSH17FC0077"))
     }
     @Test fun verifiedManufacturerCanDiscoverActualEcusWhenGatewayDoesNotAnswer() = runBlocking(VagRetryBackoff { }) {
@@ -138,7 +138,7 @@ class ElmVagCandidateDiscoveryTest {
         assertEquals(ReadState.NO_RESPONSE, units.getValue("VAG-19").state)
         assertEquals("CANDIDATE", units.getValue("VAG-19").source)
         assertEquals(3, link.addressed.count { it == (0x19 to "3E00") })
-        assertFalse(link.addressed.contains(0x19 to "19028D"))
+        assertFalse(link.addressed.contains(0x19 to "1902AF"))
     }
     @Test fun fatalCandidateReplyOrCancellationStopsQueueAndPreservesEarlierDtc() = runBlocking(VagRetryBackoff { }) {
         for (cancel in listOf(false, true)) {

@@ -185,10 +185,15 @@ object VagOemReadOnly {
     fun udsFaults(reply: List<Int>): Faults {
         positive(reply, 0x19)
         return when (val result = VagUdsReadOnly.decodeDtcByStatusMask("OEM", reply.map { it.toByte() }.toByteArray())) {
-        is VagUdsReadOnly.DtcReply.Positive -> Faults(result.faults.map {
-            Dtc(it.raw24, it.raw24, DtcKind.OEM, statusText = it.statusDescription())
-        }, "19028D")
-        else -> error("Неподтверждённый ответ UDS DTC: $result")
+            is VagUdsReadOnly.DtcReply.Positive -> {
+                require(result.faults.isNotEmpty() || result.availableStatusMask and VagUdsReadOnly.FAULT_STATUS_MASK != 0) {
+                    "ECU не подтвердил поддержку признаков неисправности; пустой ответ не доказывает отсутствие DTC"
+                }
+                Faults(result.faults.map {
+                    Dtc(it.raw24, it.raw24, DtcKind.OEM, statusText = it.statusDescription())
+                }, VagUdsReadOnly.DTC_REQUEST)
+            }
+            else -> error("Неподтверждённый ответ UDS DTC: $result")
         }
     }
 }

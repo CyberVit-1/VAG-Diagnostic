@@ -139,12 +139,12 @@ class ElmFunctionalAndPendingTest {
                 else -> "OK\r>"
             } }
             val result = ElmUdsPending.read(ElmEngine(link2, { _, _, _, _ -> }), target,
-                "19028D", "${rx}037F1978", 100, 1)
+                "1902AF", "${rx}037F1978", 100, 1)
             assertEquals(11, result.size)
             assertEquals(listOf("ATCFC0", "ATCAF0", "ATMA", "", "3000100000000000", "ATCAF1", "ATCFC1"), link2.sent)
             assertFalse(link2.closed)
             assertTrue(runCatching { ElmUdsPending.read(ElmEngine(link, { _, _, _, _ -> }), target,
-                "19028D", "${rx}037F1978", 100, 1) }.isFailure)
+                "1902AF", "${rx}037F1978", 100, 1) }.isFailure)
             assertTrue(link.closed)
         }
     }
@@ -161,7 +161,7 @@ class ElmFunctionalAndPendingTest {
         } }
         link.rowDelayMs = 16 // Synthetic configured STmin, not vehicle evidence.
         val reply = ElmUdsPending.read(ElmEngine(link, { _, _, _, _ -> }),
-            VagOemReadOnly.routes.getValue(0x19), "19028D", "77A037F1978", 100, 1)
+            VagOemReadOnly.routes.getValue(0x19), "1902AF", "77A037F1978", 100, 1)
         assertEquals(data, reply)
         assertEquals(1023, VagOemReadOnly.udsFaults(reply).values.size)
         assertEquals(listOf("ATCFC0", "ATCAF0", "ATMA", "", "3000100000000000", "ATCAF1", "ATCFC1"), link.sent)
@@ -176,7 +176,7 @@ class ElmFunctionalAndPendingTest {
                 else -> "OK\r>"
             } }
             val result = runCatching { ElmUdsPending.read(ElmEngine(link, { _, _, _, _ -> }),
-                VagOemReadOnly.routes.getValue(0x19), "19028D", "77A037F1978", 100, 1) }
+                VagOemReadOnly.routes.getValue(0x19), "1902AF", "77A037F1978", 100, 1) }
             assertTrue(prefix, result.exceptionOrNull() is VagProtocolFailure)
             assertTrue(link.closed)
             assertFalse(link.sent.contains("ATCAF1"))
@@ -185,7 +185,7 @@ class ElmFunctionalAndPendingTest {
     @Test fun pendingCancellationClosesWithoutFcOrSessionClose() = runBlocking {
         val link = Link { cmd -> if (cmd == "ATMA") throw CancellationException("Stop") else "OK\r>" }
         val error = runCatching { ElmUdsPending.read(ElmEngine(link, { _, _, _, _ -> }),
-            VagOemReadOnly.routes.getValue(0x19), "19028D", "77A037F1978", 100, 1) }.exceptionOrNull()
+            VagOemReadOnly.routes.getValue(0x19), "1902AF", "77A037F1978", 100, 1) }.exceptionOrNull()
         assertTrue(error is CancellationException)
         assertTrue(link.closed)
         assertFalse(link.sent.contains("1001"))

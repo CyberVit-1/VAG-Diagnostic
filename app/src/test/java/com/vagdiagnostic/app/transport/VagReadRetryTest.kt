@@ -10,7 +10,7 @@ class VagReadRetryTest {
     @Test fun completedSilenceStopsAfterTwoConsecutiveAttempts() = runBlocking {
         var calls = 0
         val waits = mutableListOf<Long>()
-        val result = VagReadRetry.run("19028D", classify = { _: Int -> VagReadRetry.Outcome.NO_DATA }, backoff = { waits += it }) { ++calls }
+        val result = VagReadRetry.run("1902AF", classify = { _: Int -> VagReadRetry.Outcome.NO_DATA }, backoff = { waits += it }) { ++calls }
         assertEquals(2, result); assertEquals(listOf(300L), waits)
     }
     @Test fun completedBusyStopsAtFourTotalAttempts() = runBlocking {
@@ -33,9 +33,9 @@ class VagReadRetryTest {
         }
     }
     @Test fun onlyExactMatchingFinalBusyReplyIsBusy() {
-        assertEquals(VagReadRetry.Outcome.BUSY, VagReadRetry.response("19028D", listOf(0x7F, 0x19, 0x21)))
+        assertEquals(VagReadRetry.Outcome.BUSY, VagReadRetry.response("1902AF", listOf(0x7F, 0x19, 0x21)))
         for (payload in listOf(listOf(0x7F, 0x18, 0x21), listOf(0x7F, 0x19, 0x78), listOf(0x7F, 0x19, 0x31), listOf(0x59, 2, 0x21)))
-            assertEquals(VagReadRetry.Outcome.COMPLETE, VagReadRetry.response("19028D", payload))
+            assertEquals(VagReadRetry.Outcome.COMPLETE, VagReadRetry.response("1902AF", payload))
     }
     @Test fun ioAndCancellationDoNotRepeatRequests() = runBlocking {
         for (cancel in listOf(false, true)) {

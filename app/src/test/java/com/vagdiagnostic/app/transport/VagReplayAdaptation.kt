@@ -10,7 +10,15 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
     var silentPresence = false
     var silentSession = false
     return withExplicitUdsTiming(withSyntheticTpKeepalives(buildList {
-        for ((command, raw) in withExplicit29BitHeaderOrder(withoutLegacySilentProbes(rows))) {
+        // AF requests below are synthetic extensions of historical 8D traces.
+        // Recorded ECU payloads are retained, not evidence of a physical AF read.
+        val statusCoverageRows = rows.map { (command, raw) ->
+            (if (command == "19028D") "1902AF" else command) to
+                (if (command == "19028D") raw.lineSequence().joinToString("\n") {
+                    if (it.trim() == command) "1902AF" else it
+                } else raw)
+        }
+        for ((command, raw) in withExplicit29BitHeaderOrder(withoutLegacySilentProbes(statusCoverageRows))) {
             if (command.startsWith("ATSP")) protocol = command.removePrefix("ATSP")
             if (command == "ATCAF0") uds = false
             if (command == "ATCAF1") uds = true
@@ -61,7 +69,7 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
             // with explicitly SYNTHETIC silence; never invent a DTC or edit
             // any recorded ECU payload. The old physical result stays unknown.
             if (uds && command == "22F187" && raw.trim() == "NO DATA" && silentPresence && silentSession)
-                repeat(2) { add("19028D" to "NO DATA") }
+                repeat(2) { add("1902AF" to "NO DATA") }
         }
     }))
 }
@@ -72,7 +80,7 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
 private fun withExplicitUdsTiming(rows: List<Pair<String, String>>): List<Pair<String, String>> = buildList {
     var timing: String? = null
     val adaptive = setOf("1003", "1001", "22F187", "22F197", "22F189", "22F19E", "22F1A2", "220174")
-    val fixed = setOf("3E00", "19028D", "2204A1", "222A26", "222A28")
+    val fixed = setOf("3E00", "1902AF", "2204A1", "222A26", "222A28")
     for ((command, raw) in rows) {
         val logical = if (command in setOf("3E001", "10031")) command.dropLast(1)
         else if (command.matches(Regex("0[1-7][0-9A-F]{14}"))) {

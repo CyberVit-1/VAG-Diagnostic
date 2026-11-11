@@ -82,7 +82,7 @@ class ElmSettingCacheTest {
     @Test fun vehicleRequestsAreNeverCachedAndUnknownAdapterCommandsInvalidateState() = runBlocking {
         val link = Link(); val engine = ElmEngine(link, { _, _, _, _ -> })
         engine.configureSetting("ATCAF0")
-        for (request in listOf("0100", "19028D", "ATMA"))
+        for (request in listOf("0100", "1902AF", "ATMA"))
             assertTrue(runCatching { engine.configureSetting(request) }.exceptionOrNull() is IllegalArgumentException)
         engine.command("0100"); engine.command("0100")
         assertFalse(engine.configureSetting("ATCAF0"))
@@ -100,7 +100,7 @@ class ElmSettingCacheTest {
     }
     @Test fun nativeSettingSyntaxCannotInjectAnotherCommand() = runBlocking {
         val link = Link(); val engine = ElmEngine(link, { _, _, _, _ -> })
-        for (command in listOf("VTFCTRA 710, 77A\r19028D", "VTSWGP GR1, BZF1;ATZ",
+        for (command in listOf("VTFCTRA 710, 77A\r1902AF", "VTSWGP GR1, BZF1;ATZ",
             "VTTOST REP:2000 14FFFFFF", "STCFCPA710,77A,7E8"))
             assertTrue(runCatching { engine.command(command) }.exceptionOrNull() is IllegalArgumentException)
         assertTrue(link.sent.isEmpty())

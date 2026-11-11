@@ -15,14 +15,14 @@ class VagIsoTpCollectionTest {
     @Test fun maximumClassicIsoTpReplySurvivesSequenceWraps() {
         val (data, rows) = maximumReply(0x77A)
         assertEquals(586, rows.size)
-        val c = VagIsoTpCollection(setOf(0x77A), "19028D", automaticFlowControl = true)
+        val c = VagIsoTpCollection(setOf(0x77A), "1902AF", automaticFlowControl = true)
         c.accept(rows.joinToString("\r"))
         assertEquals(data, c.payloads[0x77A])
         assertTrue(c.unfinished.isEmpty())
     }
     @Test fun fourMaximumOwnersRemainSeparateAndFifthExceedsTheByteBudget() {
         val owners = (0x770..0x774).toList()
-        val c = VagIsoTpCollection(owners.toSet(), "19028D", automaticFlowControl = true)
+        val c = VagIsoTpCollection(owners.toSet(), "1902AF", automaticFlowControl = true)
         for (id in owners.take(4)) {
             val (data, rows) = maximumReply(id)
             c.accept(rows.joinToString("\r"))
@@ -32,7 +32,7 @@ class VagIsoTpCollectionTest {
         assertEquals(owners.take(4).toSet(), c.payloads.keys)
     }
     @Test fun repeatedSingleFramesStillHaveAFiniteFrameBudget() {
-        val c = VagIsoTpCollection(setOf(0x77A), "19028D")
+        val c = VagIsoTpCollection(setOf(0x77A), "1902AF")
         repeat(4096) { c.accept("77A0359028D") }
         assertTrue(runCatching { c.accept("77A0359028D") }.isFailure)
     }

@@ -7,7 +7,7 @@ import org.junit.Test
 class VagIsoTpOutgoingTest {
     @Test fun shortReadsUsePciAndAaPadding() {
         assertEquals(listOf("023E00AAAAAAAAAA"), hex(VagIsoTpOutgoing.frames(listOf(0x3E, 0))))
-        assertEquals(listOf("0319028DAAAAAAAA"), hex(VagIsoTpOutgoing.frames(listOf(0x19, 2, 0x8D))))
+        assertEquals(listOf("031902AFAAAAAAAA"), hex(VagIsoTpOutgoing.frames(listOf(0x19, 2, 0xAF))))
     }
     @Test fun sevenBytesFitOneFrameAndEightRequireFirstAndConsecutive() {
         assertEquals(listOf("0700010203040506"), hex(VagIsoTpOutgoing.frames((0..6).toList())))

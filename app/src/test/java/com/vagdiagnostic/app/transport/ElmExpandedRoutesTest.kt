@@ -81,7 +81,7 @@ class ElmExpandedRoutesTest {
                 cmd == "1001" -> filter + "065001003201F4"
                 cmd == "22F187" -> "NO DATA"
                 cmd in setOf("22F197", "22F189", "22F19E", "220174") -> filter + "037F2231"
-                cmd == "19028D" -> if (protocol == "7")
+                cmd == "1902AF" -> if (protocol == "7")
                     filter + "100B590219123456\r" + filter + "2108654321040000"
                     else filter + "03590219"
                 cmd.startsWith("1") -> {
@@ -175,7 +175,7 @@ class ElmExpandedRoutesTest {
         assertFalse(result.listConfirmed)
         assertTrue(units.isEmpty())
         assertTrue(link.sent.filter { it.endsWith("C000100003011") }.all { it.startsWith("1F") })
-        assertFalse(link.sent.any { it.endsWith("1800FF00") || it.endsWith("1802FF00") || it == "19028D" })
+        assertFalse(link.sent.any { it.endsWith("1800FF00") || it.endsWith("1802FF00") || it == "1902AF" })
     }
     @Test fun additionalPlatformsUseOnlyReportedKnownRoutesAfterConfirmedList() = runBlocking(VagRetryBackoff { }) {
         val link = Link()

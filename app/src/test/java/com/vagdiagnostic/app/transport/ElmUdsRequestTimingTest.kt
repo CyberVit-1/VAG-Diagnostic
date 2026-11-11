@@ -42,14 +42,14 @@ class ElmUdsRequestTimingTest {
         val link = Link(); val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
         val adapter = attach(engine)
         ElmUdsRequestTiming.configure(engine, "3E00")
-        ElmUdsRequestTiming.configure(engine, "19028D")
-        ElmUdsRequestTiming.configure(engine, "19028D")
+        ElmUdsRequestTiming.configure(engine, "1902AF")
+        ElmUdsRequestTiming.configure(engine, "1902AF")
         assertEquals(1, link.sent.count { it == "STPTO1000" })
         assertEquals(1, link.sent.count { it == "STPTO2000" })
         engine.command("ATST28")
-        ElmUdsRequestTiming.configure(engine, "19028D")
+        ElmUdsRequestTiming.configure(engine, "1902AF")
         engine.command("ATSP7")
-        ElmUdsRequestTiming.configure(engine, "19028D")
+        ElmUdsRequestTiming.configure(engine, "1902AF")
         assertEquals(3, link.sent.count { it == "STPTO2000" })
         assertFalse(adapter.enabled)
         assertFalse(link.sent.any { it.startsWith("STCSEG") })
@@ -59,12 +59,12 @@ class ElmUdsRequestTimingTest {
         val link = Link(); val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
         val adapter = attach(engine); link.extendedReply = "?"
         ElmUdsRequestTiming.configure(engine, "3E00")
-        ElmUdsRequestTiming.configure(engine, "19028D")
+        ElmUdsRequestTiming.configure(engine, "1902AF")
         assertEquals(1, link.sent.count { it.startsWith("STPTO") })
         assertEquals(1, link.sent.count { it == "ATSTFA" })
         link.extendedReply = "OK"
         engine.command("ATZ")
-        ElmUdsRequestTiming.configure(engine, "19028D")
+        ElmUdsRequestTiming.configure(engine, "1902AF")
         assertEquals(2, link.sent.count { it.startsWith("STPTO") })
         assertEquals("STPTO2000", link.sent.last())
         assertFalse(adapter.enabled)
@@ -74,7 +74,7 @@ class ElmUdsRequestTimingTest {
         for (raw in listOf("", "NO DATA", "OK\r?", "BUFFER FULL")) {
             val link = Link(); val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
             val adapter = attach(engine); link.extendedReply = raw
-            assertTrue(runCatching { ElmUdsRequestTiming.configure(engine, "19028D") }.exceptionOrNull() is VagProtocolFailure)
+            assertTrue(runCatching { ElmUdsRequestTiming.configure(engine, "1902AF") }.exceptionOrNull() is VagProtocolFailure)
             assertFalse(link.sent.contains("ATSTFA"))
             val after = link.sent.toList()
             assertTrue(runCatching { adapter.enableRoute(VagOemReadOnly.routes.getValue(0x19)) }.isFailure)
@@ -87,24 +87,24 @@ class ElmUdsRequestTimingTest {
         val adapter = attach(engine)
         assertTrue(adapter.enableRoute(VagOemReadOnly.routes.getValue(0x19)))
         link.extendedReply = "?"
-        assertTrue(runCatching { ElmUdsRequestTiming.configure(engine, "19028D") }.exceptionOrNull() is VagProtocolFailure)
+        assertTrue(runCatching { ElmUdsRequestTiming.configure(engine, "1902AF") }.exceptionOrNull() is VagProtocolFailure)
         assertFalse(link.sent.contains("ATSTFA"))
     }
 
     @Test fun genericOneSecondWindowRequiresARealAcknowledgement() = runBlocking {
         val link = Link(); val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
         ElmUdsRequestTiming.configure(engine, "3E00")
-        ElmUdsRequestTiming.configure(engine, "19028D")
+        ElmUdsRequestTiming.configure(engine, "1902AF")
         assertEquals(1, link.sent.count { it == "ATSTFA" })
         assertFalse(link.sent.any { it.startsWith("STPTO") })
         engine.command("ATST28"); link.genericReply = "?"
-        assertTrue(runCatching { ElmUdsRequestTiming.configure(engine, "19028D") }.isFailure)
+        assertTrue(runCatching { ElmUdsRequestTiming.configure(engine, "1902AF") }.isFailure)
     }
     @Test fun cancellationAndEofDoNotBecomeAnUnsupportedCapability() = runBlocking {
         for (error in listOf(CancellationException("Synthetic stop"), java.io.EOFException("Synthetic EOF"))) {
             val link = Link(); val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
             val adapter = attach(engine); link.extendedFailure = error
-            assertSame(error, runCatching { ElmUdsRequestTiming.configure(engine, "19028D") }.exceptionOrNull())
+            assertSame(error, runCatching { ElmUdsRequestTiming.configure(engine, "1902AF") }.exceptionOrNull())
             assertFalse(link.sent.contains("ATSTFA"))
             val after = link.sent.toList()
             assertTrue(runCatching { adapter.enableRoute(VagOemReadOnly.routes.getValue(0x19)) }.isFailure)
