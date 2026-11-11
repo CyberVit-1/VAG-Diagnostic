@@ -29,8 +29,7 @@ FF не выбран: только незавершённый тест не до
 readiness-only. Сквозной тест читает02/20 поCAF1/raw/STN/VT, проверяет
 ровно один DTC-запрос и отсутствие8D. Исторические replay TSV не изменены:
 адаптация запроса8D→AF явно синтетическая, ECU payload сохранён и не является
-физическим свидетельством ответа наAF. Полные результаты будут записаны
-после завершения проверок окончательного source.
+физическим свидетельством ответа наAF. Полные результаты приведены ниже.
 
 Первый полный JVM-прогон runtime3f7aec9:523 теста,1 отказ прежнего
 interruptedReceiveFailureClosesWithoutRestorationOrAck на проверке closed.
@@ -46,3 +45,25 @@ Wi-Fi/SPP/BLE, Room, версия и правила конфиденциальн
 Физический охватAF, в том числе04/46, не подтверждён. Ничего не требуется.
 Далее — общий анализ результата чтения и маршрутов молчащих блоков перед
 единой автомобильной сборкой, без поездки после каждого локального изменения.
+
+## Итог проверки
+
+Runtime3f7aec91a213a04ddfc236d5d8a24e54b2f3fe25; окончательный source
+c4cb280fced03fb74ef9116ab6015a88c3d5de80/tree2aa2c0e3dd2d6ad76135fa3cf56e5ddf72ea7c23.
+Между ними изменены только TP-тест и этот отчёт, app/src/main и workflow одинаковы.
+
+- Целевые статусы/четыре CAN backend:12 PASS; уточнённый TP-профиль:10 PASS.
+- Окончательный полный JVM:523 теста/58 suites,0 failures/errors/skipped,6m50s.
+- Локальный Android assemble/test runtime3f7aec9:523/58,0 failures/errors/skipped,10m03s.
+- [Push CI](https://github.com/CyberVit-1/VAG-Diagnostic/actions/runs/43073030569), job130705617280: assemble/test PASS,523/58,0 failures/errors/skipped.
+- [PR CI](https://github.com/CyberVit-1/VAG-Diagnostic/actions/runs/43073042374), job130705654563: assemble/test PASS,523/58,0 failures/errors/skipped.
+- PR merge9682edfeb486ee32df543d7e1d25885691cab632 имеет тот же tree2aa2c0e3.
+- DEX guard в обоих CI:845 methods/max112 registers/11058 code units, oversized=[].
+- Внутренние APK artifacts13882240677/13882510374 существуют, не просрочены; пользователю не выданы.
+- Аудит190 tracked files/923 history blobs:0 VIN leaks. Main b8c9dd0 не изменён.
+
+До уточнения TP-теста оба CI runtime3f7aec9 также прошли523/58; это не отменяет
+зафиксированный выше локальный отказ523/1 и его устранённую причину.
+Версия остаётся0.3.15/code31 для внутренней проверки, новой выдачи нет.
+Физическая проверкаAF/новых Gateway форматов/чтения04/46 отсутствует.
+Ничего не требуется. Далее — сверка KWP/TP-путей непрочитанных блоков.
