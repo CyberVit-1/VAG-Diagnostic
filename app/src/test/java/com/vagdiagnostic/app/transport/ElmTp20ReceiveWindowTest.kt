@@ -22,9 +22,13 @@ class ElmTp20ReceiveWindowTest {
         private var nextReadDelay = 0L
         private var promptDelayed = false
         private var idleRead = false
+        private var interrupted = false
         override suspend fun open() {}
         override fun close() { closed = true; queue.clear() }
         override suspend fun readByte(): Int {
+            // Explicit EOF after an interrupted, truncated prompt. Do not race
+            // a global 100ms timeout against setup/scheduling before reception.
+            if (interrupted && stopped == "STOPPED\r" && queue.isEmpty()) return -1
             if (splitReads) { idleRead = !idleRead; if (idleRead) return -2 }
             if (nextReadDelay > 0) { val wait = nextReadDelay; nextReadDelay = 0; delay(wait) }
             if (queue.peekFirst() == '>'.code && "A32" in sent && !promptDelayed && delayBarePromptMs > 0) {
@@ -39,6 +43,7 @@ class ElmTp20ReceiveWindowTest {
             val c = rawCommand.trim()
             sent += if (rawCommand == " ") "<interrupt>" else c
             if (rawCommand == " ") {
+                interrupted = true
                 if (stopped == "IO") throw IOException("stream lost during interrupt")
                 if (stopped == "CANCEL") throw CancellationException("cancelled interrupt")
                 nextReadDelay = delayStopMs
@@ -157,9 +162,9 @@ class ElmTp20ReceiveWindowTest {
             val link = Link("3001100025800\r", stop)
             val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
             channel.open(9); channel.request("1089")
-            val failure = runCatching { withTimeout(100) { channel.request("1802FF00") } }.exceptionOrNull()
-            assertTrue(failure is IOException || failure is CancellationException)
-            assertTrue(link.closed)
+            val failure = runCatching { withTimeout(2000) { channel.request("1802FF00") } }.exceptionOrNull()
+            assertTrue("$stop: $failure", if (stop == "CANCEL") failure is CancellationException else failure is IOException)
+            assertTrue("$stop: ${link.sent}", link.closed)
             assertEquals("<interrupt>", link.sent.last())
             assertFalse(link.sent.contains("B20"))
         }
