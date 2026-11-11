@@ -263,6 +263,8 @@ class ElmVagScanTest {
         }
         override suspend fun open() {}
         override suspend fun write(data: ByteArray) {
+            // All responses in this adapter include an already queued prompt.
+            if (data.contentEquals(byteArrayOf(32))) return
             val wire = data.toString(Charsets.US_ASCII).trim()
             val cmd = if (wire in setOf("3E001", "10031")) wire.dropLast(1) else wire
             if (cmd.startsWith("ATCRA")) currentReceiveId = cmd.removePrefix("ATCRA")
@@ -302,16 +304,16 @@ class ElmVagScanTest {
                 }
                 cmd == "A00194FF82FF" -> "300A10F94FF82FF"
                 cmd == "A10194FF82FF" -> "NO DATA"
-                cmd == "A3" && waitingForCapability -> "300A10F94FF82FF"
+                cmd in setOf("A3", "A32") && waitingForCapability -> "300A10F94FF82FF"
                 cmd in setOf("3E00", "1003", "22F187") -> "NO DATA"
-                cmd == "A3" && waitingForClose -> {
+                cmd in setOf("A3", "A32") && waitingForClose -> {
                     pollsBeforeClose++
                     if (pollsBeforeClose < 4) "300A10F94FF82FF" else {
                         waitingForClose = false
                         "300A10F94FF82FF\r300A8"
                     }
                 }
-                cmd == "A3" -> "300A10F94FF82FF"
+                cmd in setOf("A3", "A32") -> "300A10F94FF82FF"
                 cmd == "A80" || (cmd.length == 3 && cmd.startsWith("B")) -> {
                     if (cmd == "A80") waitingForCapability = false
                     if (cmd == "A80" && hasDtcReply && closeFailure == "io") throw IOException("Synthetic close failure")
@@ -1498,7 +1500,7 @@ class ElmVagScanTest {
             .bufferedReader().useLines { lines -> lines.map { line ->
                 val fields = line.split('\t', limit = 2)
                 fields[0] to String(java.util.Base64.getDecoder().decode(fields.getOrNull(1).orEmpty()), Charsets.UTF_8)
-            }.toList() }
+            }.toList() }.let(::withSyntheticTpReceiveWindows)
         // Only the 21-row failing exchange is vehicle evidence. Discovery,
         // preceding Gateway DTC and the recovered ECU reply are synthetic.
         val delegate = Link(installedReply = "5A9F0D190000017200000101000001", dtcReply = "5801051924")
@@ -1543,9 +1545,10 @@ class ElmVagScanTest {
                 .bufferedReader().useLines { lines -> lines.map { line ->
                     val fields = line.split('\t', limit = 2)
                     fields[0] to String(java.util.Base64.getDecoder().decode(fields.getOrNull(1).orEmpty()), Charsets.UTF_8)
-                }.toList() }
-            // Only these 25 exchanges are recorded vehicle evidence. Gateway,
-            // installation scope and all replacement responses are synthetic.
+                }.toList() }.let(::withSyntheticTpReceiveWindows)
+            // The resource has 25 actual exchanges. The receive-window settings
+            // and count hints above are synthetic adaptations, as are Gateway,
+            // installation scope and all replacement responses below.
             val delegate = Link(installedReply = "5A9F0D190000017200000101000001", dtcReply = "5801051924")
             val pending = ArrayDeque<Int>()
             var row = 0
@@ -1744,7 +1747,7 @@ class ElmVagScanTest {
             recreateEngine = { created++; ElmEngine(fresh, { _, _, _, _ -> }) })
         assertTrue(outcome.note, outcome.complete)
         assertEquals(1, created)
-        assertEquals("A3", old.sent.last())
+        assertEquals("ATST0B", old.sent.last())
         assertEquals("ATZ", fresh.sent.first())
         assertTrue(fresh.sent.contains("0100"))
         assertTrue(fresh.sent.contains("25C000100003011"))
@@ -2325,11 +2328,12 @@ class ElmVagScanTest {
             recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }) }) }.exceptionOrNull()
         assertTrue(failure is CancellationException)
         assertEquals(1, replacements)
-        assertEquals("A3", broken.sent.last())
+        assertEquals("ATST0B", broken.sent.last())
         assertEquals("ATZ", fresh.sent.first())
         assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOf("1FC000100003011"))
         assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
-        assertEquals(5, broken.sent.count { it == "A3" }) // one idle check + four response polls
+        assertEquals(1, broken.sent.count { it == "A3" }) // idle check
+        assertEquals(4, broken.sent.count { it == "A32" }) // bounded response polls
     }
     @Test fun completedUdsAbsenceIsCachedWithoutFalseZeroDtcOrDuplicatePresenceRequests() = runBlocking {
         val link = UdsLink(includeCentral = true, centralSilent = true)

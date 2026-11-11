@@ -12,8 +12,8 @@ android {
         applicationId = "com.vagdiagnostic.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 30
-        versionName = "0.3.14"
+        versionCode = 31
+        versionName = "0.3.15"
     }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }

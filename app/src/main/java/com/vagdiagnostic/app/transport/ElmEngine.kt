@@ -130,6 +130,25 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
 
     suspend fun command(text: String, timeoutMs: Long = 5500, deferJournal: Boolean = false): String =
         lock.withLock { commandLocked(text, timeoutMs, deferJournal) }
+    /** A3 may receive only a data frame (without the second expected A1).
+     * Stop that receive window after an ACK-requiring frame, consume its prompt,
+     * then let the TP owner validate/acknowledge it. Never stop on an A1 alone. */
+    internal data class Tp20MoreReply(val raw: String, val ackDueNanos: Long?)
+    internal suspend fun receiveTp20More(expectedId: Int): Tp20MoreReply = lock.withLock {
+        require(expectedId in 1..0x7FF)
+        var ackDue: Long? = null
+        try { Tp20MoreReply(commandLocked("A32", 5500, true, expectedId) {
+            // The tester advertises T1=200ms. Reserve 40ms for command delivery.
+            ackDue = it + 160_000_000L
+        }, ackDue) }
+        catch (failure: Throwable) { close(); throw failure }
+    }
+    private fun tp20AckRow(line: String, expectedId: Int?): Boolean {
+        if (expectedId == null) return false
+        val row = line.uppercase().filterNot(Char::isWhitespace)
+        return row.length in 5..19 && row.length % 2 == 1 && row.all { it in "0123456789ABCDEF" } &&
+            row.take(3).toInt(16) == expectedId && row[3] in "01"
+    }
     /** Returns whether an actual setting command was sent. Cache hits create
      * neither a synthetic response nor a new RAW journal entry. */
     suspend fun configureSetting(text: String, timeoutMs: Long = 5500,
@@ -182,7 +201,8 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
         confirmedCanHeader29 = tx
         true
     }
-    private suspend fun commandLocked(text: String, timeoutMs: Long, deferJournal: Boolean): String {
+    private suspend fun commandLocked(text: String, timeoutMs: Long, deferJournal: Boolean,
+        tpAckRx: Int? = null, onTpAckFrame: ((Long) -> Unit)? = null): String {
         require(text.matches(Regex("[A-Z0-9]+", RegexOption.IGNORE_CASE)) ||
             text.matches(Regex("STCFCPA(?:[0-9A-F]{3},[0-9A-F]{3}|[0-9A-F]{8},[0-9A-F]{8})", RegexOption.IGNORE_CASE)) ||
             text.matches(Regex("VTSWGP (?:GR1, BZF1|GR0|GT[01])|VTFCTRA (?:[0-9A-F]{3}, [0-9A-F]{3}|[0-9A-F]{8}, [0-9A-F]{8})|VTTOST REP:[0-9]{1,4}|STCTOR 1000, 1000", RegexOption.IGNORE_CASE))) { "Недопустимая команда" }
@@ -196,6 +216,9 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
         if (command.matches(Regex("ATSP[0-9A-C]"))) nativeSegmentation?.onProtocolSelection()
         val start = System.nanoTime()
         val collected = StringBuilder()
+        val tpLine = if (tpAckRx != null) StringBuilder() else null
+        var tpLineStartedNanos: Long? = null
+        var interruptedAt: Int? = null
         var status = "OK"
         try {
             link.write((text.uppercase() + "\r").toByteArray(Charsets.US_ASCII))
@@ -205,9 +228,33 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
                     val current = link.readByte()
                     if (current == -2) { yield(); continue }
                     if (current == -1) throw EOFException("Соединение закрыто до окончания ответа")
-                    if (current == '>'.code) break
+                    if (current == '>'.code) {
+                        // Some adapters omit the last CR. Account from the
+                        // first byte of that line, not its potentially late prompt.
+                        if (interruptedAt == null && tpLine != null && tp20AckRow(tpLine.toString(), tpAckRx))
+                            onTpAckFrame?.invoke(requireNotNull(tpLineStartedNanos))
+                        break
+                    }
                     if (collected.length >= 32768) error("Ответ превышает допустимый размер")
                     if (current in 0..127) collected.append(current.toChar())
+                    if (tpLine != null && interruptedAt == null) {
+                        if (current == '\r'.code || current == '\n'.code) {
+                            val needsAck = tp20AckRow(tpLine.toString(), tpAckRx)
+                            val observedAt = tpLineStartedNanos
+                            tpLine.clear()
+                            tpLineStartedNanos = null
+                            if (needsAck) {
+                                onTpAckFrame?.invoke(requireNotNull(observedAt))
+                                interruptedAt = collected.length
+                                // A space interrupts reception but cannot repeat the
+                                // previous command if its prompt is already in flight.
+                                link.write(byteArrayOf(' '.code.toByte()))
+                            }
+                        } else if (current in 0..127) {
+                            if (tpLine.isEmpty()) tpLineStartedNanos = System.nanoTime()
+                            tpLine.append(current.toChar())
+                        }
+                    }
                 }
             }
             val raw = collected.toString()
@@ -220,7 +267,16 @@ class ElmEngine(private val link: ElmLink, private val log: suspend (String, Str
             if (raw.contains("BUFFER FULL", true) || raw.contains("STOPPED", true) || raw.contains("CAN ERROR", true)) {
                 status = "ADAPTER_ERROR"
             }
-            return raw
+            val stop = interruptedAt
+            return if (stop == null) raw else {
+                // Only the STOPPED after our explicit interrupt is consumed.
+                // Keep the original raw bytes/status in the journal below.
+                val tail = raw.substring(stop).replace('\r', '\n').split('\n')
+                check(tail.count { it.trim().equals("STOPPED", true) } <= 1)
+                if (tail.any { it.trim().equals("STOPPED", true) } &&
+                    !raw.substring(0, stop).contains("STOPPED", true)) status = "TP20_RECEIVE_INTERRUPTED"
+                raw.substring(0, stop) + tail.filterNot { it.trim().equals("STOPPED", true) }.joinToString("\r")
+            }
         } catch (error: TimeoutCancellationException) {
             confirmedSettings.clear()
             coroutineContext.ensureActive()

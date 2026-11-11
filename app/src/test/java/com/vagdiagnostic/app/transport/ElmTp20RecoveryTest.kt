@@ -21,6 +21,8 @@ class ElmTp20RecoveryTest {
         override fun close() {}
         override suspend fun readByte(): Int = bytes.pollFirst() ?: -2
         override suspend fun write(bytes: ByteArray) {
+            // This scripted adapter already queued its prompt; a late space is idle.
+            if (bytes.contentEquals(byteArrayOf(32))) return
             val c = bytes.toString(Charsets.US_ASCII).trim()
             sent += c
             val raw = when {
@@ -32,8 +34,8 @@ class ElmTp20RecoveryTest {
                 c.matches(Regex("1[0-9A-F]00041802FF00")) -> { dtcSent = true; if (tail == "unacked") "NO DATA" else if (tail.startsWith("pending"))
                     "300B2\r3001100037F" + (if (tail == "pending-wrong") "1A" else "18") + "78" +
                     (if (tail == "pending-coalesced") "\r3001200025800" else "") else "300B%X".format((c.take(2).toInt(16) + 1) and 15) }
-                c == "A3" && !dtcSent -> "300A10F8AFF4AFF"
-                c == "A3" -> {
+                c in setOf("A3", "A32") && !dtcSent -> "300A10F8AFF4AFF"
+                c in setOf("A3", "A32") -> {
                     polls++
                     if (tail == "io" || tail == "pending-io") throw IOException("lost stream")
                     if (tail == "cancel" || tail == "pending-cancel") throw CancellationException("stopped")
@@ -133,7 +135,7 @@ class ElmTp20RecoveryTest {
                 else -> assertTrue(error is IOException)
             }
             assertEquals(1, link.polls)
-            assertEquals("A3", link.sent.last())
+            assertEquals("A32", link.sent.last())
         }
     }
     @Test fun pendingKeepsSessionUntilFinalWithoutResendingDiagnosticRequest() = runBlocking {
@@ -180,7 +182,7 @@ class ElmTp20RecoveryTest {
             val error = runCatching { channel.request("1802FF00") }.exceptionOrNull()
             if (tail == "pending-cancel") assertTrue(error is CancellationException)
             else assertTrue(error is IOException)
-            assertEquals("A3", link.sent.last())
+            assertEquals("A32", link.sent.last())
             assertEquals(1, link.sent.count { it.endsWith("1802FF00") })
             assertFalse(link.sent.contains("A80"))
         }

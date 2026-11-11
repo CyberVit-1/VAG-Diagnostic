@@ -21,6 +21,8 @@ class ElmVehicleReplayTest {
         override fun close() { bytes.clear() }
         override suspend fun readByte(): Int = bytes.removeFirstOrNull() ?: -2
         override suspend fun write(data: ByteArray) {
+            // Recorded replies already include their prompt in this adapter.
+            if (data.contentEquals(byteArrayOf(32))) return
             val command = data.toString(Charsets.US_ASCII).trim()
             sent += command
             check(index < rows.size) { "Unexpected extra command $command" }

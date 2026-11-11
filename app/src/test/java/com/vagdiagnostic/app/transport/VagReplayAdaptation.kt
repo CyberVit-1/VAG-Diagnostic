@@ -95,7 +95,7 @@ internal fun withSyntheticTpKeepalives(rows: List<Pair<String, String>>): List<P
     var rawTp = true
     var first = true
     var peer = ""
-    return buildList {
+    return withSyntheticTpReceiveWindows(buildList {
         for ((command, reply) in rows) {
             if (command == "ATCAF0") rawTp = true
             if (command == "ATCAF1") rawTp = false
@@ -113,6 +113,33 @@ internal fun withSyntheticTpKeepalives(rows: List<Pair<String, String>>): List<P
             }
             add(command to reply)
         }
+    })
+}
+
+/** Historical polls are consecutive A3s or terminate with data/B ACK or a peer
+ * close after another poll. Preserve every raw ECU reply, but model settings/count hints
+ * explicitly as software-only adaptation. The final A3 before a retried request
+ * is an idle check, not a receive poll, and remains unchanged. */
+internal fun withSyntheticTpReceiveWindows(rows: List<Pair<String, String>>): List<Pair<String, String>> = buildList {
+    var shortWindow = ""
+    for ((index, row) in rows.withIndex()) {
+        val (command, reply) = row
+        if (command.startsWith("ATST")) shortWindow = command
+        val next = rows.getOrNull(index + 1)?.first.orEmpty()
+        val receivedData = reply.replace('\r', '\n').split('\n').any {
+            Regex("300[0-3][0-9A-F][0-9A-F]{2,14}").matches(it.trim())
+        }
+        val closedAfterPoll = rows.getOrNull(index - 1)?.first == "A3" &&
+            reply.replace('\r', '\n').split('\n').any { it.trim() == "300A8" }
+        if (command == "A3" && (next == "A3" || (receivedData && next.startsWith("B")) || closedAfterPoll)) {
+            check(shortWindow.isNotEmpty())
+            check(reply.trim() == "NO DATA" || reply.replace('\r', '\n').split('\n').filter { it.isNotBlank() }.all {
+                Regex("300(?:A1[0-9A-F]{10}|A8|[0-3][0-9A-F][0-9A-F]{2,14})").matches(it.trim())
+            })
+            add("ATST80" to "OK")
+            add("A32" to reply)
+            add(shortWindow to "OK")
+        } else add(row)
     }
 }
 

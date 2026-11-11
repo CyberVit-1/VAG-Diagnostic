@@ -39,6 +39,8 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
     private var peerClosedAfterReply = false
     private var gapMs = 20L
     private var responseMs = 200L
+    private var frameReceiveTicks = 0x10
+    private var receiveAckDueNanos: Long? = null
     private var peerParameters = listOf(0xA1, 1, 0x94, 0xFF, 0x82, 0xFF)
     private var negotiatedPeerParameters: List<Int> = emptyList()
     private var destination: Int? = null
@@ -99,7 +101,9 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
             val receiveTicks = ((gapMs + 24 + 3) / 4).coerceAtLeast(1)
             check(receiveTicks * 4 + gapMs <= 160) { "T3 не позволяет подтвердить кадр в объявленный T1" }
             ok("ATST%02X".format(receiveTicks))
+            frameReceiveTicks = receiveTicks.toInt()
             sendSeq = 0; receiveSeq = 0
+            receiveAckDueNanos = null
             firstRequest = true
             return
         }
@@ -272,7 +276,7 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
                     }
                     // Avoid exhausting a count limit in a tight loop on fast adapters.
                     delay(if (pendingReplies > 0) gapMs.coerceAtLeast(50) else gapMs)
-                    queue.addAll(exchange("A3", allowEmpty = true))
+                    queue.addAll(receiveMore())
                     continue
                 }
                 val frame = queue.removeFirst()
@@ -311,6 +315,7 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
                             if (++duplicates > 3) throw VagProtocolFailure("Превышен предел точных повторов TP2.0 кадра")
                             if (queue.isEmpty() && op in listOf(0x00, 0x10)) {
                                 delay(gapMs)
+                                checkReceiveAckDeadline()
                                 queue.addAll(exchange("%02X".format(0xB0 or receiveSeq), allowEmpty = true))
                             }
                             continue
@@ -328,6 +333,7 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
                             // No bytes from the out-of-order frame are published.
                             sequenceRecovery = true
                             delay(gapMs)
+                            checkReceiveAckDeadline()
                             queue.addAll(exchange("%02X".format(0x90 or receiveSeq), allowEmpty = true))
                             continue
                         }
@@ -352,6 +358,7 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
                         if (last) check(result.size == expected) { "Обрезанный TP2.0 пакет" }
                         if (op == 0x00 || op == 0x10) {
                             delay(gapMs)
+                            checkReceiveAckDeadline()
                             // Odd 0 is ELM expected-response limit, not a CAN data byte.
                             val pending = result.size == 3 && result.take(2) == listOf(0x7F, bytes[0]) && result[2] == 0x78
                             if (last && !moreMessages && !pending) queue.addAll(quiet("%02X0".format(0xB0 or receiveSeq)))
@@ -452,6 +459,35 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
         // Retain queued data even if the adapter ends that exchange with NO DATA.
         if (allowEmpty && raw.trim().uppercase() in setOf("", "NO DATA")) return emptyList()
         return frames(raw, rx, command)
+    }
+    private suspend fun receiveMore(): List<List<Int>> {
+        try {
+            // Separate the application receive window from the short ACK window.
+            // Two replies permit the peer's A1 followed by application data.
+            ok("ATST80")
+            val reply = engine.receiveTp20More(rx)
+            val raw = reply.raw
+            receiveAckDueNanos = reply.ackDueNanos
+            ElmCompletedCanError.check(raw, "A32")
+            val incoming = if (raw.trim().uppercase() in setOf("", "NO DATA")) emptyList()
+                else frames(raw, rx, "A32")
+            if (receiveAckDueNanos?.let { System.nanoTime() >= it } == true)
+                throw VagProtocolFailure("ELM не завершил приём в срок подтверждения TP2.0")
+            ok("ATST%02X".format(frameReceiveTicks))
+            return incoming
+        } catch (failure: Throwable) {
+            // Do not send a restoration setting into an unfinished receive.
+            engine.close()
+            throw failure
+        }
+    }
+    private fun checkReceiveAckDeadline() {
+        val due = receiveAckDueNanos ?: return
+        receiveAckDueNanos = null
+        if (System.nanoTime() >= due) {
+            engine.close()
+            throw VagProtocolFailure("Истёк срок подтверждения полученного TP2.0 кадра")
+        }
     }
     private suspend fun command(text: String, timeoutMs: Long = 5500): String =
         engine.command(text, timeoutMs, deferJournal = true).also { ElmCompletedCanError.check(it, text) }
