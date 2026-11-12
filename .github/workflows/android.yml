@@ -59,16 +59,16 @@ jobs:
       - name: Reject oversized protocol coroutine DEX methods
         run: python3 tools/check_scan_dex_budget.py app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Name internal verification APK
+      - name: Name consolidated vehicle-test candidate
         if: success()
-        run: cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/VAG-Diagnostic-internal.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/VAG-Diagnostic-v0.3.16.apk
 
       - name: Upload debuggable APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: VAG-Diagnostic-internal-not-for-vehicle-test-${{ github.sha }}
-          path: app/build/outputs/apk/debug/VAG-Diagnostic-internal.apk
+          name: VAG-Diagnostic-v0.3.16-debug-apk
+          path: app/build/outputs/apk/debug/VAG-Diagnostic-v0.3.16.apk
           if-no-files-found: error
           retention-days: 30
 

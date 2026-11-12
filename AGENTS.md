@@ -93,6 +93,11 @@ application, its build workflow, transports, protocols, storage, or UI.
 
 ## Repository workflow
 
+- **Standing user instruction, 12.11.2026:** when asked to continue, work
+  autonomously through research, fixes, regression checks and packaging until
+  the next necessary real-car test has a concrete verified APK. Do not end at
+  an internal milestone waiting for another "continue". Bundle changes into
+  one vehicle trial; stop earlier only for a genuine blocker requiring input.
 - Base changes on the latest verified branch/version, read
   `PROJECT_CONTEXT.md` and `RESEARCH.md`, and respect the current PR.
 - Avoid committing directly to `main` during unverified development.
