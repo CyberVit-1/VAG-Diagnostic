@@ -72,7 +72,7 @@ class ElmVehicleReplayTest {
         assertFalse(link.sent.any { it.contains("1A9B") } && metadata)
     }
     private fun withCurrentSetup(rows: List<Row>) =
-        withExplicitPhysicalFlowControl(rows.map { it.command to it.raw }).map { Row(it.first, it.second) }
+        withExplicitPhysicalFlowControl(rows.map { it.command to it.raw }, minimalListed = true).map { Row(it.first, it.second) }
 
     private fun withSyntheticPresence(original: List<Row>): List<Row> {
         var rx = ""

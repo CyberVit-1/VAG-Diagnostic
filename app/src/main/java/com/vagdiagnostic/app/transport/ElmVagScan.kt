@@ -18,6 +18,7 @@ object ElmVagScan {
     enum class Protocol { TP20, UDS }
     data class Outcome(val protocol: Protocol?, val listConfirmed: Boolean, val complete: Boolean, val note: String)
     private class OptionalReadUnavailable(cause: Throwable) : IllegalStateException("Дополнительная информация не получена; DTC требуют нового канала", cause)
+    private class FunctionComponentUnavailable(cause: IOException) : IOException("Тип компонента не подтверждён: ${cause.message}", cause)
     private class UdsNoResponse(dtcAttempted: Boolean = false) : IllegalStateException(
         if (dtcAttempted) "ECU не ответил на служебные запросы и ограниченное чтение DTC"
         else "ECU не ответил на 3E00, 1003 и F187")
@@ -160,7 +161,7 @@ object ElmVagScan {
         private fun recovery(key: String): (suspend (Throwable) -> ElmEngine)? =
             if (recreateEngine == null) null else { failure -> restoreConnection(key, failure); currentEngine }
         private fun newUds() = Uds(currentEngine, if (recreateEngine == null) null else
-            { key, failure -> restoreConnection(key, failure); currentEngine })
+            { key, failure -> restoreConnection(key, failure); currentEngine }, minimalRead = !readSupplementalInfo)
         private suspend fun withTp(route: VagOemReadOnly.Route, action: suspend (ElmTp20Channel) -> Unit) {
             val channel = ElmTp20Channel(currentEngine, recoverEngine = recovery(route.key))
             var healthy = true
@@ -212,6 +213,23 @@ object ElmVagScan {
             identities[id] = value
             if (id == 0x19) { identity = value; gatewayIdentityAttempted = true }
             return value
+        }
+        private suspend fun collectFunctionComponent(id: Int, read: suspend (String) -> List<Int>?) {
+            // One missing discriminator for a documented function relationship,
+            // after the host's DTC was saved; never a full ECU inventory pass.
+            val identity = identities[id] ?: return
+            val field = VagUdsInfo.Field.COMPONENT
+            if (!identifyEcus || readSupplementalInfo || id != 0x09 ||
+                installed?.any { it.id == 0x46 && it.installationConfirmed } != true ||
+                !VagDiagnosticTopology.needsComfortComponent(identity) || details[id]?.containsKey(field) == true) return
+            val value = try { VagUdsInfo.decode(field, read(field.request)) }
+                catch (bad: IllegalArgumentException) {
+                    throw FunctionComponentUnavailable(VagProtocolFailure("Неверный тип компонента для связи функций", bad))
+                } catch (io: IOException) { throw FunctionComponentUnavailable(io) }
+            details[id] = details[id].orEmpty() + (field to value)
+            identities[id] = VagUdsInfo.merge(identity, mapOf(field to value))
+            event("VAG_FUNCTION_COMPONENT_09", value.state.name,
+                if (value.state == VagUdsInfo.State.PRESENT) "PARSED" else "INCONCLUSIVE")
         }
         private suspend fun collectDetails(id: Int, fields: List<VagUdsInfo.Field>, read: suspend (String) -> List<Int>?) {
             if (!detailsAttempts.add(id)) return
@@ -510,6 +528,11 @@ object ElmVagScan {
                             channel.requestMessages(if (powertrain) "1800FF00" else "1802FF00"), powertrain).deduplicated()
                         completedFaults = result
                         publishFaults(requireNotNull(result))
+                        if (id in udsInfoOverTp) try {
+                            collectFunctionComponent(id) { channel.request(it) }
+                        } catch (missing: ElmTp20Channel.NoApplicationResponse) {
+                            event("VAG_FUNCTION_COMPONENT_09", "Тип компонента не подтверждён; основные DTC сохранены", "INCONCLUSIVE")
+                        }
                         if (identifyEcus && readSupplementalInfo) try {
                             if (id in udsInfoOverTp) collectDetails(id, VagUdsInfo.scanFields) { channel.request(it) }
                             readDtcDetails(VagDtcDetails.Protocol.KWP, requireNotNull(result)) { channel.requestDetails(it) }
@@ -567,6 +590,7 @@ object ElmVagScan {
                             val faults = VagOemReadOnly.udsFaults(reply).deduplicated()
                             completedFaults = faults
                             publishFaults(faults)
+                            collectFunctionComponent(id, channel::readOptionalInfo)
                             if (identifyEcus && readSupplementalInfo) collectDetails(id, VagUdsInfo.scanFields + VagUdsInfo.Field.ACCESS_STATUS) {
                                 channel.readOptionalInfo(it)
                             }
@@ -670,6 +694,16 @@ object ElmVagScan {
                     note = if (completedFaults != null) "DTC прочитаны; дополнительные данные не подтверждены: ${unsupported.message}"
                         else "DTC не подтверждены: ${unsupported.message}"))
                 event("VAG_ADAPTER_COMMAND_REJECTED", "${route.key}: ${unsupported.message}", "INCOMPLETE")
+            }
+            catch (unavailable: FunctionComponentUnavailable) {
+                // Only this post-DTC, optional field can use this boundary.
+                // Never repeat the saved memory or resume on an unverified stream.
+                if (completedFaults == null) throw unavailable
+                if (!faultsPublished) publishFaults(requireNotNull(completedFaults))
+                onUnit(unit.copy(note = "Память DTC прочитана; ${unavailable.message}"))
+                event("VAG_FUNCTION_COMPONENT_09", unavailable.message.orEmpty(), "INCOMPLETE")
+                if (recreateEngine == null) throw unavailable
+                restoreConnection(route.key, unavailable)
             }
             catch (protocolFailure: VagProtocolFailure) {
                 completedFaults?.takeIf { !faultsPublished }?.let { publishFaults(it) }
@@ -948,7 +982,8 @@ object ElmVagScan {
         }
     }
 
-    private class Uds(private var engine: ElmEngine, private val recoverEngine: (suspend (String, Throwable) -> ElmEngine)? = null) {
+    private class Uds(private var engine: ElmEngine, private val recoverEngine: (suspend (String, Throwable) -> ElmEngine)? = null,
+        private val minimalRead: Boolean = false) {
         private suspend fun execute(command: String, timeoutMs: Long = 5500): String =
             engine.command(command, timeoutMs).also { ElmCompletedCanError.check(it, command) }
         private var route: VagOemReadOnly.Route? = null
@@ -1019,7 +1054,7 @@ object ElmVagScan {
             // Presence is independent of extended-session support. A complete
             // matching negative reply also proves that the addressed ECU answered.
             var presence: List<Int>? = null
-            for (attempt in 0 until 3) {
+            for (attempt in 0 until (if (allowListedDtcProbe && minimalRead) 1 else 3)) {
                 presence = readOrNoData("3E00", allowNoData = true)
                 if (presence != null) break
                 currentCoroutineContext().ensureActive()
@@ -1034,6 +1069,9 @@ object ElmVagScan {
                 catch (_: ElmUdsRawTransaction.UnsupportedCommand) { null }
             active = reply?.take(2) == listOf(0x50, 3)
             if (presence == null && reply == null) {
+                // A validated installation list already authorizes this route.
+                // Do not spend another silent identity read before its own DTC.
+                if (allowListedDtcProbe && minimalRead) return false
                 cachedPartReply = readOrNoData("22F187", allowNoData = true)
                 if (cachedPartReply == null) {
                     // Only complete silence on finished transactions reaches

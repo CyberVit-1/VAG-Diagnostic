@@ -11,6 +11,17 @@ import java.util.ArrayDeque
 
 /** Synthetic receive-boundary checks, not evidence of vehicle response time. */
 class ElmTp20ReceiveWindowTest {
+    @Test fun normalizedVehicle0316RowsPreserveTheNowReceivedDoorReply() = runBlocking {
+        // Actual A32 rows; the scripted prompt/interrupt are software fixtures.
+        val raw = "300A10F8AFF4AFF\r3001300025800\r"
+        val link = Link(raw)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        val reply = engine.receiveTp20More(0x300)
+        assertEquals(raw, reply.raw)
+        assertNotNull(reply.ackDueNanos)
+        assertEquals(listOf("A32", "<interrupt>"), link.sent)
+        assertFalse(link.closed)
+    }
     private class Link(val receive: String, val stopped: String = "STOPPED\r>",
         val delayStopMs: Long = 0, val delayRestoreMs: Long = 0,
         val ackReply: String = "3001200025800>", val delayBarePromptMs: Long = 0,

@@ -2,7 +2,7 @@ package com.vagdiagnostic.app.transport
 
 /** Explicit synthetic adapter setup around unchanged recorded ECU payloads.
  * This is software verification, never a recording of the new implementation. */
-internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): List<Pair<String, String>> {
+internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>, minimalListed: Boolean = false): List<Pair<String, String>> {
     var protocol = "6"
     var uds = false
     var tx = ""
@@ -39,6 +39,13 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
                 add("ATFCSM1" to "OK")
                 custom = true
             }
+            // These old fixture probes are explicitly synthetic all-NO-DATA
+            // extensions. The minimal listed path now goes straight to DTC.
+            // Never omit a real positive, negative, pending or partial reply.
+            if (minimalListed && uds && command == "22F187" && raw.trim() == "NO DATA" && silentPresence && silentSession) {
+                repeat(2) { add("1902AF" to "NO DATA") }
+                continue
+            }
             // Explicitly synthetic ACK for the researched 1000ms UDS window;
             // retain the original recording and every ECU payload unchanged.
             val probeWire = if (uds && command in setOf("3E00", "1003")) command + "1" else command
@@ -56,7 +63,7 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>): 
                 repeat(3) { add(command to "NO DATA") }
             // Three completed silent physical presence attempts are synthetic
             // extensions; no extra request is inserted after pending/partial data.
-            if (uds && command == "3E00" && raw.trim() == "NO DATA")
+            if (!minimalListed && uds && command == "3E00" && raw.trim() == "NO DATA")
                 repeat(2) { add(probeWire to "NO DATA") }
             if (uds && command == "3E00") silentPresence = raw.trim() == "NO DATA"
             if (uds && command == "1003") silentSession = raw.trim() == "NO DATA"

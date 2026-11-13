@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VagDiagnosticTopologyTest {
+    @Test fun comfortDiscriminatorIsRequestedOnlyForKnownFamilyAndMissingComponent() {
+        fun id(part: String, component: String? = null) = VagEcuIdentification.Identity(part, null, "22F187", component)
+        assertTrue(VagDiagnosticTopology.needsComfortComponent(id("1K0 937 086 H")))
+        assertTrue(VagDiagnosticTopology.needsComfortComponent(id("5K0937086L")))
+        assertFalse(VagDiagnosticTopology.needsComfortComponent(id("5Q0937087")))
+        assertFalse(VagDiagnosticTopology.needsComfortComponent(id("UNKNOWN")))
+        assertFalse(VagDiagnosticTopology.needsComfortComponent(id("1K0937086H", "BCM PQ25")))
+    }
     private fun declared(id: String) = ControlUnit("VAG-$id", "Declared function", ReadState.NO_RESPONSE, source = "GATEWAY")
     private fun read(id: String) = ControlUnit("VAG-$id", "Read ECU", ReadState.COMPLETE,
         dtcs = listOf(Dtc("000001", "000001", DtcKind.OEM)), answeredModes = setOf(DtcKind.OEM), source = "RESPONSE")
