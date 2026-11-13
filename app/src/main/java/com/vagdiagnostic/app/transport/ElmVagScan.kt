@@ -18,7 +18,7 @@ object ElmVagScan {
     enum class Protocol { TP20, UDS }
     data class Outcome(val protocol: Protocol?, val listConfirmed: Boolean, val complete: Boolean, val note: String)
     private class OptionalReadUnavailable(cause: Throwable) : IllegalStateException("Дополнительная информация не получена; DTC требуют нового канала", cause)
-    private class FunctionComponentUnavailable(cause: IOException) : IOException("Тип компонента не подтверждён: ${cause.message}", cause)
+    private class FunctionComponentUnavailable(cause: IOException, val id: Int = 0x09) : IOException("Тип компонента не подтверждён: ${cause.message}", cause)
     private class UdsNoResponse(dtcAttempted: Boolean = false) : IllegalStateException(
         if (dtcAttempted) "ECU не ответил на служебные запросы и ограниченное чтение DTC"
         else "ECU не ответил на 3E00, 1003 и F187")
@@ -219,17 +219,31 @@ object ElmVagScan {
             // after the host's DTC was saved; never a full ECU inventory pass.
             val identity = identities[id] ?: return
             val field = VagUdsInfo.Field.COMPONENT
-            if (!identifyEcus || readSupplementalInfo || id != 0x09 ||
-                installed?.any { it.id == 0x46 && it.installationConfirmed } != true ||
-                !VagDiagnosticTopology.needsComfortComponent(identity) || details[id]?.containsKey(field) == true) return
+            val child = if (id == 0x09) 0x46 else if (id == 0x03 || id == 0x44) 0x04 else return
+            val needed = if (id == 0x09) VagDiagnosticTopology.needsComfortComponent(identity)
+                else VagDiagnosticTopology.needsAngleComponent(id, identity)
+            if (!identifyEcus || readSupplementalInfo ||
+                installed?.any { it.id == child && it.installationConfirmed } != true ||
+                !needed || details[id]?.containsKey(field) == true) return
             val value = try { VagUdsInfo.decode(field, read(field.request)) }
                 catch (bad: IllegalArgumentException) {
-                    throw FunctionComponentUnavailable(VagProtocolFailure("Неверный тип компонента для связи функций", bad))
-                } catch (io: IOException) { throw FunctionComponentUnavailable(io) }
+                    throw FunctionComponentUnavailable(VagProtocolFailure("Неверный тип компонента для связи функций", bad), id)
+                } catch (io: IOException) { throw FunctionComponentUnavailable(io, id) }
             details[id] = details[id].orEmpty() + (field to value)
             identities[id] = VagUdsInfo.merge(identity, mapOf(field to value))
-            event("VAG_FUNCTION_COMPONENT_09", value.state.name,
+            event("VAG_FUNCTION_COMPONENT_%02X".format(id), value.state.name,
                 if (value.state == VagUdsInfo.State.PRESENT) "PARSED" else "INCONCLUSIVE")
+        }
+        private suspend fun collectAngleIdentity(id: Int, read: suspend () -> VagEcuIdentification.Identity?) {
+            if (!identifyEcus || readSupplementalInfo || id !in setOf(0x03, 0x44) ||
+                installed?.any { it.id == 0x04 && it.installationConfirmed } != true || id in identityAttempts) return
+            val value = try { read() }
+                catch (bad: IllegalArgumentException) { throw FunctionComponentUnavailable(VagProtocolFailure("Неверная идентификация связи G85", bad), id) }
+                catch (io: IOException) { throw FunctionComponentUnavailable(io, id) }
+            identityAttempts += id
+            identities[id] = value
+            event("VAG_FUNCTION_IDENTITY_%02X".format(id), if (value == null) "Не подтверждено" else
+                "${value.partNumber}; ${value.component.orEmpty()}", if (value == null) "INCONCLUSIVE" else "PARSED")
         }
         private suspend fun collectDetails(id: Int, fields: List<VagUdsInfo.Field>, read: suspend (String) -> List<Int>?) {
             if (!detailsAttempts.add(id)) return
@@ -528,10 +542,14 @@ object ElmVagScan {
                             channel.requestMessages(if (powertrain) "1800FF00" else "1802FF00"), powertrain).deduplicated()
                         completedFaults = result
                         publishFaults(requireNotNull(result))
+                        try { collectAngleIdentity(id) { tpIdentity(id, channel) } }
+                        catch (missing: ElmTp20Channel.NoApplicationResponse) {
+                            event("VAG_FUNCTION_IDENTITY_%02X".format(id), "Тип не подтверждён; DTC сохранены", "INCONCLUSIVE")
+                        }
                         if (id in udsInfoOverTp) try {
                             collectFunctionComponent(id) { channel.request(it) }
                         } catch (missing: ElmTp20Channel.NoApplicationResponse) {
-                            event("VAG_FUNCTION_COMPONENT_09", "Тип компонента не подтверждён; основные DTC сохранены", "INCONCLUSIVE")
+                            event("VAG_FUNCTION_COMPONENT_%02X".format(id), "Тип компонента не подтверждён; основные DTC сохранены", "INCONCLUSIVE")
                         }
                         if (identifyEcus && readSupplementalInfo) try {
                             if (id in udsInfoOverTp) collectDetails(id, VagUdsInfo.scanFields) { channel.request(it) }
@@ -590,6 +608,7 @@ object ElmVagScan {
                             val faults = VagOemReadOnly.udsFaults(reply).deduplicated()
                             completedFaults = faults
                             publishFaults(faults)
+                            collectAngleIdentity(id, channel::identifyPart)
                             collectFunctionComponent(id, channel::readOptionalInfo)
                             if (identifyEcus && readSupplementalInfo) collectDetails(id, VagUdsInfo.scanFields + VagUdsInfo.Field.ACCESS_STATUS) {
                                 channel.readOptionalInfo(it)
@@ -701,7 +720,7 @@ object ElmVagScan {
                 if (completedFaults == null) throw unavailable
                 if (!faultsPublished) publishFaults(requireNotNull(completedFaults))
                 onUnit(unit.copy(note = "Память DTC прочитана; ${unavailable.message}"))
-                event("VAG_FUNCTION_COMPONENT_09", unavailable.message.orEmpty(), "INCOMPLETE")
+                event("VAG_FUNCTION_COMPONENT_%02X".format(unavailable.id), unavailable.message.orEmpty(), "INCOMPLETE")
                 if (recreateEngine == null) throw unavailable
                 restoreConnection(route.key, unavailable)
             }
@@ -1001,12 +1020,14 @@ object ElmVagScan {
             val tx = requireNotNull(target.udsTx) { "Нет проверенного UDS-маршрута" }
             val rx = requireNotNull(target.udsRx)
             suspend fun ok(cmd: String) {
-                val raw = execute(cmd).uppercase().replace(cmd, "").filterNot { it.isWhitespace() }
-                if (raw != "OK") throw IOException("ELM отклонил $cmd")
+                engine.configureSetting(cmd)
             }
             val protocol = if (target.is29Bit) "7" else "6"
             // Keep automatic FC disabled until the new ID/filter/mode is ready.
-            for (cmd in listOf("ATSP$protocol", "ATH1", "ATD0", "ATCAF1", "ATCFC0", "ATV0", "ATCEA", "ATSTFA", "ATAT0")) ok(cmd)
+            // Use the same connection-scoped acknowledgements as RAW CAN.
+            // A protocol/reset/refusal invalidates them; vehicle requests are
+            // never cached. Disable FC before changing framing or identifiers.
+            for (cmd in listOf("ATSP$protocol", "ATCFC0", "ATH1", "ATD0", "ATCAF1", "ATV0", "ATCEA", "ATSTFA", "ATAT0")) ok(cmd)
             // Per-request timing below applies equally to CAF1, RAW and native
             // paths. A DTC request must not inherit an identification setting.
             if (target.is29Bit) {

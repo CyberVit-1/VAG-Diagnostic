@@ -4,6 +4,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VagDiagnosticTopologyTest {
+    @Test fun angleComponentRequiresAKnownFamilyAndAnActuallyMissingType() {
+        fun id(part: String, component: String? = null) = VagEcuIdentification.Identity(part, null, "22F187", component)
+        assertTrue(VagDiagnosticTopology.needsAngleComponent(3, id("1K0 907 379 AK")))
+        assertTrue(VagDiagnosticTopology.needsAngleComponent(0x44, id("1K1909144R")))
+        assertFalse(VagDiagnosticTopology.needsAngleComponent(3, id("5Q0907379")))
+        assertFalse(VagDiagnosticTopology.needsAngleComponent(0x44, id("UNKNOWN")))
+        assertFalse(VagDiagnosticTopology.needsAngleComponent(3, id("1K0907379AK", "MK60")))
+        assertFalse(VagDiagnosticTopology.needsAngleComponent(9, id("1K0907379AK")))
+    }
     @Test fun comfortDiscriminatorIsRequestedOnlyForKnownFamilyAndMissingComponent() {
         fun id(part: String, component: String? = null) = VagEcuIdentification.Identity(part, null, "22F187", component)
         assertTrue(VagDiagnosticTopology.needsComfortComponent(id("1K0 937 086 H")))

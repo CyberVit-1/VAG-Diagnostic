@@ -8,6 +8,12 @@ object VagDiagnosticTopology {
     private fun part(identity: VagEcuIdentification.Identity?) = normalized(identity?.partNumber).replace(" ", "").replace("-", "")
     fun needsComfortComponent(identity: VagEcuIdentification.Identity): Boolean =
         identity.component.isNullOrBlank() && Regex("(?:1K0|5K0)93708[0-9][A-Z0-9]{0,3}").matches(part(identity))
+    fun needsAngleComponent(id: Int, identity: VagEcuIdentification.Identity): Boolean =
+        identity.component.isNullOrBlank() && when (id) {
+            0x03 -> Regex("1K0907379[A-Z0-9]{0,3}").matches(part(identity))
+            0x44 -> Regex("1K[01]909144[A-Z0-9]{0,3}").matches(part(identity))
+            else -> false
+        }
     fun host(unit: ControlUnit, units: Map<String, ControlUnit>, identities: Map<Int, VagEcuIdentification.Identity?>): Host? {
         if (unit.state != ReadState.NO_RESPONSE || unit.source !in setOf("GATEWAY", "INSTALLATION_LIST") ||
             unit.dtcs.isNotEmpty() || unit.answeredModes.isNotEmpty()) return null

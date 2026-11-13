@@ -9,7 +9,7 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>, m
     var custom = false
     var silentPresence = false
     var silentSession = false
-    return withExplicitUdsTiming(withSyntheticTpKeepalives(buildList {
+    return withConfirmedAutomaticSettings(withExplicitUdsTiming(withSyntheticTpKeepalives(buildList {
         // AF requests below are synthetic extensions of historical 8D traces.
         // Recorded ECU payloads are retained, not evidence of a physical AF read.
         val statusCoverageRows = rows.map { (command, raw) ->
@@ -78,7 +78,37 @@ internal fun withExplicitPhysicalFlowControl(rows: List<Pair<String, String>>, m
             if (uds && command == "22F187" && raw.trim() == "NO DATA" && silentPresence && silentSession)
                 repeat(2) { add("1902AF" to "NO DATA") }
         }
-    }))
+    })))
+}
+
+/** Explicit software-only AT adaptation. Keep every vehicle request/payload;
+ * remove only acknowledged redundant settings on the same simulated stream.
+ * TP setup remains uncached, as in production. No physical timing is inferred. */
+internal fun withConfirmedAutomaticSettings(rows: List<Pair<String, String>>): List<Pair<String, String>> = buildList {
+    val ordered = mutableListOf<Pair<Pair<String, String>, Boolean>>()
+    var i = 0
+    while (i < rows.size) {
+        val start = rows[i].first.matches(Regex("ATSP[67]")) &&
+            rows.drop(i + 1).take(4).map { it.first } == listOf("ATH1", "ATD0", "ATCAF1", "ATCFC0")
+        if (!start) { ordered += rows[i++] to false; continue }
+        val end = (i until rows.size).first { rows[it].first == "ATCFC1" }
+        for (index in listOf(i, i + 4, i + 1, i + 2, i + 3) + (i + 5..end))
+            ordered += rows[index] to true
+        i = end + 1
+    }
+    val cache = ElmSettingCache()
+    var uds = false
+    for ((row, configuration) in ordered) {
+        val (command, raw) = row
+        if (command == "ATCAF0") uds = false
+        if (command == "ATCAF1") uds = true
+        val pairedHeader = command.matches(Regex("ATSH[0-9A-F]{6}|ATCP[0-9A-F]{2}"))
+        val timing = uds && (command in setOf("ATAT0", "ATAT1", "ATSTFA"))
+        if (!pairedHeader && (configuration || timing) && cache.confirmed(command)) continue
+        add(row)
+        cache.beforeCommand(command)
+        cache.observe(command, raw)
+    }
 }
 
 /** Synthetic AT confirmations only. The eight adaptive command options are
