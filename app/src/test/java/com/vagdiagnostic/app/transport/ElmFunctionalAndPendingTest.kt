@@ -5,6 +5,7 @@ import java.util.ArrayDeque
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -148,7 +149,8 @@ class ElmFunctionalAndPendingTest {
             assertTrue(link.closed)
         }
     }
-    @Test fun pendingWindowDoesNotCutOffTheConsecutiveFramesOfAMaximumDtcReply() = runBlocking {
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun pendingWindowDoesNotCutOffTheConsecutiveFramesOfAMaximumDtcReply() = runTest {
         val data = listOf(0x59, 2, 0x8D) + List(4092) { it and 255 }
         val tail = data.drop(6).chunked(7).mapIndexed { index, chunk ->
             "77A2%X".format((index + 1) and 15) + hex(chunk).padEnd(14, 'A')
@@ -160,12 +162,35 @@ class ElmFunctionalAndPendingTest {
             else -> "OK\r>"
         } }
         link.rowDelayMs = 16 // Synthetic configured STmin, not vehicle evidence.
-        val reply = ElmUdsPending.read(ElmEngine(link, { _, _, _, _ -> }),
+        val engine = ElmEngine(link, { _, _, _, _ -> }, clockNanos = { testScheduler.currentTime * 1_000_000 })
+        val reply = ElmUdsPending.read(engine,
             VagOemReadOnly.routes.getValue(0x19), "1902AF", "77A037F1978", 100, 1)
         assertEquals(data, reply)
         assertEquals(1023, VagOemReadOnly.udsFaults(reply).values.size)
         assertEquals(listOf("ATCFC0", "ATCAF0", "ATMA", "", "3000100000000000", "ATCAF1", "ATCFC1"), link.sent)
         assertFalse(link.closed)
+        assertTrue(testScheduler.currentTime in 8500L until 20000L)
+    }
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun pendingMaximumReplyStillCannotExceedTheOverallDeadline() = runTest {
+        val data = listOf(0x59, 2, 0x8D) + List(4092) { it and 255 }
+        val tail = data.drop(6).chunked(7).mapIndexed { index, chunk ->
+            "77A2%X".format((index + 1) and 15) + hex(chunk).padEnd(14, 'A')
+        }.joinToString("\r")
+        val link = Link { cmd -> when (cmd) {
+            "ATMA" -> "77A1FFF" + hex(data.take(6)) + "\r"
+            "" -> "STOPPED\r>"
+            "3000100000000000" -> tail + "\r>"
+            else -> "OK\r>"
+        } }
+        link.rowDelayMs = 40 // Explicitly too slow for the unchanged overall budget.
+        val engine = ElmEngine(link, { _, _, _, _ -> }, clockNanos = { testScheduler.currentTime * 1_000_000 })
+        val failure = runCatching { ElmUdsPending.read(engine,
+            VagOemReadOnly.routes.getValue(0x19), "1902AF", "77A037F1978", 100, 1) }.exceptionOrNull()
+        assertTrue(failure.toString(), failure is VagProtocolFailure)
+        assertTrue(link.closed)
+        assertEquals(20000L, testScheduler.currentTime)
+        assertFalse(link.sent.contains("ATCAF1"))
     }
     @Test fun pendingFlowControlCannotHideContradictoryStatusOrAForeignOwner() = runBlocking {
         for (prefix in listOf("OK", "NO DATA", "7E80359028D")) {
