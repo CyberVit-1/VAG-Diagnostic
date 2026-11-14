@@ -5,3 +5,11 @@ local.properties
 build/
 **/build/
 *.iml
+
+# Generated delivery and temporary artifacts
+*.apk
+*.aab
+*.idsig
+/release/
+/temp/
+/apk-*/

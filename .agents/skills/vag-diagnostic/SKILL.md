@@ -229,7 +229,6 @@ Read from repository root:
 - `PROJECT_CONTEXT.md` — source of truth for version, history and evidence.
 - `RESEARCH.md` — documented algorithm limits and sources.
 - `BUILDING.md` — current installation/build guidance.
-- `GITHUB_BOOTSTRAP.md` — initial GitHub source import and CI records.
 - `AGENTS.md` — mandatory repository-wide invariants.
 
 If any reference disagrees with actual source or current CI results, flag the
