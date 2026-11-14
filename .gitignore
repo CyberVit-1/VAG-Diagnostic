@@ -13,3 +13,8 @@ build/
 /release/
 /temp/
 /apk-*/
+
+# Private workspace instructions (never publish)
+/MASTER_PROMPT.md
+/CHECKPOINT_NEW_CHAT.md
+/PROJECT_CONTEXT.md

@@ -16,7 +16,7 @@ with a physical adapter and a vehicle*, not a convincing simulation.
 
 ## 1. Establish the baseline first
 
-1. Read the repository root `AGENTS.md`, `PROJECT_CONTEXT.md`,
+1. Read the repository root `AGENTS.md`, the workspace-local project context,
    `RESEARCH.md`, `BUILDING.md`, and the source files involved in this
    change. Prefer the newest Git commit and actual source over outdated
    summaries. Treat earlier archives only as historical evidence.
@@ -164,9 +164,8 @@ Before giving a download/install/test instruction:
 
 ## 7b. Master prompt and proactive troubleshooting requirements
 
-- Read the **entire original 15-section master prompt** inside root
-  `AGENTS.md`, with an unchanged standalone copy at `MASTER_PROMPT.md`.
-  The first-line role description is only one part of the specification.
+- Read the complete workspace-local product specification and project context.
+  Keep private development instructions outside the published repository.
 - User expectations are engineering requirements: diagnose beyond the last
   reported error, preserve the protocol/transport architecture, prevent
   repeated field trips for minor fixes, confirm every claimed feature on a
@@ -201,7 +200,7 @@ Before giving a download/install/test instruction:
 6. Real-car test record should identify APK version/commit, adapter model and
    transport, car generation/platform if safely known, exact action, command
    exchange, observed result, and exported raw log. Never synthesize results.
-7. Update `PROJECT_CONTEXT.md` with baseline, changes, checks, supported
+7. Update the workspace-local project context with baseline, changes, checks, supported
    capabilities, limitations and next stage. Preserve previous decisions.
 8. Prefer work in a feature branch/PR. Avoid changing `main` while hardware
    regression risk remains or without a merge decision.
@@ -226,7 +225,7 @@ give only the actions actually required.
 ## 10. Reference files
 
 Read from repository root:
-- `PROJECT_CONTEXT.md` — source of truth for version, history and evidence.
+- the workspace-local project context — source of truth for version, history and evidence.
 - `RESEARCH.md` — documented algorithm limits and sources.
 - `BUILDING.md` — current installation/build guidance.
 - `AGENTS.md` — mandatory repository-wide invariants.
