@@ -1883,8 +1883,10 @@ class ElmVagScanTest {
         }
     }
 
-    @Test fun silentOptionalCapabilityGetsOneNewChannelForActualDtcRead() = runBlocking {
+    @Test fun healthySilentCapabilityDoesNotReopenTheChannelBeforeActualDtcRead() = runBlocking {
         val link = Link(silentCapability = true)
+        val rejected = Link(saeReply = "7F3111")
+        scanWithSupplementalInfo(ElmEngine(rejected, { _, _, _, _ -> }), {}, { _, _, _ -> })
         val units = linkedMapOf<String, ControlUnit>()
         val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
         assertTrue(outcome.note, outcome.complete)
@@ -1892,6 +1894,11 @@ class ElmVagScanTest {
         assertEquals(2, link.sent.count { it.endsWith("31B80000") })
         assertEquals(2, link.sent.count { it.endsWith("1802FF00") })
         assertFalse(link.sent.any { it.endsWith("1800FF00") })
+        // A completed silence with matching live keepalives is not a damaged
+        // stream. Unsupported format detection must not require another open.
+        assertEquals(rejected.sent.filter { it.endsWith("C000100003011") },
+            link.sent.filter { it.endsWith("C000100003011") })
+        assertFalse(link.sent.contains("ATZ"))
     }
     @Test fun centralIdentityChoosesEachEcuTransportAndIsCachedForTheWholeScan() = runBlocking {
         for (family in listOf("1K0", "5Q0")) {

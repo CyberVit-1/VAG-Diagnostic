@@ -528,7 +528,12 @@ object ElmVagScan {
                             try {
                                 if (saeAttempts.add(id)) saeSupport[id] = VagKwpCapabilities.supportsSaeDtc(channel.request(VagKwpCapabilities.REQUEST))
                             } catch (missing: ElmTp20Channel.NoApplicationResponse) {
-                                throw OptionalReadUnavailable(missing)
+                                // This typed outcome requires a completed receive
+                                // window, the request ACK and matching live peer
+                                // parameters, with no partial application packet.
+                                // An unanswered format probe selects OEM DTC;
+                                // it is not a prerequisite for reading memory.
+                                saeSupport[id] = false
                             } catch (_: ElmCompletedCanError) {
                                 // This fixed capability command has no retriable
                                 // flag; its completed failure selects OEM format.

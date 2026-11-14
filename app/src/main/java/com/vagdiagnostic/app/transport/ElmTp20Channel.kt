@@ -286,7 +286,12 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
                 val op = frame[0] and 0xF0
                 when {
                     op == 0xB0 -> {
-                        check(frame.size == 1 && frame[0] and 15 == sendSeq) { "Неверный ACK TP2.0" }
+                        check(frame.size == 1) { "Неверный ACK TP2.0" }
+                        // A delayed confirmation of another sequence cannot
+                        // acknowledge this request, but must not discard a
+                        // matching ACK/data already queued behind it. The
+                        // transaction's existing frame/time limits still apply.
+                        if (frame[0] and 15 != sendSeq) continue
                         acknowledged = true
                     }
                     op == 0x90 -> error("Отрицательное подтверждение TP2.0; запрос не повторяется")

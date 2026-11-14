@@ -44,6 +44,29 @@ class ElmTp20TransactionParityTest {
         assertEquals(listOf("A3", "1100041802FF00", "B20"), link.sent.takeLast(3))
         assertFalse(link.sent.take(link.sent.indexOf("1000021089")).contains("A3"))
     }
+    @Test fun staleAckDoesNotDiscardFollowingMatchingAckAndDtcResponse() = runBlocking {
+        for (stale in listOf("B1", "BF", "B3")) {
+            val link = Link(dtcReply = "300$stale\r300B2\r3001100025800")
+            val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
+            channel.open(9); channel.request("1089")
+            assertEquals(listOf(0x58, 0), channel.request("1802FF00"))
+            assertEquals(1, link.sent.count { it == "1100041802FF00" })
+        }
+    }
+    @Test fun staleAckAloneCannotAuthorizeApplicationData() = runBlocking {
+        val link = Link(dtcReply = "300B1\r3001100025800")
+        val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
+        channel.open(9); channel.request("1089")
+        assertTrue(runCatching { channel.request("1802FF00") }.exceptionOrNull() is IOException)
+        assertFalse(link.sent.contains("B20"))
+    }
+    @Test fun malformedAckIsNotIgnoredAsAStaleConfirmation() = runBlocking {
+        val link = Link(dtcReply = "300B100\r300B2\r3001100025800")
+        val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
+        channel.open(9); channel.request("1089")
+        assertTrue(runCatching { channel.request("1802FF00") }.exceptionOrNull() is IOException)
+        assertFalse(link.sent.contains("B20"))
+    }
     @Test fun idleChannelForeignApplicationDataCannotBeDiscarded() = runBlocking {
         val link = Link(idleReply = "3001100025800")
         val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))

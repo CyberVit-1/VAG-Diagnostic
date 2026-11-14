@@ -33,7 +33,7 @@ object VagDiagnosticTopology {
                 Regex("^MK70(?: |$)").containsMatchIn(normalized(brakes?.component)) &&
                 Regex("1K[01]909144[A-Z0-9]{0,3}").matches(part(steering)) &&
                 normalized(steering?.component).startsWith("EPS_ZFLS ")) {
-                return Host("VAG-44", "Для конфигурации MK70 диагностика G85 документирована через блок 44, он прочитан. Это связь функции, а не подтверждение отдельной памяти DTC по адресу 04.",
+                return Host("VAG-44", "Для конфигурации MK70 базовая установка G85 документирована через блок 44, он прочитан. Это связь функции, а не подтверждение отдельной памяти DTC по адресу 04.",
                     "https://wiki.ross-tech.com/wiki/index.php/VW_Golf_(1K)_Brake_Electronics_(MK70)")
             }
         }
