@@ -64,4 +64,4 @@ replay явно помечены синтетическими; содержим�
 Окончательный source e6a2433: локальные JVM/Android и оба GitHub CI по493
 PASS, assembleDebug и DEX815/max112/11058 PASS. Фактический CI APK0.3.15
 проверен и подготовлен к одному общему испытанию. Точные SHA/artifact,
-сохранность и ограничения: [VERIFICATION_0.3.15.md](VERIFICATION_0.3.15.md).
+сохранность и ограничения: [VERIFICATION_0.3.15.md](../history/VERIFICATION_0.3.15.md).

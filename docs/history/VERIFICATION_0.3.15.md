@@ -19,8 +19,8 @@
   статически проверенное условие относится к broadcast.
 
 Подробные границы, происхождение реальных/synthetic записей и промежуточные
-отказы тестового harness: [TP receive window](TP_RECEIVE_WINDOW_2026-11-11.md),
-[возврат основного DTC](PRIMARY_DTC_RECOVERY_2026-11-11.md).
+отказы тестового harness: [TP receive window](../research/TP_RECEIVE_WINDOW_2026-11-11.md),
+[возврат основного DTC](../research/PRIMARY_DTC_RECOVERY_2026-11-11.md).
 Implemented, Compile-checked и Software-tested. Нового Vehicle-confirmed
 результата нет: чтение04/46/72 и полнота/скорость на автомобиле ещё требуют
 проверки. Полный перенос всей внешней программы не объявляется выполненным.
