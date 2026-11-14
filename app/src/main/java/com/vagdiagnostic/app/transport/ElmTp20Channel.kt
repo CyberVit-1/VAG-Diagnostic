@@ -31,7 +31,7 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
     class GracefullyClosedChannel : IllegalStateException("ECU завершил канал после полного ответа")
     /** Explicit peer close after ACK, before any application response. The
      * caller must reset the transport before another diagnostic transaction. */
-    class PeerClosedChannel : IOException("ECU закрыл TP2.0 канал до прикладного ответа")
+    class PeerClosedChannel(val requestWasSent: Boolean = true) : IOException("ECU закрыл TP2.0 канал до прикладного ответа")
     private var tx = 0
     private var rx = 0
     private var sendSeq = 0
@@ -442,7 +442,7 @@ class ElmTp20Channel(private var engine: ElmEngine, private val clockNanos: () -
                 listOf(0xA8) -> {
                     if (controls.isNotEmpty()) throw VagProtocolFailure("Лишние данные после закрытия свободного TP2.0 канала")
                     active = false
-                    throw PeerClosedChannel()
+                    throw PeerClosedChannel(requestWasSent = false)
                 }
                 else -> throw VagProtocolFailure("Неожиданные данные перед следующим TP2.0 запросом: opcode %02X".format(frame.first()))
             }

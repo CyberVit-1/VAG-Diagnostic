@@ -13,6 +13,100 @@ import java.util.ArrayDeque
 
 /** Scripted transport contract, never a vehicle-confirmed result. */
 class ElmVagScanTest {
+    @Test fun completedGatewayListRejectionUsesAlternateListOnTheSameChannel() = runBlocking {
+        for (nrc in listOf("10", "11", "12")) {
+            val link = Link(rejectService1A = true, installedReply = "7F1A$nrc")
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertTrue(result.note, result.listConfirmed)
+            val first = link.sent.indexOfFirst { it.endsWith("1A9F") }
+            val alternate = link.sent.indexOfFirst { it.endsWith("2204A1") }
+            assertTrue(first >= 0 && alternate > first)
+            assertFalse("NRC$nrc must not reopen a healthy channel",
+                link.sent.subList(first + 1, alternate).any { it == "A80" || it.endsWith("C000100003011") || it.endsWith("1089") })
+        }
+    }
+    @Test fun gatewayPeerCloseAfterCompletedListRejectionAllowsOneNewChannel() = runBlocking {
+        val link = Link(rejectService1A = true, closeAfterReply = "1A9F", closeAfterReplyAt = 0x1F)
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertTrue(result.note, result.listConfirmed)
+        val first = link.sent.indexOfFirst { it.endsWith("1A9F") }
+        val alternate = link.sent.indexOfFirst { it.endsWith("2204A1") }
+        assertEquals(1, link.sent.subList(first + 1, alternate).count { it == "1FC000100003011" })
+        assertEquals(1, link.sent.count { it.endsWith("2204A1") })
+    }
+    @Test fun unsupportedFallbackIsNotInferredFromAnotherGatewayNrc() = runBlocking {
+        val link = Link(installedReply = "7F1A31")
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false, allowGatewayIdentityFallback = false)
+        assertFalse(result.listConfirmed)
+        assertFalse(link.sent.any { it.endsWith("2204A1") })
+    }
+    @Test fun malformedAlternateGatewayListIsNotRepeatedOrAcceptedAsEmpty() = runBlocking {
+        val link = Link(rejectService1A = true, alternativeListReply = "6204A1191F")
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false, allowGatewayIdentityFallback = false)
+        assertFalse(result.listConfirmed)
+        assertEquals(1, link.sent.count { it.endsWith("2204A1") })
+        assertFalse(link.sent.any { it.endsWith("1802FF00") })
+    }
+    @Test fun foreignAlternateGatewayDidStopsTheDamagedTransaction() = runBlocking {
+        val link = Link(rejectService1A = true, alternativeListReply = "6204A2191F0100")
+        val failure = runCatching { scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false, allowGatewayIdentityFallback = false) }.exceptionOrNull()
+        assertTrue(failure.toString(), failure is IOException)
+        // A multi-frame payload must be assembled/ACKed before its DID can
+        // be checked. No new application request or disconnect may follow.
+        val after = link.sent.drop(link.sent.indexOfFirst { it.endsWith("2204A1") } + 1)
+        assertTrue(after.all { it.matches(Regex("B[0-9A-F]0?")) })
+        assertEquals(1, link.sent.count { it.endsWith("2204A1") })
+    }
+    @Test fun idlePeerCloseBeforeAlternateListUsesFreshVerifiedLink() = runBlocking {
+        val old = Link(rejectService1A = true)
+        val fresh = Link(rejectService1A = true)
+        val injected = ArrayDeque<Int>()
+        var rejected = false
+        var closed = false
+        val interrupted = object : ElmLink by old {
+            override suspend fun readByte(): Int = injected.pollFirst() ?: old.readByte()
+            override suspend fun write(bytes: ByteArray) {
+                val command = bytes.toString(Charsets.US_ASCII).trim()
+                if (rejected && !closed && command == "A3") {
+                    closed = true
+                    "300A8>".toByteArray().forEach { injected.add(it.toInt() and 255) }
+                } else old.write(bytes)
+                if (command.endsWith("1A9F")) rejected = true
+            }
+        }
+        var replacements = 0
+        val engine = ElmEngine(interrupted, { _, _, _, _ -> }); engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> }, identifyEcus = false,
+            discoverAdditionalUnits = false, recreateEngine = {
+                replacements++; ElmEngine(fresh, { _, _, _, _ -> })
+            })
+        assertTrue(result.note, result.listConfirmed)
+        assertEquals(1, replacements)
+        assertFalse(old.sent.any { it.endsWith("2204A1") })
+        assertEquals(1, fresh.sent.count { it.endsWith("2204A1") })
+        assertFalse(fresh.sent.any { it.endsWith("1A9F") })
+        assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOfFirst { it.endsWith("2204A1") })
+    }
+    @Test fun peerCloseAfterAlternateListRequestDoesNotReplayDiscovery() = runBlocking {
+        val old = Link(rejectService1A = true, closeAlternativeList = true)
+        val fresh = Link(rejectService1A = true)
+        var replacements = 0
+        val engine = ElmEngine(old, { _, _, _, _ -> }); engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> }, identifyEcus = false,
+            discoverAdditionalUnits = false, allowGatewayIdentityFallback = false,
+            recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }) })
+        assertFalse(result.listConfirmed)
+        assertEquals(1, replacements)
+        assertEquals(1, old.sent.count { it.endsWith("2204A1") })
+        assertFalse(fresh.sent.any { it.endsWith("2204A1") || it.endsWith("1A9F") })
+    }
     @Test fun minimalAngleTypesOverUdsKeepIndependent04PriorityAcrossCanBackends() = runBlocking {
         for (manual in listOf(false, true)) for (independent in listOf(false, true)) for (brake in listOf("MK70 M MASR", "OTHER")) {
             val link = UdsLink(rawCan = manual,
@@ -477,7 +571,8 @@ class ElmVagScanTest {
         val centralSetupReplies: List<String> = emptyList(), val dtcReplies: List<String> = emptyList(),
         val obdReply: String = "7E8064100BE3EA813", val initialCanProtocol: String = "6",
         val dtcByDestination: Map<Int, String> = emptyMap(),
-        val infoByDestination: Map<Int, Map<String, String>> = emptyMap()) : ElmLink {
+        val infoByDestination: Map<Int, Map<String, String>> = emptyMap(),
+        val alternativeListReply: String? = null, val closeAlternativeList: Boolean = false) : ElmLink {
         override val label = "Scripted ELM"
         val sent = mutableListOf<String>()
         private val bytes = ArrayDeque<Int>()
@@ -581,6 +676,7 @@ class ElmVagScanTest {
                     }
                     if (((request in setOf("1800FF00", "1802FF00") && destination == closedDestination) ||
                             (request == "1A9F" && closeGatewayList) ||
+                            (request == "2204A1" && closeAlternativeList) ||
                             (request.startsWith("120004") && destination == closeDetailsAt)) && closedAttempts < closeAttempts) {
                         closedAttempts++
                         pollsBeforeClose = 0
@@ -600,7 +696,7 @@ class ElmVagScanTest {
                             identityByDestination[destination] ?: identityReply
                         }
                         "1A9F" -> installedReply ?: if (longList || rejectService1A) "7F1A11" else "5A9F090100000119000001"
-                        "2204A1" -> if (rejectService1A) "6204A1191F010001010100" else "6204A1" + (1..65).joinToString("") { "%02X%02X0100".format(it, it) }
+                        "2204A1" -> alternativeListReply ?: if (rejectService1A) "6204A1191F010001010100" else "6204A1" + (1..65).joinToString("") { "%02X%02X0100".format(it, it) }
                         "1800FF00" -> dtcByDestination[destination] ?: dtcReplies.getOrNull(dtcIndex++) ?: dtcReply ?: "5801029908"
                         "1802FF00" -> dtcByDestination[destination] ?: dtcReplies.getOrNull(dtcIndex++) ?: dtcReply ?: "5800"
                         else -> if (request.matches(Regex("120004[0-9A-F]{4}"))) detailsReply else error("Unexpected service $request")
@@ -2017,9 +2113,14 @@ class ElmVagScanTest {
             if (row.first == "3E00" && row.second.trim() == "NO DATA")
                 listOf(row, "1003" to "NO DATA", "22F187" to "NO DATA") else listOf(row)
         }
-        // Original traffic through the close and OBD restoration; all later
-        // replies come from Link and are explicitly synthetic, including retry.
-        val prefix = withExplicitPhysicalFlowControl(probes)
+        // This historical client closed/reopened Gateway after NRC11. Keep
+        // the recorded per-ECU payloads and later real62 close/reset, but
+        // explicitly inject a peer A8 to exercise today's justified reopen
+        // path. Remove only the now-redundant client disconnect. Healthy
+        // same-channel discovery is checked independently above.
+        val peerClosed = withExplicitGatewayPeerClose(probes)
+        // All replies after the captured prefix are synthetic, including retry.
+        val prefix = withExplicitPhysicalFlowControl(peerClosed)
         val link = Link(recordedPrefix = prefix)
         val units = linkedMapOf<String, ControlUnit>()
         val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }),

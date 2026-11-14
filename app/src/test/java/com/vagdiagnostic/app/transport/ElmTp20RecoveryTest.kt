@@ -74,6 +74,7 @@ class ElmTp20RecoveryTest {
             val error = runCatching { channel.request("1802FF00") }.exceptionOrNull()
             assertTrue(error.toString(), error is IOException)
             assertEquals(tail == "closed", error is ElmTp20Channel.PeerClosedChannel)
+            if (error is ElmTp20Channel.PeerClosedChannel) assertTrue(error.requestWasSent)
             assertFalse(link.sent.contains("A80"))
             assertEquals(1, link.sent.count { it.endsWith("1802FF00") })
         }

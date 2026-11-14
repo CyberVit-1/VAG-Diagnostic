@@ -78,7 +78,9 @@ class ElmTp20TransactionParityTest {
         val link = Link(idleReply = "300A8")
         val channel = ElmTp20Channel(ElmEngine(link, { _, _, _, _ -> }))
         channel.open(9); channel.request("1089")
-        assertTrue(runCatching { channel.request("1802FF00") }.exceptionOrNull() is ElmTp20Channel.PeerClosedChannel)
+        val failure = runCatching { channel.request("1802FF00") }.exceptionOrNull()
+        assertTrue(failure is ElmTp20Channel.PeerClosedChannel)
+        assertFalse((failure as ElmTp20Channel.PeerClosedChannel).requestWasSent)
         assertFalse(link.sent.contains("1100041802FF00"))
     }
     @Test fun whollySilentRequestGetsOneIdenticalTransportSendRetry() = runBlocking {

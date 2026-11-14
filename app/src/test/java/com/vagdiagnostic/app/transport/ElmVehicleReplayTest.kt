@@ -8,7 +8,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /** Recorded OEM exchanges, excluding VIN, timestamps and adapter endpoint.
- * New presence exchange and metadata substitutions are explicitly synthetic,
+ * New presence, Gateway peer-close and metadata substitutions are explicitly synthetic,
  * not vehicle evidence. Original fixture files remain unchanged. */
 class ElmVehicleReplayTest {
     private data class Row(val command: String, val raw: String)
@@ -72,7 +72,7 @@ class ElmVehicleReplayTest {
         assertFalse(link.sent.any { it.contains("1A9B") } && metadata)
     }
     private fun withCurrentSetup(rows: List<Row>) =
-        withExplicitPhysicalFlowControl(rows.map { it.command to it.raw }, minimalListed = true).map { Row(it.first, it.second) }
+        withExplicitPhysicalFlowControl(withExplicitGatewayPeerClose(rows.map { it.command to it.raw }), minimalListed = true).map { Row(it.first, it.second) }
 
     private fun withSyntheticPresence(original: List<Row>): List<Row> {
         var rx = ""

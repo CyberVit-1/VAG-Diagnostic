@@ -66,6 +66,7 @@ object ElmVagScan {
         private var installed: List<VagOemReadOnly.Installed>? = null
         private var gatewayRejectsService1A = false
         private var legacyListFallbackAllowed = false
+        private var legacyAlternateListAttempted = false
         private var identity: VagEcuIdentification.Identity? = null
         private var gatewayIdentityAttempted = false
         private val listLimitations = mutableListOf<String>()
@@ -809,6 +810,30 @@ object ElmVagScan {
             }
         }
 
+        private suspend fun readTpGatewayList(channel: ElmTp20Channel) {
+            val replies = channel.requestMessages("1A9F")
+            gatewayRejectsService1A = replies == listOf(listOf(0x7F, 0x1A, 0x11))
+            legacyListFallbackAllowed = replies.size == 1 && replies.first() in listOf(
+                listOf(0x7F, 0x1A, 0x10), listOf(0x7F, 0x1A, 0x11), listOf(0x7F, 0x1A, 0x12))
+            if (!legacyListFallbackAllowed) {
+                installed = VagOemReadOnly.installedKwpMessages(replies)
+                return
+            }
+            // A completed service rejection leaves a usable transport. Keep
+            // its sequence and session for the alternate read, unless the
+            // peer explicitly closed before that request could be sent.
+            legacyAlternateListAttempted = true
+            try {
+                installed = VagOemReadOnly.installed04A1Messages(channel.requestMessages("2204A1"))
+            } catch (closed: ElmTp20Channel.GracefullyClosedChannel) {
+                legacyAlternateListAttempted = false
+                throw closed
+            } catch (closed: ElmTp20Channel.PeerClosedChannel) {
+                if (!closed.requestWasSent) legacyAlternateListAttempted = false
+                throw closed
+            }
+        }
+
         suspend fun run(): Outcome {
             if (currentEngine.manualUds) try {
                 val nativeCandidate = ElmAdapterNativeProbe.inspect(currentEngine)
@@ -823,11 +848,7 @@ object ElmVagScan {
                     protocol = Protocol.TP20
                     confirmedProtocols[0x19] = Protocol.TP20
                     event("VAG_GATEWAY_CONNECTED", "TP2.0 destination=1F; VAG=19; read session confirmed", "CONFIRMED")
-                    val replies = channel.requestMessages("1A9F")
-                    gatewayRejectsService1A = replies == listOf(listOf(0x7F, 0x1A, 0x11))
-                    legacyListFallbackAllowed = replies.size == 1 && replies.first() in listOf(
-                        listOf(0x7F, 0x1A, 0x10), listOf(0x7F, 0x1A, 0x11), listOf(0x7F, 0x1A, 0x12))
-                    installed = VagOemReadOnly.installedKwpMessages(replies)
+                    readTpGatewayList(channel)
                 }
             } catch (cancel: CancellationException) { throw cancel }
             catch (closed: ElmTp20Channel.PeerClosedChannel) {
@@ -843,7 +864,7 @@ object ElmVagScan {
 
             // A live TP2.0 gateway may expose the UDS-style 04A1 list over that same
             // transport. Do not mistake a service ID for a transport or VAG address.
-            if (protocol == Protocol.TP20 && installed == null && legacyListFallbackAllowed) {
+            if (protocol == Protocol.TP20 && installed == null && legacyListFallbackAllowed && !legacyAlternateListAttempted) {
                 try { withTp(gateway) { installed = VagOemReadOnly.installed04A1Messages(it.requestMessages("2204A1")) } }
                 catch (cancel: CancellationException) { throw cancel }
                 catch (failure: VagProtocolFailure) { finishFailedDiscovery("Список 04A1/TP2.0", failure) }
