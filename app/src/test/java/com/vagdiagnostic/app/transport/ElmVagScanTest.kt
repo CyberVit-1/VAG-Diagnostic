@@ -1,0 +1,2978 @@
+package com.vagdiagnostic.app.transport
+
+import com.vagdiagnostic.app.core.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
+import org.junit.Assert.*
+import org.junit.Test
+import java.io.IOException
+import java.util.ArrayDeque
+
+/** Scripted transport contract, never a vehicle-confirmed result. */
+class ElmVagScanTest {
+    @Test fun completedGatewayListRejectionUsesAlternateListOnTheSameChannel() = runBlocking {
+        for (nrc in listOf("10", "11", "12")) {
+            val link = Link(rejectService1A = true, installedReply = "7F1A$nrc")
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertTrue(result.note, result.listConfirmed)
+            val first = link.sent.indexOfFirst { it.endsWith("1A9F") }
+            val alternate = link.sent.indexOfFirst { it.endsWith("2204A1") }
+            assertTrue(first >= 0 && alternate > first)
+            assertFalse("NRC$nrc must not reopen a healthy channel",
+                link.sent.subList(first + 1, alternate).any { it == "A80" || it.endsWith("C000100003011") || it.endsWith("1089") })
+        }
+    }
+    @Test fun gatewayPeerCloseAfterCompletedListRejectionAllowsOneNewChannel() = runBlocking {
+        val link = Link(rejectService1A = true, closeAfterReply = "1A9F", closeAfterReplyAt = 0x1F)
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertTrue(result.note, result.listConfirmed)
+        val first = link.sent.indexOfFirst { it.endsWith("1A9F") }
+        val alternate = link.sent.indexOfFirst { it.endsWith("2204A1") }
+        assertEquals(1, link.sent.subList(first + 1, alternate).count { it == "1FC000100003011" })
+        assertEquals(1, link.sent.count { it.endsWith("2204A1") })
+    }
+    @Test fun unsupportedFallbackIsNotInferredFromAnotherGatewayNrc() = runBlocking {
+        val link = Link(installedReply = "7F1A31")
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false, allowGatewayIdentityFallback = false)
+        assertFalse(result.listConfirmed)
+        assertFalse(link.sent.any { it.endsWith("2204A1") })
+    }
+    @Test fun malformedAlternateGatewayListIsNotRepeatedOrAcceptedAsEmpty() = runBlocking {
+        val link = Link(rejectService1A = true, alternativeListReply = "6204A1191F")
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false, allowGatewayIdentityFallback = false)
+        assertFalse(result.listConfirmed)
+        assertEquals(1, link.sent.count { it.endsWith("2204A1") })
+        assertFalse(link.sent.any { it.endsWith("1802FF00") })
+    }
+    @Test fun foreignAlternateGatewayDidStopsTheDamagedTransaction() = runBlocking {
+        val link = Link(rejectService1A = true, alternativeListReply = "6204A2191F0100")
+        val failure = runCatching { scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false, allowGatewayIdentityFallback = false) }.exceptionOrNull()
+        assertTrue(failure.toString(), failure is IOException)
+        // A multi-frame payload must be assembled/ACKed before its DID can
+        // be checked. No new application request or disconnect may follow.
+        val after = link.sent.drop(link.sent.indexOfFirst { it.endsWith("2204A1") } + 1)
+        assertTrue(after.all { it.matches(Regex("B[0-9A-F]0?")) })
+        assertEquals(1, link.sent.count { it.endsWith("2204A1") })
+    }
+    @Test fun idlePeerCloseBeforeAlternateListUsesFreshVerifiedLink() = runBlocking {
+        val old = Link(rejectService1A = true)
+        val fresh = Link(rejectService1A = true)
+        val injected = ArrayDeque<Int>()
+        var rejected = false
+        var closed = false
+        val interrupted = object : ElmLink by old {
+            override suspend fun readByte(): Int = injected.pollFirst() ?: old.readByte()
+            override suspend fun write(bytes: ByteArray) {
+                val command = bytes.toString(Charsets.US_ASCII).trim()
+                if (rejected && !closed && command == "A3") {
+                    closed = true
+                    "300A8>".toByteArray().forEach { injected.add(it.toInt() and 255) }
+                } else old.write(bytes)
+                if (command.endsWith("1A9F")) rejected = true
+            }
+        }
+        var replacements = 0
+        val engine = ElmEngine(interrupted, { _, _, _, _ -> }); engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> }, identifyEcus = false,
+            discoverAdditionalUnits = false, recreateEngine = {
+                replacements++; ElmEngine(fresh, { _, _, _, _ -> })
+            })
+        assertTrue(result.note, result.listConfirmed)
+        assertEquals(1, replacements)
+        assertFalse(old.sent.any { it.endsWith("2204A1") })
+        assertEquals(1, fresh.sent.count { it.endsWith("2204A1") })
+        assertFalse(fresh.sent.any { it.endsWith("1A9F") })
+        assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOfFirst { it.endsWith("2204A1") })
+    }
+    @Test fun peerCloseAfterAlternateListRequestDoesNotReplayDiscovery() = runBlocking {
+        val old = Link(rejectService1A = true, closeAlternativeList = true)
+        val fresh = Link(rejectService1A = true)
+        var replacements = 0
+        val engine = ElmEngine(old, { _, _, _, _ -> }); engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> }, identifyEcus = false,
+            discoverAdditionalUnits = false, allowGatewayIdentityFallback = false,
+            recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }) })
+        assertFalse(result.listConfirmed)
+        assertEquals(1, replacements)
+        assertEquals(1, old.sent.count { it.endsWith("2204A1") })
+        assertFalse(fresh.sent.any { it.endsWith("2204A1") || it.endsWith("1A9F") })
+    }
+    @Test fun minimalAngleTypesOverUdsKeepIndependent04PriorityAcrossCanBackends() = runBlocking {
+        for (manual in listOf(false, true)) for (independent in listOf(false, true)) for (brake in listOf("MK70 M MASR", "OTHER")) {
+            val link = UdsLink(rawCan = manual,
+                infoReplies = mapOf("2204A1" to "6204A1191F0100030301000413010044090100"),
+                identityByReceiver = mapOf("77D" to partReply("1K0907379AK"), "77C" to partReply("1K0909144R")),
+                componentByReceiver = mapOf("77D" to brake, "77C" to "EPS_ZFLS Kl. 235"),
+                quietPreflightReceivers = if (independent) emptySet() else setOf("7BB"),
+                dtcByReceiver = if (independent) emptyMap() else mapOf("7BB" to "NO DATA"))
+            val units = linkedMapOf<String, ControlUnit>()
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = manual); engine.connect()
+            ElmVagScan.scan(engine, { units[it.address] = it },
+                { _, _, _ -> }, discoverAdditionalUnits = false)
+            for (rx in listOf("77D", "77C")) {
+                assertEquals(1, link.addressedRequests.count { it == rx to "22F187" })
+                assertEquals(1, link.addressedRequests.count { it == rx to "22F197" })
+                assertTrue(link.addressedRequests.indexOf(rx to "22F187") > link.addressedRequests.indexOf(rx to "1902AF"))
+            }
+            assertEquals(if (independent) ReadState.COMPLETE else ReadState.NO_RESPONSE, units.getValue("VAG-04").state)
+            // A plausible part with the wrong Component must never activate
+            // MK70 topology; an independent reply always remains independent.
+            assertEquals(if (!independent && brake.startsWith("MK70")) "VAG-44" else null,
+                units.getValue("VAG-04").diagnosticHost)
+        }
+    }
+    @Test fun minimalAngleEvidenceFollowsSavedMemoriesAndNeverClaimsAnIndependent04Read() = runBlocking {
+        fun identified(part: String, component: String) = "5A9B" + VagOemReadOnly.hex((part.padEnd(12) + "0001").map { it.code }) +
+            "00".repeat(10) + VagOemReadOnly.hex(component.padEnd(16).map { it.code })
+        for (brake in listOf("MK70 M MASR", "MK60", "")) {
+            val link = Link(installedReply = "5A9F11" + listOf(0x19, 3, 4, 0x44).joinToString("") { "%02X000001".format(it) },
+                dtcReply = "5801051924", silentDestinations = setOf(0x13),
+                identityByDestination = mapOf(3 to identified("1K0907379AK", brake),
+                    9 to identified("1K0909144R", "EPS_ZFLS Kl. 235")))
+            val units = linkedMapOf<String, ControlUnit>(); val events = mutableListOf<String>()
+            ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+                { command, _, _ -> events += command }, discoverAdditionalUnits = false)
+            for (id in listOf("03", "44")) {
+                assertEquals(ReadState.COMPLETE, units.getValue("VAG-$id").state)
+                assertEquals(1, units.getValue("VAG-$id").dtcs.size)
+                assertTrue(events.indexOf("VAG_FUNCTION_IDENTITY_$id") > events.indexOf("VAG_DTC_$id"))
+            }
+            val child = units.getValue("VAG-04")
+            assertEquals(if (brake.startsWith("MK70")) "VAG-44" else null, child.diagnosticHost)
+            assertEquals(ReadState.NO_RESPONSE, child.state)
+            assertTrue(child.dtcs.isEmpty()); assertTrue(child.answeredModes.isEmpty())
+            assertEquals(1, link.identityDestinations.count { it == 3 })
+            assertEquals(1, link.identityDestinations.count { it == 9 })
+        }
+    }
+    @Test fun angleEvidenceIsNotCollectedWithoutDeclared04OrWhenIdentificationIsDisabled() = runBlocking {
+        for (declared in listOf(false, true)) {
+            val ids = listOf(0x19, 3) + if (declared) listOf(4) else emptyList()
+            val link = Link(installedReply = "5A9F%02X".format(1 + ids.size * 4) + ids.joinToString("") { "%02X000001".format(it) },
+                dtcReply = "5801051924")
+            val engine = ElmEngine(link, { _, _, _, _ -> })
+            val units = linkedMapOf<String, ControlUnit>()
+            val error = runCatching { ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = !declared, discoverAdditionalUnits = false) }.exceptionOrNull()
+            assertNull(error)
+            assertFalse(link.identityDestinations.contains(3))
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        }
+    }
+    @Test fun malformedAngleIdentityPreservesAlreadyPublishedOwnDtc() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010300000104000001", dtcReply = "5801051924",
+            identityByDestination = mapOf(3 to "5A9C1234"))
+        val units = linkedMapOf<String, ControlUnit>()
+        val error = runCatching { ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { _, _, _ -> }, discoverAdditionalUnits = false) }.exceptionOrNull()
+        assertTrue(error is IOException)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        assertEquals("01305", units.getValue("VAG-03").dtcs.single().code)
+        assertNull(units["VAG-04"]?.diagnosticHost)
+    }
+    @Test fun optionalAngleIdentityIoAndCancellationNeverDiscardOrRepeatOwnMemory() = runBlocking {
+        for (failure in listOf(IOException("Synthetic type stream loss"), CancellationException("Synthetic type cancellation"))) {
+            val link = Link(installedReply = "5A9F0D190000010300000104000001", dtcReply = "5801051924",
+                identityFailure = 3 to failure)
+            val units = linkedMapOf<String, ControlUnit>(); val events = mutableListOf<String>()
+            val error = runCatching { ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+                { cmd, _, _ -> events += cmd }, discoverAdditionalUnits = false) }.exceptionOrNull()
+            assertNotNull(error)
+            if (failure is CancellationException) assertSame(failure, error) else assertTrue(error is IOException)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+            assertEquals("01305", units.getValue("VAG-03").dtcs.single().code)
+            assertEquals(1, events.count { it == "VAG_DTC_03" })
+            assertEquals(1, link.identityDestinations.count { it == 3 })
+            assertNull(units["VAG-04"]?.diagnosticHost)
+        }
+    }
+    @Test fun automaticCanSetupReusesAcknowledgedSettingsWithoutSkippingOwnFaultMemories() = runBlocking {
+        val link = UdsLink(includeCentral = true, includeConvenience = true,
+            dtcByReceiver = mapOf("77A" to "5902AF12345608", "778" to "5902AF23456708", "17FE008B" to "5902AF34567808"))
+        val journal = mutableListOf<String>()
+        val engine = ElmEngine(link, { cmd, _, _, _ -> journal += cmd }); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false)
+        for ((address, rx, code) in listOf(Triple("19", "77A", "123456"), Triple("09", "778", "234567"),
+            Triple("46", "17FE008B", "345678"))) {
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-$address").state)
+            assertEquals(code, units.getValue("VAG-$address").dtcs.single().code)
+            assertEquals(1, link.addressedRequests.count { it == rx to "1902AF" })
+        }
+        // TP setup already confirmed ATH1 on this same connection. A repeated
+        // protocol selection and formatting pass must not be sent by CAF1.
+        assertFalse(link.sent.zipWithNext().contains("ATSP6" to "ATH1"))
+        assertEquals(link.wireSent, journal)
+        assertTrue(link.sent.containsAll(listOf("ATFCSH710", "ATFCSH70E", "ATFCSH17FC008B")))
+    }
+    @Test fun listedSilentPreflightDoesNotSpendIdentityOrRepeatedPresenceQueries() = runBlocking {
+        for (backend in 0..3) {
+            val rx = "17FE008B"
+            val link = UdsLink(includeConvenience = true, quietPreflightReceivers = setOf(rx),
+                dtcByReceiver = mapOf(rx to "5902AF12345608"), rawCan = backend != 0,
+                nativeBanner = if (backend == 2) "STN1170 v5.6.5" else "?",
+                vtBanner = if (backend == 3) "Synthetic Adapter v2.3.0" else "?")
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = backend != 0); engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-46").state)
+            assertEquals("123456", units.getValue("VAG-46").dtcs.single().code)
+            assertEquals(1, link.addressedRequests.count { it == rx to "3E00" })
+            assertEquals(1, link.addressedRequests.count { it == rx to "1003" })
+            assertFalse(link.addressedRequests.contains(rx to "22F187"))
+            assertEquals(1, link.addressedRequests.count { it == rx to "1902AF" })
+        }
+    }
+    @Test fun minimalComfortHostEvidenceIsReadOnlyAfterOwnCentralDtcAndNeverCopied() = runBlocking {
+        for (component in listOf("BCM PQ35 M", "BCM PQ25", "")) {
+            val reply = if (component.isEmpty()) "7F2231" else "62F197" + VagOemReadOnly.hex(component.map { it.code })
+            val link = UdsLink(includeCentral = true, includeConvenience = true,
+                centralIdentityReply = partReply("1K0937086H"),
+                infoReplies = mapOf("22F197" to reply), quietPreflightReceivers = setOf("17FE008B"),
+                dtcByReceiver = mapOf("17FE008B" to "NO DATA"))
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false)
+            val child = units.getValue("VAG-46")
+            assertEquals(if (component == "BCM PQ35 M") "VAG-09" else null, child.diagnosticHost)
+            assertEquals(ReadState.NO_RESPONSE, child.state)
+            assertTrue(child.dtcs.isEmpty()); assertTrue(child.answeredModes.isEmpty())
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-09").state)
+            assertEquals(1, link.addressedRequests.count { it == "778" to "22F197" })
+            assertTrue(link.addressedRequests.indexOf("778" to "22F197") > link.addressedRequests.indexOf("778" to "1902AF"))
+        }
+    }
+    @Test fun minimalComfortEvidenceFailuresPreserveSavedDtc() = runBlocking {
+        for (mode in listOf("io", "cancel", "malformed")) {
+            val link = UdsLink(includeCentral = true, includeConvenience = true,
+                centralIdentityReply = partReply("1K0937086H"),
+                infoReplies = mapOf("22F197" to "62F1984142"),
+                infoFailure = if (mode == "malformed") null else mode, infoFailureCommand = "22F197")
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            val error = runCatching { ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                discoverAdditionalUnits = false) }.exceptionOrNull()
+            assertNotNull(mode, error)
+            if (mode == "io") assertTrue(error is IOException)
+            if (mode == "cancel") assertTrue(error is CancellationException)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-09").state)
+            assertNull(units["VAG-46"]?.diagnosticHost)
+            assertEquals(1, link.addressedRequests.count { it == "778" to "1902AF" })
+        }
+    }
+    @Test fun unrelatedCentralIdentityDoesNotAddFunctionInventory() = runBlocking {
+        val link = UdsLink(includeCentral = true, includeConvenience = true,
+            centralIdentityReply = partReply("5Q0937087"))
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        ElmVagScan.scan(engine, {}, { _, _, _ -> }, discoverAdditionalUnits = false)
+        assertFalse(link.addressedRequests.contains("778" to "22F197"))
+    }
+    @Test fun minimalComfortEvidenceUsesTheExistingUdsOverTpChannel() = runBlocking {
+        val component = "62F197" + VagOemReadOnly.hex("BCM PQ35 M".map { it.code })
+        val link = Link(installedReply = "5A9F0D190000010900000146000001", silentDestinations = setOf(0x21),
+            infoByDestination = mapOf(0x20 to mapOf("22F187" to partReply("1K0937086H"), "22F197" to component)))
+        val units = linkedMapOf<String, ControlUnit>()
+        ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-09").state)
+        assertEquals("VAG-09", units.getValue("VAG-46").diagnosticHost)
+        assertEquals(ReadState.NO_RESPONSE, units.getValue("VAG-46").state)
+        assertTrue(units.getValue("VAG-46").dtcs.isEmpty())
+        assertEquals(1, link.sent.count { it.endsWith("22F197") })
+        assertTrue(link.sent.indexOfFirst { it.endsWith("22F197") } > link.sent.indexOfLast { it.endsWith("1802FF00") })
+    }
+    @Test fun explicitSupplementalModeRetainsItsIdentityPreflight() = runBlocking {
+        val rx = "17FE008B"
+        val link = UdsLink(includeConvenience = true, quietPreflightReceivers = setOf(rx),
+            quietPreflightCommands = setOf("3E00", "1003"), identityReply = partReply("1K0937086H"))
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> }, discoverAdditionalUnits = false)
+        assertTrue(result.note, result.complete)
+        assertEquals(3, link.addressedRequests.count { it == rx to "3E00" })
+        assertEquals(1, link.addressedRequests.count { it == rx to "22F187" })
+        assertEquals(1, link.addressedRequests.count { it == rx to "1902AF" })
+    }
+    @Test fun optionalComfortIoRecoversFreshConnectionWithoutRepeatingDtc() = runBlocking {
+        for (mode in listOf("io", "cancel")) {
+            val first = UdsLink(includeCentral = true, includeConvenience = true,
+                centralIdentityReply = partReply("1K0937086H"), infoFailure = mode, infoFailureCommand = "22F197")
+            val fresh = UdsLink(includeCentral = true, includeConvenience = true)
+            val engine = ElmEngine(first, { _, _, _, _ -> }); engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            var replacements = 0
+            val error = runCatching { ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                discoverAdditionalUnits = false, recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }) }) }.exceptionOrNull()
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-09").state)
+            assertEquals(1, first.addressedRequests.count { it == "778" to "1902AF" })
+            if (mode == "cancel") {
+                assertTrue(error is CancellationException); assertEquals(0, replacements); assertTrue(fresh.sent.isEmpty())
+            } else {
+                assertNull(error); assertEquals(1, replacements)
+                assertEquals(ReadState.COMPLETE, units.getValue("VAG-46").state)
+                assertFalse(fresh.addressedRequests.contains("778" to "1902AF"))
+            }
+        }
+    }
+    @Test fun expandedFaultMaskReadsCycleAndHistoryRecordsInEveryCanBackend() = runBlocking {
+        for (mode in 0..3) {
+            val link = UdsLink(dtcReply = "5902AF1234560265432120", rawCan = mode != 0,
+                nativeBanner = if (mode == 2) "STN1170 v5.6.5" else "?",
+                vtBanner = if (mode == 3) "Synthetic Adapter v2.2.78" else "?")
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = mode != 0)
+            engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> })
+            assertEquals(listOf("123456", "654321"), units.getValue("VAG-19").dtcs.map { it.code })
+            assertEquals(1, link.sent.count { it == "1902AF" })
+            assertFalse(link.sent.contains("19028D"))
+            if (mode == 2) assertTrue(link.sent.contains("STCSEGR1"))
+            if (mode == 3) assertTrue(link.sent.contains("VTSWGP GR1, BZF1"))
+        }
+    }
+    // Historical supplemental-path regressions remain explicit. Separate tests
+    // below call the production default directly and prohibit these reads.
+    private suspend fun scanWithSupplementalInfo(engine: ElmEngine,
+        onUnit: suspend (ControlUnit) -> Unit, event: suspend (String, String, String) -> Unit,
+        allowCandidateFallback: Boolean = false, readGatewayIdentity: Boolean = false,
+        discoverAdditionalUnits: Boolean = true, identifyEcus: Boolean = true,
+        recreateEngine: (() -> ElmEngine)? = null, allowGatewayIdentityFallback: Boolean = true
+    ) = ElmVagScan.scan(engine, onUnit, event, allowCandidateFallback, readGatewayIdentity,
+        discoverAdditionalUnits, identifyEcus, recreateEngine, allowGatewayIdentityFallback,
+        readSupplementalInfo = true)
+    private class UdsLink(val wrongId: Boolean = false, val pending: Int = 0, val identityReply: String = "7F2231",
+        val presenceReply: String = "7E00", val sessionReply: String = "5003", val bitmapReply: String? = null,
+        val dtcReply: String? = null, val closeFailure: String? = null,
+        val includeCentral: Boolean = false, val centralIdentityReply: String? = null,
+        val includeEngine: Boolean = false, val functionalReceiveFailure: Boolean = false,
+        val centralSilent: Boolean = false, val rejectAfterFunctional: String? = null,
+        val infoReplies: Map<String, String> = emptyMap(), val infoFailure: String? = null,
+        val detailsReply: String = "7F1931", val detailsFailure: String? = null,
+        val adaptiveReply: String = "OK", val presenceReplies: List<String> = emptyList(),
+        val dtcReplies: List<String> = emptyList(), val rawCan: Boolean = false,
+        val automaticRawFlow: Boolean = true, val nativeBanner: String = "?",
+        val nativeRejected: Set<String> = emptySet(), val includeConvenience: Boolean = false,
+        val vtBanner: String = "?", val nativeAssembledReplies: Boolean = true,
+        val nativeProbeFailure: Boolean = false, val latePendingFirstFrame: Boolean = false,
+        val rejectRaw29: Boolean = false, val automatic29Status: String? = null,
+        val automatic29StatusCommands: Set<String> = setOf("3E00", "1003", "22F187", "1902AF", "1001"),
+        val includeSteering: Boolean = false, val infoFailureCommand: String? = null,
+        val pacedDtc: Boolean = false, val pacedNativeDtc: Boolean = false,
+        val requiredDtcTimeoutMs: Int = 0, val legacyTimeoutReply: String? = null,
+        val echoConnectionProbe: Boolean = false,
+        val includeSteeringAngle: Boolean = false, val quietPreflightReceivers: Set<String> = emptySet(),
+        val dtcByReceiver: Map<String, String> = emptyMap(), val nativeFirstFrameOnly: Boolean = false,
+        val quietPreflightCommands: Set<String> = setOf("3E00", "1003", "22F187"),
+        val gatewaySourceFailure: String? = null,
+        val identityByReceiver: Map<String, String> = emptyMap(),
+        val componentByReceiver: Map<String, String> = emptyMap()) : ElmLink {
+        override val label = "Scripted UDS link"
+        val sent = mutableListOf<String>()
+        val wireSent = mutableListOf<String>()
+        val addressedRequests = mutableListOf<Pair<String, String>>()
+        val requestTimeouts = mutableListOf<Pair<String, Int>>()
+        private val queue = ArrayDeque<Int>()
+        private var hasDtcReply = false
+        private var receiveId = "77A"
+        private var functionalTail = ""
+        private var functionalComplete = false
+        private var presenceIndex = 0
+        private var dtcIndex = 0
+        private var rawTail = ""
+        private var nativeRx = false
+        private var nativeTx = false
+        private var canProtocol = "6"
+        private var delayDtcRows = false
+        private var delayedDtcBytes = 0
+        private var adapterTimeoutMs = 1000
+        override suspend fun open() {}
+        override fun close() { queue.clear() }
+        override suspend fun readByte(): Int {
+            val next = queue.pollFirst() ?: return -2
+            if (delayDtcRows && pacedNativeDtc && ++delayedDtcBytes % 512 == 0) delay(600)
+            if (delayDtcRows && next == '\r'.code && queue.isNotEmpty()) delay(16)
+            return next
+        }
+        private fun payload(id: String, hex: String): String {
+            if (hex in setOf("NO DATA", "CAN ERROR")) return hex
+            if (nativeRx && nativeAssembledReplies) return id + hex
+            val length = hex.length / 2
+            if (length <= 7) return id + "%02X".format(length) + hex
+            val response = id + "%04X".format(0x1000 or length) + hex.take(12) + "\r" +
+                hex.drop(12).chunked(14).mapIndexed { index, chunk ->
+                    id + "2%X".format((index + 1) and 15) + chunk.padEnd(14, '0')
+                }.joinToString("\r")
+            // A lying native mode with expected-response-count=1 may stop
+            // after a raw FirstFrame rather than deliver an assembled message.
+            if (nativeRx && !nativeAssembledReplies && nativeFirstFrameOnly) return response.substringBefore('\r')
+            if (!rawCan || automaticRawFlow) return response
+            rawTail = response.substringAfter('\r')
+            return response.substringBefore('\r')
+        }
+        override suspend fun write(bytes: ByteArray) {
+            val wire = bytes.toString(Charsets.US_ASCII).trim()
+            wireSent += wire
+            // The rejection is from the real trace; following replies are synthetic.
+            if (rejectRaw29 && receiveId.length == 8 && (wire in setOf("023E001", "0210031") || wire.matches(Regex("0[1-7][0-9A-F]{14}")))) {
+                for (b in "?\r>".toByteArray()) queue.add(b.toInt() and 255)
+                return
+            }
+            if (rawCan && wire == ElmUdsRawTransaction.FLOW_CONTROL) {
+                assertTrue("FC requires an outstanding FirstFrame", rawTail.isNotEmpty())
+                for (b in (rawTail + "\r>").toByteArray()) queue.add(b.toInt() and 255)
+                rawTail = ""
+                return
+            }
+            val automaticCommand = when (wire) { "3E001" -> "3E00"; "10031" -> "1003"; else -> wire }
+            if (automatic29Status != null && receiveId.length == 8 && automaticCommand in automatic29StatusCommands) {
+                for (b in (automatic29Status + "\r>").toByteArray()) queue.add(b.toInt() and 255)
+                return
+            }
+            val command = if (nativeTx && wire.matches(Regex("(?:[0-9A-F]{2}){2,7}1"))) wire.dropLast(1)
+            else if (wire in setOf("3E001", "10031")) wire.dropLast(1)
+            else if (rawCan && wire == "023E001") "3E00"
+            else if (rawCan && wire == "0210031") "1003"
+            else if (rawCan && wire.matches(Regex("0[1-7][0-9A-F]{14}"))) {
+                val count = wire.take(2).toInt(16)
+                assertEquals("AA".repeat(7 - count), wire.drop(2 + count * 2))
+                wire.substring(2, 2 + count * 2)
+            } else wire
+            sent += command
+            delayDtcRows = (pacedDtc || pacedNativeDtc) && command == "1902AF"
+            delayedDtcBytes = 0
+            if (command == "STI" && nativeProbeFailure) throw IOException("Synthetic adapter-info stream failure")
+            if (command in setOf("ATSP6", "ATSP7")) canProtocol = command.last().toString()
+            if (command.startsWith("ATCRA")) receiveId = command.removePrefix("ATCRA")
+            val id = if (wrongId) "77B" else receiveId
+            if (!command.startsWith("AT") && !command.startsWith("ST") && !command.startsWith("VT")) addressedRequests += receiveId to command
+            if (!command.startsWith("AT") && !command.startsWith("ST") && !command.startsWith("VT")) requestTimeouts += command to adapterTimeoutMs
+            if (command == "ATMA") {
+                if (functionalReceiveFailure) {
+                    "BUFFER FULL\r".toByteArray(Charsets.US_ASCII).forEach { queue.add(it.toInt() and 255) }
+                    return
+                }
+                val payload = if (pending == 3) "037F1978" else "03590299"
+                val frame = if (latePendingFirstFrame) {
+                    rawTail = id + "210804050608AAAA"
+                    id + "100B590299123456"
+                } else id + payload
+                for (b in (frame + "\r").toByteArray(Charsets.US_ASCII)) queue.add(b.toInt() and 255)
+                return
+            }
+            val reply = when {
+                command == "ATZ" -> { nativeRx = false; nativeTx = false; "ELM327 v1.5" }
+                command == "0100" -> "7E8064100BE3EA813"
+                command == "ATDPN" -> canProtocol
+                command == "STI" -> nativeBanner
+                command == "VTI" -> vtBanner
+                command.startsWith("STPTO") && legacyTimeoutReply != null -> legacyTimeoutReply
+                command.startsWith("ST") -> {
+                    if ((nativeBanner == "?" && !(vtBanner != "?" && command.startsWith("STPTO"))) || command in nativeRejected) "?" else {
+                        when (command) {
+                            "STCSEGR1" -> nativeRx = true
+                            "STCSEGR0" -> nativeRx = false
+                            "STCSEGT1" -> nativeTx = true
+                            "STCSEGT0" -> nativeTx = false
+                        }
+                        "OK"
+                    }
+                }
+                command.startsWith("VT") -> {
+                    if (vtBanner == "?" || command in nativeRejected) "?" else {
+                        when (command) {
+                            "VTSWGP GR1, BZF1" -> nativeRx = true
+                            "VTSWGP GR0" -> nativeRx = false
+                            "VTSWGP GT1" -> nativeTx = true
+                            "VTSWGP GT0" -> nativeTx = false
+                        }
+                        "OK"
+                    }
+                }
+                command == "ATAT1" -> adaptiveReply
+                functionalComplete && command == rejectAfterFunctional -> "?"
+                command.startsWith("AT") -> "OK"
+                command.endsWith("C000100003011") -> "NO DATA"
+                command in quietPreflightCommands && id in quietPreflightReceivers -> "NO DATA"
+                command in setOf("3E00", "1003", "22F187") && id == "778" && (!includeCentral || centralSilent) -> "NO DATA"
+                command == "3E00" -> payload(id, presenceReplies.getOrNull(presenceIndex++) ?: presenceReply)
+                command == "1003" -> payload(id, sessionReply)
+                command == "1001" -> {
+                    if (hasDtcReply && closeFailure == "io") throw IOException("Synthetic close failure")
+                    if (hasDtcReply && closeFailure == "cancel") throw CancellationException("Synthetic close cancellation")
+                    payload(id, "5001")
+                }
+                command == "2204A1" -> payload(id, infoReplies[command] ?: ("6204A1191F0100" + (if (includeCentral) "09200100" else "") + (if (includeEngine) "01010100" else "") + (if (includeConvenience) "46210100" else "") + (if (includeSteering) "162A0100" else "") + (if (includeSteeringAngle) "04130100" else "")))
+                command == "22F187" -> payload(id, identityByReceiver[id] ?: if (id == "778") centralIdentityReply ?: identityReply else identityReply)
+                command == "22539B" -> payload(id, infoReplies[command] ?: "7F2231")
+                command in setOf("222A2A", "22F1B7", "2204A3", "222A28") -> {
+                    if (gatewaySourceFailure == "io") throw IOException("Source stream lost")
+                    if (gatewaySourceFailure == "cancel") throw CancellationException("Source cancelled")
+                    payload(id, infoReplies[command] ?: "7F2231")
+                }
+                command in setOf("22F197", "22F189", "22F19E", "22F1A2", "220174") -> {
+                    if (infoFailure == "cancel" && (infoFailureCommand == null || command == infoFailureCommand)) throw CancellationException("Info fixture cancellation")
+                    if (infoFailure == "io" && (infoFailureCommand == null || command == infoFailureCommand)) throw IOException("Info fixture disconnected")
+                    payload(id, (if (command == "22F197") componentByReceiver[id]?.let {
+                        "62F197" + VagOemReadOnly.hex(it.map { ch -> ch.code }) } else null) ?: infoReplies[command] ?: "7F2231")
+                }
+                command == "222A26" -> payload(id, requireNotNull(bitmapReply))
+                command == "023E800000000000" -> "NO DATA"
+                command == "03222A2600000000" -> {
+                    val rows = payload("77A", requireNotNull(bitmapReply)).split('\r')
+                    functionalTail = rows.drop(1).joinToString("\r")
+                    rows.first()
+                }
+                command == "3000100000000000" -> functionalTail.also { functionalTail = ""; functionalComplete = true }
+                command.matches(Regex("1906[0-9A-F]{6}FF")) -> {
+                    if (detailsFailure == "io") throw IOException("Details disconnected")
+                    if (detailsFailure == "cancel") throw CancellationException("Stop during details")
+                    payload(id, detailsReply)
+                }
+                command == "1902AF" -> { hasDtcReply = true; if (adapterTimeoutMs < requiredDtcTimeoutMs) "NO DATA" else when (pending) {
+                    1 -> payload(id, "7F1978") + "\r" + payload(id, "590299")
+                    2, 3 -> payload(id, "7F1978")
+                    else -> payload(id, dtcByReceiver[id] ?: dtcReplies.getOrNull(dtcIndex++) ?: dtcReply ?: "59028D")
+                } }
+                command == "" -> "STOPPED"
+                else -> error("Unexpected UDS command $command")
+            }
+            if (reply == "OK") when {
+                command.matches(Regex("ATST[0-9A-F]{2}")) -> adapterTimeoutMs = command.takeLast(2).toInt(16) * 4
+                command.startsWith("STPTO") -> adapterTimeoutMs = command.removePrefix("STPTO").toInt()
+                command.startsWith("VTTOST REP:") -> adapterTimeoutMs = command.removePrefix("VTTOST REP:").toInt()
+            }
+            val echo = if (echoConnectionProbe && wire in setOf("023E001", "0210031", "3E001", "10031")) wire + "\r" else ""
+            for (b in (echo + reply + ">").toByteArray(Charsets.US_ASCII)) queue.add(b.toInt() and 255)
+        }
+    }
+    private class Link(val failRead: Boolean = false, val wrongSequence: Boolean = false, val keepalive: Boolean = false,
+        val longList: Boolean = false, val rejectService1A: Boolean = false,
+        val clock: () -> Long = { 0L }, val identityReply: String = "7F1A11", val failIdentity: Boolean = false,
+        val dtcReply: String? = null, val closeFailure: String? = null,
+        val installedReply: String? = null, val missingSupplemental: Boolean = true,
+        val failSupplemental: Boolean = false, val missingGateway: Boolean = false,
+        val supplementalSetup: String? = null, val closedDestination: Int? = null,
+        val closeAttempts: Int = 1, val failReset: Boolean = false,
+        val recordedPrefix: List<Pair<String, String>> = emptyList(), val saeReply: String? = null,
+        val tpSessionReply: String = "5089", val missingCentral: Boolean = false,
+        val silentCapability: Boolean = false, val unlistedCentralResponds: Boolean = false,
+        val closeGatewayList: Boolean = false, val detailsReply: String = "7F1231", val closeDetailsAt: Int? = null, val closeAfterReply: String? = null,
+        val closeAfterReplyAt: Int = 1, val silentEngineSessions: Int = 0,
+        val identityByDestination: Map<Int, String> = emptyMap(), val silentDestinations: Set<Int> = emptySet(),
+        val identityFailure: Pair<Int, Throwable>? = null,
+        val centralSetupReplies: List<String> = emptyList(), val dtcReplies: List<String> = emptyList(),
+        val obdReply: String = "7E8064100BE3EA813", val initialCanProtocol: String = "6",
+        val dtcByDestination: Map<Int, String> = emptyMap(),
+        val infoByDestination: Map<Int, Map<String, String>> = emptyMap(),
+        val alternativeListReply: String? = null, val closeAlternativeList: Boolean = false) : ElmLink {
+        override val label = "Scripted ELM"
+        val sent = mutableListOf<String>()
+        private val bytes = ArrayDeque<Int>()
+        private val remaining = ArrayDeque<String>()
+        private var destination = 0x1F
+        private var receiveSeq = 0
+        private var ackDue: Long? = null
+        private var hasDtcReply = false
+        private var prefixIndex = 0
+        private var closedAttempts = 0
+        private var waitingForClose = false
+        private var pollsBeforeClose = 0
+        private var resets = 0
+        private var canProtocol = initialCanProtocol
+        private var waitingForCapability = false
+        private var engineSessionRequests = 0
+        val presenceReceivers = mutableListOf<String>()
+        val identityDestinations = mutableListOf<Int>()
+        private var currentReceiveId = ""
+        private var centralSetups = 0
+        private var dtcIndex = 0
+        private fun nextFrame(): String {
+            val frame = remaining.removeFirst()
+            return frame + if (keepalive && longList && frame[4] == '7') "\r300A3" else ""
+        }
+        override suspend fun open() {}
+        override suspend fun write(data: ByteArray) {
+            // All responses in this adapter include an already queued prompt.
+            if (data.contentEquals(byteArrayOf(32))) return
+            val wire = data.toString(Charsets.US_ASCII).trim()
+            val cmd = if (wire in setOf("3E001", "10031")) wire.dropLast(1) else wire
+            if (cmd.startsWith("ATCRA")) currentReceiveId = cmd.removePrefix("ATCRA")
+            if (cmd == "3E00") presenceReceivers += currentReceiveId
+            if (prefixIndex < recordedPrefix.size) {
+                val row = recordedPrefix[prefixIndex++]
+                check(wire == row.first) { "Recorded row $prefixIndex: expected ${row.first}, got $wire" }
+                sent += wire
+                (row.second + ">").toByteArray(Charsets.US_ASCII).forEach { bytes.add(it.toInt() and 255) }
+                return
+            }
+            if (cmd.startsWith("B")) {
+                check(clock() <= requireNotNull(ackDue)) { "ACK exceeded advertised T1" }
+                ackDue = null
+            }
+            sent += wire
+            val raw = when {
+                cmd == "ATZ" -> {
+                    resets++
+                    if (failReset && resets > 1) throw IOException("Synthetic reset failed")
+                    "ELM327 v1.5"
+                }
+                cmd == "0100" -> obdReply
+                cmd == "ATDPN" -> canProtocol
+                cmd == "ATSP6" || cmd == "ATSP7" -> { canProtocol = cmd.takeLast(1); "OK" }
+                cmd.startsWith("AT") -> "OK"
+                cmd in setOf("3E00", "1003", "22F187", "1902AF") -> "NO DATA"
+                cmd.endsWith("C000100003011") -> {
+                    destination = cmd.take(2).toInt(16); receiveSeq = 0
+                    hasDtcReply = false
+                    if (destination == 0x20 && centralSetups < centralSetupReplies.size) centralSetupReplies[centralSetups++]
+                    else if (destination == 0x33 && supplementalSetup != null) supplementalSetup
+                    else if (destination in silentDestinations || (destination == 0x33 && missingSupplemental) || (destination == 0x1F && missingGateway) ||
+                        (destination == 0x20 && (missingCentral || (!unlistedCentralResponds && !longList &&
+                            installedReply?.contains("09000001") != true)))) "NO DATA"
+                    else "%03X00D00003000701".format(0x200 or destination)
+                }
+                cmd == "A00194FF82FF" -> "300A10F94FF82FF"
+                cmd == "A10194FF82FF" -> "NO DATA"
+                cmd in setOf("A3", "A32") && waitingForCapability -> "300A10F94FF82FF"
+                cmd in setOf("3E00", "1003", "22F187") -> "NO DATA"
+                cmd in setOf("A3", "A32") && waitingForClose -> {
+                    pollsBeforeClose++
+                    if (pollsBeforeClose < 4) "300A10F94FF82FF" else {
+                        waitingForClose = false
+                        "300A10F94FF82FF\r300A8"
+                    }
+                }
+                cmd in setOf("A3", "A32") -> "300A10F94FF82FF"
+                cmd == "A80" || (cmd.length == 3 && cmd.startsWith("B")) -> {
+                    if (cmd == "A80") waitingForCapability = false
+                    if (cmd == "A80" && hasDtcReply && closeFailure == "io") throw IOException("Synthetic close failure")
+                    if (cmd == "A80" && hasDtcReply && closeFailure == "cancel") throw CancellationException("Synthetic close cancellation")
+                    "OK"
+                }
+                cmd.length == 2 && cmd.startsWith("B") -> nextFrame()
+                cmd.startsWith("1") -> {
+                    if (failRead) throw IOException("Scripted disconnected stream")
+                    val request = cmd.drop(6)
+                    if (request == "1A9B") identityDestinations += destination
+                    if (request == "1089" && destination == 1 && ++engineSessionRequests <= silentEngineSessions) {
+                        waitingForCapability = true
+                        val ack = "300B%X>".format((cmd.take(2).toInt(16) + 1) and 15)
+                        ack.toByteArray(Charsets.US_ASCII).forEach { bytes.add(it.toInt() and 255) }
+                        return
+                    }
+                    if (request == "31B80000" && silentCapability) {
+                        waitingForCapability = true
+                        val ack = "300B%X>".format((cmd.take(2).toInt(16) + 1) and 15)
+                        ack.toByteArray(Charsets.US_ASCII).forEach { bytes.add(it.toInt() and 255) }
+                        return
+                    }
+                    if (((request in setOf("1800FF00", "1802FF00") && destination == closedDestination) ||
+                            (request == "1A9F" && closeGatewayList) ||
+                            (request == "2204A1" && closeAlternativeList) ||
+                            (request.startsWith("120004") && destination == closeDetailsAt)) && closedAttempts < closeAttempts) {
+                        closedAttempts++
+                        pollsBeforeClose = 0
+                        waitingForClose = true
+                        val ack = "300B%X>".format((cmd.take(2).toInt(16) + 1) and 15)
+                        ack.toByteArray(Charsets.US_ASCII).forEach { bytes.add(it.toInt() and 255) }
+                        return
+                    }
+                    if (request in setOf("1800FF00", "1802FF00")) hasDtcReply = true
+                    val reply = when (request) {
+                        "1089" -> tpSessionReply
+                        "31B80000" -> saeReply ?: if (destination in setOf(1, 2)) "71B80118" else "7F3111"
+                        "22F187", "22F197", "22F189", "22F19E" -> infoByDestination[destination]?.get(request) ?: "7F2231"
+                        "1A9B" -> {
+                            identityFailure?.takeIf { it.first == destination }?.let { throw it.second }
+                            if (failIdentity || (destination == 0x33 && failSupplemental)) throw IOException("identity stream lost")
+                            identityByDestination[destination] ?: identityReply
+                        }
+                        "1A9F" -> installedReply ?: if (longList || rejectService1A) "7F1A11" else "5A9F090100000119000001"
+                        "2204A1" -> alternativeListReply ?: if (rejectService1A) "6204A1191F010001010100" else "6204A1" + (1..65).joinToString("") { "%02X%02X0100".format(it, it) }
+                        "1800FF00" -> dtcByDestination[destination] ?: dtcReplies.getOrNull(dtcIndex++) ?: dtcReply ?: "5801029908"
+                        "1802FF00" -> dtcByDestination[destination] ?: dtcReplies.getOrNull(dtcIndex++) ?: dtcReply ?: "5800"
+                        else -> if (request.matches(Regex("120004[0-9A-F]{4}"))) detailsReply else error("Unexpected service $request")
+                    }
+                    remaining.clear()
+                    if (reply in setOf("CAN ERROR", "NO DATA")) {
+                        "$reply>".toByteArray(Charsets.US_ASCII).forEach { bytes.add(it.toInt() and 255) }
+                        return
+                    }
+                    var body = VagOemReadOnly.bytes(reply)
+                    val total = body.size
+                    var first = true
+                    while (body.isNotEmpty()) {
+                        val take = if (first) 5 else 7
+                        val chunk = body.take(take); body = body.drop(take)
+                        val seq = if (wrongSequence) (receiveSeq + 1) and 15 else receiveSeq
+                        val frame = listOf((if (body.isEmpty()) 0x10 else 0x00) or seq) +
+                            (if (first) listOf(total ushr 8, total and 255) else emptyList()) + chunk
+                        remaining.add("300" + VagOemReadOnly.hex(frame))
+                        first = false; receiveSeq = (receiveSeq + 1) and 15
+                    }
+                    val frame = nextFrame()
+                    val cleanClose = request == closeAfterReply && destination == closeAfterReplyAt
+                    if (cleanClose) check(remaining.isEmpty()) { "Fixture close requires a complete single packet" }
+                    "300B%X\r".format((cmd.take(2).toInt(16) + 1) and 15) + frame +
+                        (if (keepalive && request == "1A9F") "\r300A3" else "") +
+                        (if (cleanClose) "\r300A8" else "")
+                }
+                else -> error("Unexpected wire command $cmd")
+            }
+            if (raw.split('\r').any { it.startsWith("3000") || it.startsWith("3001") }) ackDue = clock() + 200
+            for (b in (raw + ">").toByteArray(Charsets.US_ASCII)) bytes.add(b.toInt() and 255)
+        }
+        override suspend fun readByte(): Int = bytes.pollFirst() ?: -2
+        override fun close() { bytes.clear() }
+    }
+    @Test fun damagedTpDtcRetriesOnlyItsCommandOnFreshVerifiedLink() = runBlocking {
+        val old = Link(installedReply = "5A9F091900000101000001", dtcReplies = listOf("59028D"))
+        val fresh = Link(dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        val journal = mutableListOf<String>()
+        var replacements = 0
+        val result = scanWithSupplementalInfo(ElmEngine(old, { cmd, _, _, _ -> journal += "old:$cmd" }),
+            { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false,
+            recreateEngine = { replacements++; ElmEngine(fresh, { cmd, _, _, _ -> journal += "fresh:$cmd" }) })
+        assertTrue(result.note, result.complete)
+        assertEquals(1, replacements)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals(1, old.sent.count { it.endsWith("1802FF00") })
+        assertEquals(1, fresh.sent.count { it.endsWith("1802FF00") })
+        assertFalse(fresh.sent.any { it.endsWith("1A9F") })
+        assertEquals("ATZ", fresh.sent.first())
+        assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOf("1FC000100003011"))
+        assertTrue(journal.indexOfFirst { it.startsWith("old:") && it.endsWith("1802FF00") } < journal.indexOf("fresh:ATZ"))
+        assertEquals("B20", old.sent.last()) // only the packet ACK precedes payload validation
+    }
+    @Test fun preflightProtocolRecoveryReadsDtcOnlyOnVerifiedReplacement() = runBlocking {
+        val old = Link(installedReply = "5A9F091900000101000001", dtcReply = "5801051924", identityReply = "6204A100")
+        val fresh = Link(dtcReply = "5800", identityReply = "7F1A31")
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        scanWithSupplementalInfo(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+            discoverAdditionalUnits = false, recreateEngine = {
+                replacements++
+                assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+                assertTrue(units.getValue("VAG-19").dtcs.isEmpty())
+                ElmEngine(fresh, { _, _, _, _ -> })
+            })
+        assertEquals(1, replacements)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertTrue(units.getValue("VAG-19").dtcs.isEmpty())
+        assertEquals(0, old.sent.count { it.endsWith("1802FF00") })
+        assertEquals(1, fresh.sent.count { it.endsWith("1802FF00") })
+        assertTrue(fresh.sent.any { it.endsWith("1A9B") })
+    }
+    @Test fun damagedCentralSetupRecoversWithoutRepeatingInstallationDiscovery() = runBlocking {
+        val old = Link(installedReply = "5A9F091900000101000001", centralSetupReplies = listOf("22000D00003"))
+        val fresh = Link(unlistedCentralResponds = true, dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        scanWithSupplementalInfo(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+            discoverAdditionalUnits = false, recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }) })
+        assertEquals(1, replacements)
+        for (id in listOf("VAG-19", "VAG-01", "VAG-09")) assertEquals(id, ReadState.COMPLETE, units.getValue(id).state)
+        assertFalse(fresh.sent.any { it.endsWith("1A9F") })
+    }
+    @Test fun applicationFramingReadsInstallationAndDtcWithAdapterFlowControl() = runBlocking {
+        val link = UdsLink(rawCan = true, includeEngine = true, dtcReply = "59028D0102030804050608")
+        val units = linkedMapOf<String, ControlUnit>()
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true)
+        engine.connect()
+        scanWithSupplementalInfo(engine,
+            { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false)
+        for (address in listOf("VAG-19", "VAG-01")) {
+            assertEquals(ReadState.COMPLETE, units.getValue(address).state)
+            assertEquals(2, units.getValue(address).dtcs.size)
+        }
+        assertTrue(link.wireSent.contains("023E001"))
+        assertTrue(link.wireSent.contains("031902AFAAAAAAAA"))
+        assertFalse(link.wireSent.contains(ElmUdsRawTransaction.FLOW_CONTROL))
+        assertFalse(link.wireSent.contains("1902AF"))
+        val udsStart = link.wireSent.indexOf("023E001")
+        assertFalse(link.wireSent.drop(udsStart).contains("ATCAF1"))
+        assertTrue(link.wireSent.take(udsStart).contains("ATCFC1"))
+        assertEquals("Unchanged protocol selection must be reused", 1, link.wireSent.count { it == "ATSP6" })
+        assertEquals("Gateway header must survive its completed discovery/read boundary", 1, link.wireSent.count { it == "ATSH710" })
+        assertEquals("Every actual ECU DTC request must still be transmitted", 2, link.wireSent.count { it == "031902AFAAAAAAAA" })
+    }
+    @Test fun automaticFormattingKeepsTheCompleteMaximumDtcReplyAtConfiguredFrameSpacing() = runBlocking {
+        val data = listOf(0x59, 2, 0x8D) + List(4092) { it and 255 }
+        val link = UdsLink(dtcReply = data.joinToString("") { "%02X".format(it) }, pacedDtc = true)
+        val units = linkedMapOf<String, ControlUnit>()
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(64, units.getValue("VAG-19").dtcs.size) // First occurrence of each code, not lost tail records.
+        assertEquals(1, link.sent.count { it == "1902AF" })
+    }
+    @Test fun nativeAssemblyAllowsASlowCompleteMaximumMessageWithoutRequestResend() = runBlocking {
+        val data = listOf(0x59, 2, 0x8D) + List(4092) { it and 255 }
+        val link = UdsLink(rawCan = true, nativeBanner = "STN1170 v5.6.5",
+            dtcReply = data.joinToString("") { "%02X".format(it) }, pacedNativeDtc = true)
+        val units = linkedMapOf<String, ControlUnit>()
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(64, units.getValue("VAG-19").dtcs.size)
+        assertEquals(1, link.wireSent.count { it == "1902AF1" })
+    }
+    @Test fun optionalSessionTimingBytesDoNotPreventAnImmediateCompleteDtcRead() = runBlocking {
+        for (session in listOf("5003003203E8", "500300320000", "50030032FFFF")) {
+            val link = UdsLink(sessionReply = session, dtcReply = "59028D12345608")
+            val units = linkedMapOf<String, ControlUnit>()
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertEquals(session, ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+            assertEquals(1, link.sent.count { it == "1902AF" })
+        }
+    }
+    @Test fun adapterLongTimeoutSurvivesRejectedNativeAssembly() = runBlocking {
+        for (vt in listOf(false, true)) {
+            val link = UdsLink(rawCan = true, nativeBanner = if (vt) "?" else "STN1170 v5.6.5",
+                vtBanner = if (vt) "Synthetic Adapter v2.2.78" else "?",
+                nativeRejected = setOf(if (vt) "VTSWGP GR1, BZF1" else "STCSEGR1"),
+                requiredDtcTimeoutMs = 1500, dtcReply = "59028D12345608")
+            val units = linkedMapOf<String, ControlUnit>()
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+            scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+            assertTrue(link.wireSent.contains(if (vt) "VTTOST REP:2000" else "STPTO2000"))
+            assertFalse(link.wireSent.contains("1902AF1"))
+            assertTrue(link.requestTimeouts.filter { it.first == "3E00" }.all { it.second == 1000 })
+            assertTrue(link.requestTimeouts.filter { it.first == "1902AF" }.all { it.second == 2000 })
+        }
+    }
+    @Test fun olderVtKeepsItsConfirmedLongTimeoutWithoutTryingUnsupportedNativeAssembly() = runBlocking {
+        val link = UdsLink(rawCan = true, vtBanner = "Synthetic Adapter v2.2.59",
+            requiredDtcTimeoutMs = 1500, legacyTimeoutReply = "OK", dtcReply = "59028D12345608")
+        val units = linkedMapOf<String, ControlUnit>()
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+        assertTrue(link.wireSent.contains("STPTO2000"))
+        assertFalse(link.wireSent.any { it.startsWith("VTSWGP") })
+        assertFalse(link.wireSent.contains("1902AF1"))
+    }
+    @Test fun connectionProbesKeepTheirShortWireAndInheritedWindowAcrossAllBackends() = runBlocking {
+        for (backend in listOf("raw", "caf", "native")) {
+            val link = UdsLink(rawCan = backend != "caf", nativeBanner = if (backend == "native") "STN1170 v5.6.5" else "?",
+                dtcReply = "59028D12345608", echoConnectionProbe = true)
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = backend != "caf"); engine.connect()
+            link.sent.clear(); link.wireSent.clear()
+            val units = linkedMapOf<String, ControlUnit>()
+            scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertEquals(backend, ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+            assertTrue(link.wireSent.contains(if (backend == "raw") "023E001" else "3E001"))
+            assertTrue(link.wireSent.contains(if (backend == "raw") "0210031" else "10031"))
+            val start = link.sent.indexOf("1003")
+            assertEquals("ATAT0", link.sent.take(start).last { it.startsWith("ATAT") })
+            assertTrue(link.requestTimeouts.filter { it.first == "1003" }.all { it.second == 1000 })
+            assertTrue(link.wireSent.contains(when (backend) { "raw" -> "031902AFAAAAAAAA"; "native" -> "1902AF1"; else -> "1902AF" }))
+        }
+    }
+    @Test fun unansweredSessionPokeIsNotRetriedAndDoesNotSuppressVerifiedDtcs() = runBlocking {
+        for (raw in listOf(false, true)) {
+            val link = UdsLink(rawCan = raw, sessionReply = "NO DATA", dtcReply = "59028D12345608")
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = raw); engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals(link.addressedRequests.count { it == ("77A" to "3E00") },
+                link.addressedRequests.count { it == ("77A" to "1003") })
+            assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+        }
+    }
+    @Test fun completedCanErrorInTheOptionalSessionPokeDoesNotDiscardAConfirmedDtcRead() = runBlocking {
+        for (backend in listOf("raw", "caf", "native")) {
+            val link = UdsLink(rawCan = backend != "caf", nativeBanner = if (backend == "native") "STN1170 v5.6.5" else "?",
+                sessionReply = "CAN ERROR", dtcReply = "59028D12345608")
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = backend != "caf"); engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertEquals(backend, ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+            assertEquals(link.addressedRequests.count { it == ("77A" to "3E00") },
+                link.addressedRequests.count { it == ("77A" to "1003") })
+        }
+    }
+    @Test fun rejectedRaw29CommandUsesConfirmedAutomaticFormattingWithoutReconnect() = runBlocking {
+        val link = UdsLink(rawCan = true, includeConvenience = true, rejectRaw29 = true,
+            dtcReply = "59028D12345608")
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-46").state)
+        assertEquals("123456", units.getValue("VAG-46").dtcs.single().code)
+        val rejected = link.wireSent.lastIndexOf("023E001")
+        assertTrue(link.wireSent.drop(rejected + 1).contains("ATCAF1"))
+        assertTrue(link.wireSent.drop(rejected + 1).contains("3E001"))
+        assertEquals(1, link.wireSent.count { it == "ATZ" })
+        assertFalse(link.wireSent.drop(rejected + 1).contains("031902AFAAAAAAAA"))
+    }
+
+    @Test fun rejectedOrSilentAutomaticFallbackCannotBecomeZeroDtcOrReconnectLoop() = runBlocking {
+        for (status in listOf("?", "NO DATA")) {
+            val link = UdsLink(rawCan = true, includeConvenience = true, rejectRaw29 = true,
+                automatic29Status = status)
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertNotEquals(status, ReadState.COMPLETE, units.getValue("VAG-46").state)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals(1, link.wireSent.count { it == "ATZ" })
+        }
+    }
+
+    @Test fun adapterRefusalAfterDtcPreservesConfirmedFaultsAndReturnsPartialMetadata() = runBlocking {
+        val link = UdsLink(rawCan = true, includeConvenience = true, rejectRaw29 = true,
+            automatic29Status = "?", automatic29StatusCommands = setOf("22F1A2"),
+            infoReplies = mapOf("22F19E" to "62F19E45565F54455354"), dtcReply = "59028D12345608")
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false)
+        val unit = units.getValue("VAG-46")
+        assertEquals(ReadState.COMPLETE, unit.state)
+        assertEquals("123456", unit.dtcs.single().code)
+        assertTrue(unit.note, unit.note.contains("Адаптер"))
+        assertEquals(1, link.wireSent.count { it == "ATZ" })
+    }
+
+    @Test fun completedAdapterRefusalDuringOptionalPreflightDoesNotBlockDtc() = runBlocking {
+        val link = UdsLink(rawCan = true, includeConvenience = true, rejectRaw29 = true,
+            automatic29Status = "?", automatic29StatusCommands = setOf("22F197"), dtcReply = "59028D12345608")
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        val events = mutableListOf<Pair<String, String>>()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { c, t, _ -> events += c to t }, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-46").state)
+        assertEquals("123456", units.getValue("VAG-46").dtcs.single().code)
+        assertTrue(events.contains("VAG_ECU_INFO_46_COMPONENT" to "ADAPTER_REJECTED"))
+    }
+    @Test fun postDtcEnrichmentIoOrCancellationPreservesAlreadyReadFaults() = runBlocking {
+        for (mode in listOf("io", "cancel")) {
+            val link = UdsLink(infoFailure = mode, infoFailureCommand = "22F1A2",
+                infoReplies = mapOf("22F19E" to "62F19E45565F54455354"), dtcReply = "59028D12345608")
+            val units = linkedMapOf<String, ControlUnit>()
+            val error = runCatching { scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }),
+                { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false) }.exceptionOrNull()
+            if (mode == "io") assertTrue(error is IOException) else assertTrue(error is CancellationException)
+            assertEquals("22F1A2", link.sent.last())
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+        }
+    }
+
+    @Test fun identificationPrecedesDtcWithinEachUdsEcuRatherThanInASeparateGlobalPass() = runBlocking {
+        val link = UdsLink(rawCan = true, includeEngine = true, includeSteering = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false)
+        val requests = link.addressedRequests
+        val dtc = requests.indexOf("776" to "1902AF")
+        assertTrue(requests.indexOf("776" to "22F187") in 0 until dtc)
+        for (command in listOf("22F197", "22F189", "22F19E", "220174")) {
+            assertTrue("$command must follow DTC in the same ECU", requests.indexOf("776" to command) > dtc)
+        }
+        assertTrue(requests.indexOf("7E8" to "1902AF") < requests.indexOf("776" to "22F187"))
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-16").state)
+    }
+
+    @Test fun nativeAdapterReadsElevenAndTwentyNineBitEcusWithOneResponseRequests() = runBlocking {
+        for (vt in listOf(false, true)) {
+        val link = UdsLink(rawCan = true, nativeBanner = if (vt) "?" else "STN1170 v5.6.5", includeEngine = true,
+            includeConvenience = true, dtcReply = "59028D12345608", vtBanner = if (vt) "Synthetic Adapter v2.3.0" else "?")
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false)
+        for (address in listOf("VAG-19", "VAG-01", "VAG-46")) {
+            assertEquals(address, ReadState.COMPLETE, units.getValue(address).state)
+            assertEquals("123456", units.getValue(address).dtcs.single().code)
+        }
+        assertEquals(3, link.wireSent.count { it == "1902AF1" })
+        assertFalse(link.wireSent.contains("031902AFAAAAAAAA"))
+        assertTrue(link.wireSent.contains(if (vt) "VTFCTRA 17FC008B, 17FE008B" else "STCFCPA17FC008B,17FE008B"))
+        // Three listed sessions plus the bounded central-unit preflight each
+        // switch from the 1000ms presence window to the 2000ms command window.
+        assertEquals(4, link.wireSent.count { it == if (vt) "VTTOST REP:2000" else "STPTO2000" })
+        assertTrue(link.requestTimeouts.filter { it.first == "3E00" }.all { it.second == 1000 })
+        assertTrue(link.requestTimeouts.filter { it.first == "1902AF" }.all { it.second == 2000 })
+        }
+    }
+    @Test fun rejectedNativeFeatureFallsBackOnceToGenericRawWithoutLosingEcus() = runBlocking {
+        for (vt in listOf(false, true)) {
+        val rejected = if (vt) "VTSWGP GT1" else "STCSEGT1"
+        val link = UdsLink(rawCan = true, nativeBanner = if (vt) "?" else "STN1170 v5.6.5", includeEngine = true,
+            nativeRejected = setOf(rejected), vtBanner = if (vt) "Synthetic Adapter v2.3.0" else "?")
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false)
+        for (address in listOf("VAG-19", "VAG-01")) assertEquals(ReadState.COMPLETE, units.getValue(address).state)
+        assertEquals(1, link.wireSent.count { it == rejected })
+        assertFalse(link.wireSent.contains("1902AF1"))
+        assertEquals(2, link.wireSent.count { it == "031902AFAAAAAAAA" })
+        }
+    }
+    @Test fun nativePendingSwitchesToRawReceptionWithoutRepeatingDtc() = runBlocking {
+        for (vt in listOf(false, true)) {
+        val link = UdsLink(rawCan = true, nativeBanner = if (vt) "?" else "STN1170 v5.6.5", pending = 2,
+            vtBanner = if (vt) "Synthetic Adapter v2.3.0" else "?")
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(1, link.wireSent.count { it == "1902AF1" })
+        assertTrue(link.wireSent.contains("ATMA"))
+        assertFalse(link.wireSent.contains("031902AFAAAAAAAA"))
+        }
+    }
+    @Test fun adapterInfoStreamFailureUsesFreshObdProofBeforeAnyEcuRead() = runBlocking {
+        val old = UdsLink(rawCan = true, nativeProbeFailure = true)
+        val fresh = UdsLink(rawCan = true, includeEngine = true, nativeProbeFailure = true)
+        val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false,
+            recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }, manualUds = true) })
+        assertEquals(1, replacements)
+        assertEquals("STI", old.wireSent.last())
+        assertFalse(fresh.wireSent.contains("STI"))
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertTrue(fresh.wireSent.indexOf("0100") < fresh.wireSent.indexOf("023E001"))
+    }
+    @Test fun lyingNativeAcknowledgementsCannotPromoteRawFramesAsNative() = runBlocking {
+        for (vt in listOf(false, true)) for (firstFrameOnly in listOf(false, true)) {
+        val banner = if (vt) "?" else "STN1170 v5.6.5"
+        val vtInfo = if (vt) "Synthetic Adapter v2.3.0" else "?"
+        val quiet = if (firstFrameOnly) setOf("77A") else emptySet()
+        val identity = if (firstFrameOnly) partReply("1K0907530") else "7F2231"
+        val old = UdsLink(rawCan = true, nativeBanner = banner, vtBanner = vtInfo, nativeAssembledReplies = false,
+            nativeFirstFrameOnly = firstFrameOnly, quietPreflightReceivers = quiet, identityReply = identity,
+            quietPreflightCommands = setOf("3E00", "1003"))
+        val fresh = UdsLink(rawCan = true, includeEngine = true, nativeBanner = banner, vtBanner = vtInfo,
+            nativeAssembledReplies = false, requiredDtcTimeoutMs = 1500, nativeFirstFrameOnly = firstFrameOnly,
+            quietPreflightReceivers = quiet, identityReply = identity, quietPreflightCommands = setOf("3E00", "1003"))
+        val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false,
+            recreateEngine = {
+                replacements++
+                assertTrue(units.isEmpty())
+                ElmEngine(fresh, { _, _, _, _ -> }, manualUds = true)
+            })
+        assertEquals(1, replacements)
+        assertFalse(old.wireSent.contains("1902AF1"))
+        assertTrue(fresh.wireSent.contains("STI"))
+        assertTrue(fresh.wireSent.contains(if (vt) "VTTOST REP:2000" else "STPTO2000"))
+        assertFalse(fresh.wireSent.contains(if (vt) "VTSWGP GR1, BZF1" else "STCSEGR1"))
+        val firstRawRequest = fresh.wireSent.indexOf("023E001")
+        assertTrue(firstRawRequest >= 0)
+        for (off in if (vt) listOf("VTSWGP GR0", "VTSWGP GT0") else listOf("STCSEGR0", "STCSEGT0"))
+            assertTrue("$off must be confirmed before raw reception", fresh.wireSent.indexOf(off) in 0 until firstRawRequest)
+        assertEquals(2, fresh.wireSent.count { it == "031902AFAAAAAAAA" })
+        for (address in listOf("VAG-19", "VAG-01")) assertEquals(ReadState.COMPLETE, units.getValue(address).state)
+        }
+    }
+    @Test fun nativeLateFirstFrameGetsOnePhysicalFcAndKeepsBothDtcRecords() = runBlocking {
+        for (vt in listOf(false, true)) {
+            val link = UdsLink(rawCan = true, nativeBanner = if (vt) "?" else "STN1170 v5.6.5", pending = 2,
+                latePendingFirstFrame = true, vtBanner = if (vt) "Synthetic Adapter v2.3.0" else "?")
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals(2, units.getValue("VAG-19").dtcs.size)
+            assertEquals(1, link.wireSent.count { it == "1902AF1" })
+            assertEquals(1, link.wireSent.count { it == ElmUdsRawTransaction.FLOW_CONTROL })
+        }
+    }
+    @Test fun oldVtFirmwareRemainsOnGenericFraming() = runBlocking {
+        val link = UdsLink(rawCan = true, vtBanner = "Synthetic Adapter v2.2.59", includeEngine = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false)
+        assertFalse(link.wireSent.any { it.startsWith("VTSWGP") })
+        assertEquals(2, link.wireSent.count { it == "031902AFAAAAAAAA" })
+        for (address in listOf("VAG-19", "VAG-01")) assertEquals(ReadState.COMPLETE, units.getValue(address).state)
+    }
+    @Test fun damagedUdsDtcRecoversItsRouteAndSessionBeforeRetry() = runBlocking {
+        for (backend in 0..3) {
+        val manual = backend != 0
+        val old = UdsLink(dtcReplies = listOf("59038D"), rawCan = manual,
+            nativeBanner = if (backend == 2) "STN1170 v5.6.5" else "?",
+            vtBanner = if (backend == 3) "Synthetic Adapter v2.3.0" else "?")
+        val fresh = UdsLink(rawCan = manual)
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = manual)
+        engine.connect()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false,
+            recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }, manualUds = manual) })
+        assertEquals(1, replacements)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(1, old.sent.count { it == "1902AF" })
+        assertEquals(1, fresh.sent.count { it == "1902AF" })
+        assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOf("3E00"))
+        assertTrue(fresh.sent.indexOf("1003") < fresh.sent.indexOf("1902AF"))
+        assertFalse(fresh.sent.contains("2204A1"))
+        }
+    }
+    @Test fun freshEnhancedAdapterMustRegainItsOwnCapabilitiesBeforeRetryingDtc() = runBlocking {
+        for (vt in listOf(false, true)) {
+            val stn = if (vt) "?" else "STN1170 v5.6.5"
+            val vtInfo = if (vt) "Synthetic Adapter v2.3.0" else "?"
+            val old = UdsLink(rawCan = true, nativeBanner = stn, vtBanner = vtInfo,
+                dtcReplies = listOf("59038D"))
+            val fresh = UdsLink(rawCan = true, nativeBanner = stn, vtBanner = vtInfo,
+                requiredDtcTimeoutMs = 1500)
+            val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = true)
+            engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            var replacements = 0
+            val result = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                discoverAdditionalUnits = false,
+                recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }, manualUds = true) })
+            assertTrue("vt=$vt: ${result.note}", result.complete)
+            assertEquals(1, replacements)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            val enable = if (vt) "VTSWGP GR1, BZF1" else "STCSEGR1"
+            val window = if (vt) "VTTOST REP:2000" else "STPTO2000"
+            assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOf("STI"))
+            assertTrue(fresh.sent.indexOf("STI") in 0 until fresh.sent.indexOf(enable))
+            assertTrue(fresh.sent.contains(window))
+            assertEquals(1, fresh.sent.count { it == "1902AF" })
+        }
+    }
+
+    @Test fun failedAdapterReprobeClosesReplacementWithoutDiscardingEarlierDtc() = runBlocking {
+        for (mode in listOf("io", "cancel")) {
+            val old = UdsLink(rawCan = true, includeEngine = true, nativeBanner = "STN1170 v5.6.5",
+                dtcReplies = listOf("59028D12345608", "59038D"))
+            val delegate = UdsLink(rawCan = true)
+            val sent = mutableListOf<String>()
+            var closes = 0
+            val replacement = object : ElmLink {
+                override val label = "Synthetic failed adapter reprobe"
+                override suspend fun open() = delegate.open()
+                override suspend fun readByte() = delegate.readByte()
+                override fun close() { closes++; delegate.close() }
+                override suspend fun write(bytes: ByteArray) {
+                    val cmd = bytes.toString(Charsets.US_ASCII).trim()
+                    sent += cmd
+                    if (cmd == "STI") {
+                        if (mode == "cancel") throw CancellationException("Stopped during adapter reprobe")
+                        throw IOException("Adapter stream failed during reprobe")
+                    }
+                    delegate.write(bytes)
+                }
+            }
+            val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = true)
+            engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            val failure = runCatching { ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                discoverAdditionalUnits = false,
+                recreateEngine = { ElmEngine(replacement, { _, _, _, _ -> }, manualUds = true) }) }.exceptionOrNull()
+            if (mode == "cancel") assertTrue(failure is CancellationException) else assertTrue(failure is IOException)
+            assertTrue(closes > 0)
+            assertEquals("STI", sent.last())
+            assertFalse(sent.any { it == "1902AF1" || it == "031902AFAAAAAAAA" })
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals(listOf("123456"), units.getValue("VAG-19").dtcs.map { it.code })
+        }
+    }
+
+    @Test fun expiredPendingRecoversOnlyAfterAbandoningOldUdsStream() = runBlocking {
+        for (backend in 0..3) {
+        val manual = backend != 0
+        val old = UdsLink(pending = 3, rawCan = manual,
+            nativeBanner = if (backend == 2) "STN1170 v5.6.5" else "?",
+            vtBanner = if (backend == 3) "Synthetic Adapter v2.3.0" else "?")
+        val fresh = UdsLink(rawCan = manual)
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = manual)
+        engine.connect()
+        scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false,
+            recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }, manualUds = manual) })
+        assertEquals(1, replacements)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(1, old.sent.count { it == "1902AF" })
+        assertFalse(old.sent.drop(old.sent.indexOf("1902AF") + 1).contains("1001"))
+        assertEquals(1, fresh.sent.count { it == "1902AF" })
+        assertEquals("ATZ", fresh.sent.first())
+        }
+    }
+    @Test fun twoSilentTpSendsRequireFreshChannelBeforeCommandRetry() = runBlocking {
+        val old = Link(installedReply = "5A9F0519000001", dtcReplies = listOf("NO DATA", "NO DATA"))
+        val fresh = Link(dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        scanWithSupplementalInfo(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false,
+            recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }) })
+        assertEquals(1, replacements)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(2, old.sent.count { it == "1100041802FF00" })
+        assertEquals(1, fresh.sent.count { it == "1000041802FF00" })
+        assertFalse(old.sent.drop(old.sent.indexOf("1100041802FF00") + 1).contains("A80"))
+    }
+    @Test fun exhaustedProtocolCommandLeavesEcuIncompleteAndReadsOthers() = runBlocking {
+        val old = Link(installedReply = "5A9F091900000101000001", dtcReply = "59028D")
+        val bad = List(3) { Link(dtcReply = "59028D") }
+        val healthy = Link(dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        val result = scanWithSupplementalInfo(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false, recreateEngine = {
+                val link = bad.getOrNull(replacements) ?: healthy
+                replacements++; ElmEngine(link, { _, _, _, _ -> })
+            })
+        assertFalse(result.complete)
+        assertEquals(4, replacements)
+        assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertTrue(units.getValue("VAG-19").answeredModes.isEmpty())
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals(4, (listOf(old) + bad).sumOf { link -> link.sent.count { it.endsWith("1802FF00") } })
+        assertFalse(healthy.sent.any { it.endsWith("1802FF00") })
+    }
+    @Test fun centralDiscoveryPreflightPrecedesGatewayDtc() = runBlocking {
+        val link = Link(installedReply = "5A9F091900000101000001", unlistedCentralResponds = true)
+        val units = linkedMapOf<String, ControlUnit>()
+        var dtcBeforeCentral = false
+        var sawGatewayDtc = false
+        scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {
+            units[it.address] = it
+            if (it.address == "VAG-19" && DtcKind.OEM in it.answeredModes && !sawGatewayDtc) {
+                dtcBeforeCentral = "20C000100003011" !in link.sent
+                sawGatewayDtc = true
+            }
+        }, { _, _, _ -> }, discoverAdditionalUnits = false)
+        assertTrue(sawGatewayDtc)
+        assertFalse("The chassis discovery preflight must precede Gateway DTC", dtcBeforeCentral)
+        assertTrue(link.sent.indexOfFirst { it.endsWith("1802FF00") } > link.sent.indexOf("20C000100003011"))
+        for (address in listOf("VAG-19", "VAG-01", "VAG-09")) assertEquals(ReadState.COMPLETE, units.getValue(address).state)
+        assertEquals(1, link.sent.count { it.endsWith("1A9F") })
+    }
+    @Test fun exhaustedCentralPreflightDoesNotDiscardConfirmedInstallationQueue() = runBlocking {
+        val malformed = listOf("22000D7000338")
+        val old = Link(installedReply = "5A9F091900000101000001", centralSetupReplies = malformed)
+        val bad = List(3) { Link(centralSetupReplies = malformed) }
+        val healthy = Link()
+        val replacements = ArrayDeque(bad + healthy)
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+            discoverAdditionalUnits = false,
+            recreateEngine = { ElmEngine(replacements.removeFirst(), { _, _, _, _ -> }) })
+        assertTrue(replacements.isEmpty())
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertFalse(healthy.sent.any { it.endsWith("1A9F") })
+        assertFalse(units.containsKey("VAG-09"))
+    }
+    @Test fun exhaustedGatewayListCannotBecomeSuccessfulOrDiscardFailureReason() = runBlocking {
+        val broken = List(4) { Link(installedReply = "59028D") }
+        val healthy = Link()
+        val replacements = ArrayDeque(broken.drop(1) + healthy)
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(broken.first(), { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false, allowGatewayIdentityFallback = false,
+            recreateEngine = { ElmEngine(replacements.removeFirst(), { _, _, _, _ -> }) })
+        assertFalse(result.complete)
+        assertFalse(result.listConfirmed)
+        assertTrue(result.note.contains("TP2.0"))
+        assertTrue(replacements.isEmpty())
+        assertTrue(units.isEmpty())
+        assertFalse(healthy.sent.any { it.endsWith("1A9F") || it.endsWith("1802FF00") })
+    }
+    @Test fun failedFreshObdProofCannotSendAnotherEcuCommand() = runBlocking {
+        val old = Link(installedReply = "5A9F091900000101000001", dtcReply = "59028D")
+        val unready = Link(obdReply = "NO DATA")
+        val units = linkedMapOf<String, ControlUnit>()
+        val failure = runCatching { scanWithSupplementalInfo(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false, recreateEngine = { ElmEngine(unready, { _, _, _, _ -> }) }) }.exceptionOrNull()
+        assertTrue(failure is IOException)
+        assertEquals("0100", unready.sent.last())
+        assertFalse(unready.sent.any { it.endsWith("C000100003011") || it.endsWith("1802FF00") })
+        assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+    }
+    @Test fun cancellationDuringRecoveryCannotCreateOrUseAnotherLink() = runBlocking {
+        val old = Link(installedReply = "5A9F0519000001", dtcReply = "59028D")
+        var replacements = 0
+        val failure = runCatching { scanWithSupplementalInfo(ElmEngine(old, { _, _, _, _ -> }), {}, { command, _, state ->
+            if (command == "VAG_CHANNEL_RECOVERY" && state == "RECOVERING") throw CancellationException("Stopped")
+        }, identifyEcus = false, discoverAdditionalUnits = false, recreateEngine = { replacements++; error("Must not create a link") }) }.exceptionOrNull()
+        assertTrue(failure is CancellationException)
+        assertEquals(0, replacements)
+        assertEquals("B20", old.sent.last())
+    }
+    @Test fun cancellationWhileClosingBrokenLinkCannotCreateReplacement() = runBlocking {
+        val job = Job()
+        val old = Link(installedReply = "5A9F0519000001", dtcReply = "59028D")
+        val link = object : ElmLink by old {
+            override fun close() { old.close(); job.cancel() }
+        }
+        var replacements = 0
+        val failure = runCatching { withContext(job) {
+            scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false,
+                recreateEngine = { replacements++; ElmEngine(Link(), { _, _, _, _ -> }) })
+        } }.exceptionOrNull()
+        assertTrue(failure is CancellationException)
+        assertEquals(0, replacements)
+    }
+    @Test fun nonRetriableCapabilityFailureSelectsOemFormatWithoutAbortingDtcRead() = runBlocking {
+        val link = Link(installedReply = "5A9F091900000101000001", saeReply = "CAN ERROR", dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { _, _, _ -> }, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertFalse(link.sent.any { it.endsWith("1800FF00") })
+        assertEquals(2, link.sent.count { it.endsWith("31B80000") }) // one per actual ECU
+    }
+    @Test fun completedAdapterCanErrorRetriesWithoutInventingDtc() = runBlocking {
+        val link = UdsLink(dtcReplies = listOf("CAN ERROR", "59028D"))
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(2, link.sent.count { it == "1902AF" })
+    }
+    @Test fun exhaustedAdapterCanErrorDoesNotDiscardOtherListedEcus() = runBlocking {
+        val link = Link(installedReply = "5A9F091900000101000001", dtcReplies = List(4) { "CAN ERROR" }, dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false)
+        assertFalse(outcome.complete)
+        assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertTrue(units.getValue("VAG-19").answeredModes.isEmpty())
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals(4, link.sent.count { it.endsWith("1802FF00") })
+        assertTrue(link.sent.indexOf("ATZ") < link.sent.indexOf("01C000100003011"))
+    }
+    @Test fun busyDtcReplyRetriesCompletedReadOnTpAndUds() = runBlocking {
+        val tp = Link(installedReply = "5A9F0519000001", dtcReplies = listOf("7F1821", "5800"))
+        val uds = UdsLink(dtcReplies = listOf("7F1921", "59028D"))
+        for (link in listOf<ElmLink>(tp, uds)) {
+            val units = linkedMapOf<String, ControlUnit>()
+            scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+                { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        }
+        assertEquals(2, tp.sent.count { it.endsWith("1802FF00") })
+        assertEquals(2, uds.sent.count { it == "1902AF" })
+    }
+    @Test fun persistentBusyDtcIsBoundedAndNeverBecomesZeroFaults() = runBlocking {
+        val link = UdsLink(dtcReplies = List(4) { "7F1921" })
+        val units = linkedMapOf<String, ControlUnit>()
+        val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { _, _, _ -> }, identifyEcus = false, discoverAdditionalUnits = false)
+        assertFalse(outcome.complete)
+        assertEquals(ReadState.PARTIAL, units.getValue("VAG-19").state)
+        assertTrue(units.getValue("VAG-19").answeredModes.isEmpty())
+        assertEquals(4, link.sent.count { it == "1902AF" })
+    }
+    @Test fun documentedHostReferencesAreAttachedAfterActualReadsWithoutCopyingDtc() = runBlocking {
+        fun identified(part: String, component: String) = "5A9B" + VagOemReadOnly.hex((part.padEnd(12) + "0001").map { it.code }) +
+            "00".repeat(10) + VagOemReadOnly.hex(component.padEnd(16).map { it.code })
+        val link = Link(installedReply = "5A9F19" + listOf(0x19, 3, 4, 0x44, 9, 0x46).joinToString("") { "%02X000001".format(it) },
+            dtcReply = "5801051924", silentDestinations = setOf(0x13, 0x21),
+            identityByDestination = mapOf(3 to identified("1K0907379AK", "MK70 M MASR"),
+                9 to identified("1K0909144R", "EPS_ZFLS Kl. 235"), 0x20 to identified("1K0937086H", "BCM PQ35 M")))
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false)
+        for ((child, host) in listOf("VAG-04" to "VAG-44", "VAG-46" to "VAG-09")) {
+            assertEquals(host, units.getValue(child).diagnosticHost)
+            assertEquals(ReadState.NO_RESPONSE, units.getValue(child).state)
+            assertTrue(units.getValue(child).dtcs.isEmpty())
+            assertTrue(units.getValue(child).answeredModes.isEmpty())
+            assertEquals(ReadState.COMPLETE, units.getValue(host).state)
+            assertEquals(1, units.getValue(host).dtcs.size)
+        }
+    }
+    @Test fun observedD7DuringCentralPreflightDoesNotAbortDtcQueue() = runBlocking {
+        // Exact failing CHANNEL SETUP response from the 0.3.10 vehicle journal;
+        // successful subsequent answers are synthetic, not vehicle evidence.
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", dtcReply = "5800",
+            unlistedCentralResponds = true, centralSetupReplies = listOf("22000D70003380301"))
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        for (id in listOf("VAG-19", "VAG-01", "VAG-03", "VAG-09"))
+            assertEquals(id, ReadState.COMPLETE, units.getValue(id).state)
+        assertEquals(3, link.sent.count { it == "20C000100003011" }) // retry + later DTC connection
+    }
+    @Test fun permanentSetupRejectionDuringCentralPreflightDoesNotAbortOtherEcus() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", dtcReply = "5800",
+            centralSetupReplies = List(4) { "22000D60010001001" })
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        for (id in listOf("VAG-19", "VAG-01", "VAG-03"))
+            assertEquals(id, ReadState.COMPLETE, units.getValue(id).state)
+        assertEquals(4, link.sent.count { it == "20C000100003011" })
+        assertFalse(units.containsKey("VAG-09"))
+    }
+    @Test fun rejectedListedCentralStaysUnreadWhileOtherEcusComplete() = runBlocking {
+        val link = Link(installedReply = "5A9F1119000001090000010100000103000001", dtcReply = "5800",
+            centralSetupReplies = List(8) { "22000D60010001001" })
+        val units = linkedMapOf<String, ControlUnit>()
+        val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }),
+            { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false)
+        assertFalse(outcome.complete)
+        for (id in listOf("VAG-19", "VAG-01", "VAG-03"))
+            assertEquals(id, ReadState.COMPLETE, units.getValue(id).state)
+        val central = units.getValue("VAG-09")
+        assertEquals(ReadState.NO_RESPONSE, central.state)
+        assertTrue(central.dtcs.isEmpty())
+        assertTrue(central.answeredModes.isEmpty())
+        assertTrue(central.note.contains("D6"))
+        assertEquals(3, link.presenceReceivers.count { it == "778" })
+    }
+    @Test fun confirmedInstallationScopeIsSavedBeforeAnyEcuRead() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        var checked = false
+        scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { unit ->
+            units[unit.address] = unit
+            if (!checked && unit.state == ReadState.COMPLETE) {
+                checked = true
+                assertEquals(setOf("VAG-19", "VAG-01", "VAG-03"), units.keys)
+                val notRead = units.getValue("VAG-03")
+                assertEquals(ReadState.NOT_QUERIED, notRead.state)
+                assertEquals("GATEWAY", notRead.source)
+                assertTrue(notRead.dtcs.isEmpty())
+                assertTrue(notRead.answeredModes.isEmpty())
+            }
+        }, { _, _, _ -> })
+        assertTrue(checked)
+    }
+    @Test fun listedEngineRetriesOneHealthyMissingSessionBeforeUdsFallback() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", silentEngineSessions = 2, dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        assertEquals(2, link.sent.count { it == "01C000100003011" })
+        assertEquals(1, link.sent.count { it.endsWith("1800FF00") })
+        assertFalse(link.presenceReceivers.contains("7E8"))
+    }
+    @Test fun repeatedMissingEngineSessionIsBoundedAndOtherEcusStillRead() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", silentEngineSessions = 4, dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertFalse(result.complete)
+        assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        assertEquals(2, link.sent.count { it == "01C000100003011" })
+        assertEquals(3, link.presenceReceivers.count { it == "7E8" })
+    }
+    @Test fun completeGatewayListAndPerEcuDtcUseRecoveredAddressAndAck() = runBlocking {
+        for (name in listOf("Wi-Fi", "SPP", "BLE")) {
+            val link = Link()
+            val engine = ElmEngine(link, { _, _, _, _ -> })
+            engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            val result = scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> })
+            assertTrue(name + result.note, result.complete)
+            assertEquals(setOf("VAG-19", "VAG-01"), units.keys)
+            assertEquals("P0299", units.getValue("VAG-01").dtcs.single().code)
+            assertTrue(link.sent.contains("ATCRA21F"))
+            assertTrue(link.sent.contains("1FC000100003011"))
+            assertFalse(link.sent.any { it == "ATCRA219" || it == "19C000100003011" || it == "ATSPB" })
+            assertTrue(link.sent.count { it == "A80" } >= 3)
+            assertTrue(link.sent.any { it.startsWith("B") && it.length == 2 })
+            assertFalse(link.sent.any { it == "04" || it.startsWith("27") || it.startsWith("2E") })
+        }
+    }
+    @Test fun ioFailureAbortsWithoutFallbackOrDisconnectCommandsOnBrokenStream() = runBlocking {
+        val link = Link(failRead = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        try { scanWithSupplementalInfo(engine, {}, { _, _, _ -> }); fail("Expected IOException") }
+        catch (_: IOException) { }
+        assertEquals("1000021089", link.sent.last())
+        assertFalse(link.sent.contains("ATSH710"))
+    }
+    @Test fun explicitCancellationFromCheckpointStopsBothProtocolsImmediately() = runBlocking {
+        for (uds in listOf(false, true)) {
+            val tpLink = Link()
+            val udsLink = UdsLink()
+            val engine = ElmEngine(if (uds) udsLink else tpLink, { _, _, _, _ -> })
+            engine.connect()
+            var commandsAtCancel: List<String>? = null
+            val failure = runCatching {
+                scanWithSupplementalInfo(engine, { unit ->
+                    if (unit.source == "RESPONSE") {
+                        commandsAtCancel = (if (uds) udsLink.sent else tpLink.sent).toList()
+                        throw CancellationException("Checkpoint cancelled scan")
+                    }
+                }, { _, _, _ -> })
+            }.exceptionOrNull()
+            assertTrue(failure.toString(), failure is CancellationException)
+            assertNotNull(commandsAtCancel)
+            assertEquals(commandsAtCancel, if (uds) udsLink.sent else tpLink.sent)
+        }
+    }
+    @Test fun slowPersistenceCannotDelayTpAcknowledgmentsAndJournalIsFlushed() = runBlocking {
+        var now = 0L
+        val link = Link(clock = { now })
+        val logged = mutableListOf<String>()
+        val engine = ElmEngine(link, { command, _, _, _ -> logged += command; now += 250 })
+        engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> })
+        assertTrue(result.note, result.complete)
+        assertEquals(link.sent, logged)
+        assertTrue(link.sent.contains("ATST0B"))
+        assertFalse(link.sent.contains("ATST64"))
+    }
+    @Test fun keepaliveEmptyReplyDoesNotDiscardAlreadyQueuedListData() = runBlocking {
+        val link = Link(keepalive = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> })
+        assertTrue(result.note, result.listConfirmed)
+        assertTrue(result.complete)
+        assertTrue(link.sent.contains("A10194FF82FF"))
+    }
+    @Test fun udsPendingAndFinalInOneElmBlockAreOneTransaction() = runBlocking {
+        val link = UdsLink(pending = 1)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> })
+        assertTrue(result.note, result.complete)
+        assertEquals(1, link.sent.count { it == "1902AF" })
+    }
+    @Test fun udsPresenceRetriesOnlyCompletedSilenceUpToThreeAttempts() = runBlocking {
+        for (silent in 0..2) {
+            val link = UdsLink(presenceReplies = List(silent) { "NO DATA" } + "7E00")
+            val units = linkedMapOf<String, ControlUnit>()
+            scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            val firstSession = link.sent.indexOf("1003")
+            assertEquals(silent + 1, link.sent.take(firstSession).count { it == "3E00" })
+        }
+    }
+    @Test fun udsPresenceNegativeReplyStopsPresenceRetries() = runBlocking {
+        val link = UdsLink(presenceReplies = listOf("NO DATA", "7F3E11", "7E00"))
+        scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> })
+        assertEquals(2, link.sent.take(link.sent.indexOf("1003")).count { it == "3E00" })
+    }
+    @Test fun udsPresenceIsIndependentOfExtendedSessionAcceptance() = runBlocking {
+        for (presence in listOf("7E00", "7F3E11")) for (session in listOf("NO DATA", "7F1012", "5003")) {
+            val link = UdsLink(presenceReply = presence, sessionReply = session)
+            val engine = ElmEngine(link, { _, _, _, _ -> })
+            val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> })
+            assertTrue("$presence/$session: ${result.note}", result.complete)
+            assertTrue(link.sent.indexOf("3E00") < link.sent.indexOf("1003"))
+            assertTrue(link.sent.contains("1902AF"))
+            assertEquals(session == "5003", link.sent.contains("1001"))
+        }
+    }
+    @Test fun ambiguousPresenceNeverAdvancesAndAllSilentProbesDoNotReadDtc() = runBlocking {
+        for (presence in listOf("NO DATA", "7F1011", "7E01", "7F3E78")) {
+            val link = UdsLink(presenceReply = presence, sessionReply = "NO DATA", identityReply = "NO DATA")
+            val engine = ElmEngine(link, { _, _, _, _ -> })
+            val result = runCatching { scanWithSupplementalInfo(engine, {}, { _, _, _ -> }) }
+            if (presence == "NO DATA") assertFalse(result.getOrThrow().complete)
+            else assertTrue(result.exceptionOrNull() is IOException)
+            assertEquals(presence == "NO DATA", link.sent.contains("1003"))
+            assertFalse(link.sent.contains("1902AF"))
+            assertFalse(link.sent.contains("1001"))
+        }
+    }
+    @Test fun ignoredTesterPresentCanEstablishPresenceBySessionOrPartRead() = runBlocking {
+        for (session in listOf("5003", "7F1012", "NO DATA")) {
+            val link = UdsLink(presenceReply = "NO DATA", sessionReply = session,
+                identityReply = partReply("1K0907530"))
+            val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> })
+            assertTrue(result.note, result.complete)
+            assertTrue(link.sent.contains("1902AF"))
+            assertEquals(if (session == "NO DATA") 2 else 1, link.addressedRequests.count { it == ("77A" to "22F187") })
+            assertEquals(session == "5003", link.sent.contains("1001"))
+            assertTrue(link.sent.containsAll(listOf("ATFCSH710", "ATFCSD300010", "ATFCSM1")))
+        }
+    }
+    @Test fun peerClosedEcuIsRetriedAfterOtherUnitsOnFreshConnection() = runBlocking {
+        for (closes in listOf(1, 2)) {
+            val link = Link(installedReply = "5A9F0D190000016200000172000001", closedDestination = 0x24, closeAttempts = closes)
+            val units = linkedMapOf<String, ControlUnit>()
+            val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+            assertEquals(closes == 1, result.complete)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-72").state)
+            assertEquals(if (closes == 1) ReadState.COMPLETE else ReadState.PARTIAL, units.getValue("VAG-62").state)
+            assertEquals(2, link.sent.count { it == "24C000100003011" })
+            val retry = link.sent.lastIndexOf("24C000100003011")
+            assertTrue(link.sent.indexOf("25C000100003011") < retry)
+            assertEquals(closes, link.sent.count { it == "ATZ" })
+            assertTrue(link.sent.contains("0100"))
+        }
+    }
+    @Test fun dtcFormatComesFromCapabilityReplyRatherThanLogicalAddress() = runBlocking {
+        for ((capability, expected) in listOf("71B80118" to "P0299", "7F3111" to "00665")) {
+            val link = Link(saeReply = capability, dtcReply = "5801029908")
+            val units = linkedMapOf<String, ControlUnit>()
+            val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+            assertTrue(outcome.note, outcome.complete)
+            assertTrue(units.values.all { it.dtcs.single().code == expected })
+            assertEquals(2, link.sent.count { it.endsWith("31B80000") })
+        }
+    }
+    @Test fun rejectedOptionalTpSessionDoesNotPreventDefaultSessionDtcRead() = runBlocking {
+        val link = Link(tpSessionReply = "7F1012")
+        val units = linkedMapOf<String, ControlUnit>()
+        val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertTrue(outcome.note, outcome.complete)
+        assertTrue(units.values.all { it.state == ReadState.COMPLETE })
+        // The optional central probe can now follow Gateway DTC. Its UDS
+        // presence check must not be mistaken for a fallback of Gateway/01.
+        assertFalse(link.presenceReceivers.contains("77A"))
+        assertFalse(link.presenceReceivers.contains("7E8"))
+    }
+    @Test fun listedEcusMayAnswerDtcWithoutAnsweringUnrelatedPreflightServices() = runBlocking {
+        for (backend in 0..3) for (dtc in listOf("59028D", "59028D12345608")) {
+            val quiet = setOf("7BB", "776", "17FE008B")
+            val link = UdsLink(rawCan = backend != 0, includeSteeringAngle = true,
+                includeSteering = true, includeConvenience = true, quietPreflightReceivers = quiet,
+                dtcByReceiver = quiet.associateWith { dtc },
+                nativeBanner = if (backend == 2) "STN1170 v5.6.5" else "?",
+                vtBanner = if (backend == 3) "Synthetic Adapter v2.3.0" else "?")
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = backend != 0)
+            engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            val result = ElmVagScan.scan(engine, { unit ->
+                if (unit.address in setOf("VAG-04", "VAG-16", "VAG-46") && unit.source == "RESPONSE") {
+                    val rx = mapOf("VAG-04" to "7BB", "VAG-16" to "776", "VAG-46" to "17FE008B").getValue(unit.address)
+                    assertTrue("Presence must come from this ECU's own DTC reply", link.addressedRequests.contains(rx to "1902AF"))
+                }
+                units[unit.address] = unit
+            }, { _, _, _ -> }, discoverAdditionalUnits = false)
+            assertTrue("backend=$backend: ${result.note}", result.complete)
+            for ((id, rx) in mapOf("04" to "7BB", "16" to "776", "46" to "17FE008B")) {
+                assertEquals(ReadState.COMPLETE, units.getValue("VAG-$id").state)
+                assertEquals(if (dtc == "59028D") 0 else 1, units.getValue("VAG-$id").dtcs.size)
+                assertEquals(1, link.addressedRequests.count { it == rx to "1902AF" })
+                assertFalse(link.addressedRequests.contains(rx to "1001")) // No extended session was entered.
+            }
+            assertEquals("Датчик угла поворота руля", units.getValue("VAG-04").name)
+            assertEquals("Центральный комфорт", units.getValue("VAG-46").name)
+        }
+    }
+
+    @Test fun listedDtcProbeSurvivesFreshConnectionAfterDamagedOwnReply() = runBlocking {
+        for (backend in 0..3) for (rx in listOf("7BB", "17FE008B"))
+            for (reply in listOf("59028D12345608", "59028D", "7F1933", "NO DATA")) {
+            fun link(reply: String) = UdsLink(rawCan = backend != 0,
+                includeSteeringAngle = rx == "7BB", includeConvenience = rx != "7BB",
+                quietPreflightReceivers = setOf(rx), dtcByReceiver = mapOf(rx to reply),
+                nativeBanner = if (backend == 2) "STN1170 v5.6.5" else "?",
+                vtBanner = if (backend == 3) "Synthetic Adapter v2.3.0" else "?")
+            val old = link("59038D") // Wrong subfunction: no usable fault memory.
+            val fresh = link(reply)
+            val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = backend != 0)
+            engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            var replacements = 0
+            val outcome = runCatching { ElmVagScan.scan(engine, { units[it.address] = it },
+                { _, _, _ -> }, discoverAdditionalUnits = false,
+                recreateEngine = {
+                    check(++replacements == 1) { "Unexpected second replacement" }
+                    ElmEngine(fresh, { _, _, _, _ -> }, manualUds = backend != 0)
+                }) }
+            val complete = reply.startsWith("5902")
+            assertEquals("backend=$backend rx=$rx reply=$reply: $outcome", complete,
+                outcome.getOrNull()?.complete == true)
+            assertTrue("A finished refusal must remain local", outcome.isSuccess)
+            val address = if (rx == "7BB") "VAG-04" else "VAG-46"
+            assertEquals(1, replacements)
+            if (complete) assertEquals(ReadState.COMPLETE, units.getValue(address).state)
+            else assertNotEquals(ReadState.COMPLETE, units.getValue(address).state)
+            assertEquals(if (reply == "59028D12345608") listOf("123456") else emptyList<String>(),
+                units.getValue(address).dtcs.map { it.raw.take(6) })
+            assertEquals(1, old.addressedRequests.count { it == rx to "1902AF" })
+            assertEquals(if (reply == "NO DATA") 2 else 1,
+                fresh.addressedRequests.count { it == rx to "1902AF" })
+            assertFalse(fresh.addressedRequests.contains(rx to "1001"))
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        }
+    }
+
+    @Test fun unansweredListedDtcProbeDoesNotConfirmAnEcuOrBlockOtherReads() = runBlocking {
+        val quiet = setOf("7BB", "17FE008B")
+        val link = UdsLink(includeSteeringAngle = true, includeConvenience = true,
+            includeEngine = true, quietPreflightReceivers = quiet,
+            dtcByReceiver = quiet.associateWith { "NO DATA" })
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { _, _, _ -> }, discoverAdditionalUnits = false)
+        assertFalse(result.complete)
+        for (id in listOf("04", "46")) {
+            val unit = units.getValue("VAG-$id")
+            assertNotEquals(ReadState.COMPLETE, unit.state)
+            assertNotEquals("RESPONSE", unit.source)
+            assertTrue(unit.dtcs.isEmpty())
+        }
+        for (rx in quiet) assertEquals(2, link.addressedRequests.count { it == rx to "1902AF" })
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+    }
+
+    @Test fun candidateWithoutConfirmedListDoesNotAcquireAnExtraDtcProbe() = runBlocking {
+        val link = UdsLink(infoReplies = mapOf("2204A1" to "7F2231"),
+            quietPreflightReceivers = setOf("776"))
+        ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> },
+            allowCandidateFallback = true, discoverAdditionalUnits = false)
+        assertTrue(link.addressedRequests.contains("776" to "3E00"))
+        assertFalse(link.addressedRequests.contains("776" to "1902AF"))
+    }
+
+    @Test fun rejectedOrMalformedListedDtcReplyCannotBecomeNoFaults() = runBlocking {
+        for (reply in listOf("7F1933", "59038D", "59028D1234")) {
+            val link = UdsLink(includeSteering = true, quietPreflightReceivers = setOf("776"),
+                dtcByReceiver = mapOf("776" to reply))
+            val units = linkedMapOf<String, ControlUnit>()
+            val result = runCatching { ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }),
+                { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false) }
+            assertFalse(result.getOrNull()?.complete == true)
+            assertTrue(link.addressedRequests.contains("776" to "1902AF"))
+            val unit = units.getValue("VAG-16")
+            assertNotEquals(ReadState.COMPLETE, unit.state)
+            assertTrue(unit.dtcs.isEmpty())
+            if (reply == "7F1933") assertEquals("RESPONSE", unit.source)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        }
+    }
+
+    @Test fun damagedPreflightDoesNotAuthorizeAnExtraListedDtcRequest() = runBlocking {
+        val link = UdsLink(includeConvenience = true,
+            automatic29Status = "BUFFER FULL")
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = runCatching { ElmVagScan.scan(engine, { units[it.address] = it },
+            { _, _, _ -> }, discoverAdditionalUnits = false) }
+        assertTrue(result.exceptionOrNull() is IOException)
+        assertFalse(link.addressedRequests.contains("17FE008B" to "1902AF"))
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-46").state)
+    }
+
+    @Test fun defaultTpScanReadsFaultMemoryAndNamesWithoutSupplementalInventory() = runBlocking {
+        for (reply in listOf("5800", "5801051924")) {
+            val link = Link(installedReply = "5A9F0D190000010300000142000001",
+                dtcReply = reply, failIdentity = true)
+            val units = linkedMapOf<String, ControlUnit>()
+            val result = ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+                { _, _, _ -> }, discoverAdditionalUnits = false)
+            assertTrue(result.note, result.complete)
+            assertEquals(setOf("VAG-19", "VAG-03", "VAG-42"), units.keys)
+            assertEquals("Дверь водителя", units.getValue("VAG-42").name)
+            assertTrue(units.getValue("VAG-03").name.contains("ABS"))
+            for (unit in units.values) {
+                assertEquals(ReadState.COMPLETE, unit.state)
+                assertEquals(if (reply == "5800") emptyList<String>() else listOf("01305"), unit.dtcs.map { it.code })
+            }
+            assertEquals(3, link.sent.count { it.endsWith("1802FF00") })
+            assertFalse(link.sent.any { it.endsWith("1A9B") || it.drop(6).startsWith("120004") || it.contains("22F19") })
+        }
+    }
+
+    @Test fun defaultUdsScanOmitsSupplementalQueriesAcrossAllFramingBackends() = runBlocking {
+        for (backend in 0..3) for (dtc in listOf("59028D", "59028D12345608")) {
+            val manual = backend != 0
+            val link = UdsLink(rawCan = manual, includeEngine = true, includeSteering = true,
+                includeConvenience = true, dtcReply = dtc,
+                nativeBanner = if (backend == 2) "STN1170 v5.6.5" else "?",
+                vtBanner = if (backend == 3) "Synthetic Adapter v2.3.0" else "?",
+                infoFailure = "io", detailsFailure = "io")
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = manual)
+            engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            val result = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false)
+            assertTrue("backend=$backend: ${result.note}", result.complete)
+            assertEquals(setOf("VAG-19", "VAG-01", "VAG-16", "VAG-46"), units.keys)
+            assertEquals("Электроника рулевого колеса", units.getValue("VAG-16").name)
+            for (unit in units.values) {
+                assertEquals(ReadState.COMPLETE, unit.state)
+                assertEquals(if (dtc == "59028D") 0 else 1, unit.dtcs.size)
+            }
+            assertEquals(4, link.sent.count { it == "1902AF" })
+            assertFalse(link.sent.any { it in setOf("22F197", "22F189", "22F19E", "22F1A2", "220174") || it.startsWith("1906") })
+        }
+    }
+
+    @Test fun defaultScanNeverTurnsUnansweredDtcIntoNoFaults() = runBlocking {
+        val link = UdsLink(dtcReply = "NO DATA")
+        val units = linkedMapOf<String, ControlUnit>()
+        val outcome = runCatching { ElmVagScan.scan(ElmEngine(link, { _, _, _, _ -> }),
+            { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false) }
+        assertFalse(outcome.getOrNull()?.complete == true)
+        assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertTrue(units.getValue("VAG-19").dtcs.isEmpty())
+    }
+
+    @Test fun recordedMetadataFailureMustNotSkipTheSameEcusDtcAfterRecovery() = runBlocking {
+        val recorded = javaClass.getResourceAsStream("/replay/vehicle-0313-72-metadata-failure.tsv")!!
+            .bufferedReader().useLines { lines -> lines.map { line ->
+                val fields = line.split('\t', limit = 2)
+                fields[0] to String(java.util.Base64.getDecoder().decode(fields.getOrNull(1).orEmpty()), Charsets.UTF_8)
+            }.toList() }.let(::withSyntheticTpReceiveWindows)
+        // Only the 21-row failing exchange is vehicle evidence. Discovery,
+        // preceding Gateway DTC and the recovered ECU reply are synthetic.
+        val delegate = Link(installedReply = "5A9F0D190000017200000101000001", dtcReply = "5801051924")
+        val pending = ArrayDeque<Int>()
+        var row = 0
+        var replaying = false
+        val old = object : ElmLink {
+            override val label = "Recorded metadata failure with synthetic surrounding scan"
+            override suspend fun open() = delegate.open()
+            override suspend fun readByte(): Int = pending.pollFirst() ?: delegate.readByte()
+            override fun close() { pending.clear(); delegate.close() }
+            override suspend fun write(bytes: ByteArray) {
+                val cmd = bytes.toString(Charsets.US_ASCII).trim()
+                if (cmd == recorded.first().first) replaying = true
+                if (replaying) {
+                    check(row < recorded.size) { "Command sent on damaged stream: $cmd" }
+                    val expected = recorded[row++]
+                    check(cmd == expected.first) { "Recorded row $row: expected ${expected.first}, got $cmd" }
+                    pending.addAll((expected.second + ">").map { it.code })
+                } else delegate.write(bytes)
+            }
+        }
+        val fresh = Link(dtcReply = "5800")
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        val outcome = scanWithSupplementalInfo(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it },
+            { _, _, _ -> }, discoverAdditionalUnits = false,
+            recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }) })
+        assertEquals(recorded.size, row)
+        assertEquals(1, replacements)
+        assertEquals(listOf("01305"), units.getValue("VAG-19").dtcs.map { it.code })
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-72").state)
+        assertTrue(outcome.note, outcome.complete)
+        assertTrue(fresh.sent.contains("25C000100003011"))
+        assertEquals(0, fresh.identityDestinations.count { it == 0x25 }) // Failed metadata is not repeated.
+    }
+
+    @Test fun recordedPrimaryDtcSilenceGetsOneExtraScanTurn() = runBlocking {
+        for (reply in listOf("5801051924", "5800", "7F1833", "NO DATA", "IO", "CANCEL", "UNREADY")) {
+            val recorded = javaClass.getResourceAsStream("/replay/vehicle-0314-72-primary-dtc-failure.tsv")!!
+                .bufferedReader().useLines { lines -> lines.map { line ->
+                    val fields = line.split('\t', limit = 2)
+                    fields[0] to String(java.util.Base64.getDecoder().decode(fields.getOrNull(1).orEmpty()), Charsets.UTF_8)
+                }.toList() }.let(::withSyntheticTpReceiveWindows)
+            // The resource has 25 actual exchanges. The receive-window settings
+            // and count hints above are synthetic adaptations, as are Gateway,
+            // installation scope and all replacement responses below.
+            val delegate = Link(installedReply = "5A9F0D190000017200000101000001", dtcReply = "5801051924")
+            val pending = ArrayDeque<Int>()
+            var row = 0
+            var replaying = false
+            val old = object : ElmLink {
+                override val label = "Recorded primary-DTC failure; synthetic surrounding scan"
+                override suspend fun open() = delegate.open()
+                override suspend fun readByte(): Int = pending.pollFirst() ?: delegate.readByte()
+                override fun close() { pending.clear(); delegate.close() }
+                override suspend fun write(bytes: ByteArray) {
+                    val cmd = bytes.toString(Charsets.US_ASCII).trim()
+                    if (cmd == recorded.first().first) replaying = true
+                    if (!replaying) delegate.write(bytes)
+                    else {
+                        check(row < recorded.size) { "Command on abandoned stream: $cmd" }
+                        val expected = recorded[row++]
+                        check(cmd == expected.first) { "Recorded row $row: expected ${expected.first}, got $cmd" }
+                        pending.addAll((expected.second + ">").map { it.code })
+                    }
+                }
+            }
+            val fresh = Link(obdReply = if (reply == "UNREADY") "NO DATA" else "7E8064100BE3EA813",
+                dtcReply = "5800", dtcByDestination = mapOf(0x25 to reply))
+            val secondFresh = Link(dtcReply = "5800", dtcByDestination = mapOf(0x25 to reply))
+            val terminal = Link(dtcReply = "5800")
+            var freshClosed = false
+            val replacement = object : ElmLink {
+                override val label = "Synthetic replacement failure boundary"
+                override suspend fun open() { freshClosed = false; fresh.open() }
+                override fun close() { freshClosed = true; fresh.close() }
+                override suspend fun readByte() = fresh.readByte()
+                override suspend fun write(bytes: ByteArray) {
+                    val cmd = bytes.toString(Charsets.US_ASCII).trim()
+                    if (cmd.endsWith("1802FF00")) {
+                        if (reply == "IO") throw IOException("Synthetic lost replacement stream")
+                        if (reply == "CANCEL") throw CancellationException("Synthetic cancelled replacement read")
+                    }
+                    fresh.write(bytes)
+                }
+            }
+            val units = linkedMapOf<String, ControlUnit>()
+            var replacements = 0
+            val events = mutableListOf<String>()
+            var ownedReplacement: ElmEngine? = null
+            // Production's MainViewModel owns the current replacement and
+            // closes it in finally, including physical IO and cancellation.
+            val call = runCatching { try { ElmVagScan.scan(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it },
+                { name, _, _ -> events += name }, discoverAdditionalUnits = false,
+                recreateEngine = {
+                    val next: ElmLink = when (++replacements) { 1 -> replacement; 2 -> secondFresh; 3 -> terminal; else -> error("Unbounded primary retry") }
+                    ElmEngine(next, { _, _, _, _ -> }).also { ownedReplacement = it }
+                }) } finally { ownedReplacement?.close() } }
+            assertEquals(recorded.size, row)
+            if (reply in setOf("IO", "CANCEL", "UNREADY")) {
+                if (reply == "CANCEL") assertTrue("$reply: $call", call.exceptionOrNull() is CancellationException)
+                else assertTrue("$reply: $call", call.exceptionOrNull() is IOException)
+                assertEquals(1, replacements)
+                assertTrue(freshClosed)
+                assertEquals(listOf("01305"), units.getValue("VAG-19").dtcs.map { it.code })
+                assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-72").state)
+                assertTrue(units.getValue("VAG-72").dtcs.isEmpty())
+                assertEquals(ReadState.NOT_QUERIED, units.getValue("VAG-01").state)
+                if (reply == "UNREADY") assertFalse(fresh.sent.contains("25C000100003011"))
+                continue
+            }
+            val outcome = call.getOrThrow()
+            assertTrue("The affected ECU must be retried on a fresh channel", fresh.sent.contains("25C000100003011"))
+            assertFalse(terminal.sent.contains("25C000100003011"))
+            assertEquals(1, events.count { it == "VAG_PRIMARY_DTC_RECOVERY" })
+            assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOf("25C000100003011"))
+            assertEquals(listOf("01305"), units.getValue("VAG-19").dtcs.map { it.code })
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+            if (reply.startsWith("58")) {
+                assertTrue(outcome.note, outcome.complete)
+                assertEquals(ReadState.COMPLETE, units.getValue("VAG-72").state)
+                assertEquals(if (reply == "5800") emptyList<String>() else listOf("01305"),
+                    units.getValue("VAG-72").dtcs.map { it.code })
+                assertEquals(1, replacements)
+            } else {
+                assertFalse(outcome.complete)
+                assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-72").state)
+                assertTrue(units.getValue("VAG-72").dtcs.isEmpty())
+                // The existing command-level budget can replace one stream
+                // inside the additional turn; no third scan turn is permitted.
+                assertEquals(if (reply == "NO DATA") 3 else 1, replacements)
+            }
+        }
+    }
+
+    @Test fun healthySilentCapabilityDoesNotReopenTheChannelBeforeActualDtcRead() = runBlocking {
+        val link = Link(silentCapability = true)
+        val rejected = Link(saeReply = "7F3111")
+        scanWithSupplementalInfo(ElmEngine(rejected, { _, _, _, _ -> }), {}, { _, _, _ -> })
+        val units = linkedMapOf<String, ControlUnit>()
+        val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertTrue(outcome.note, outcome.complete)
+        assertTrue(units.values.all { it.state == ReadState.COMPLETE })
+        assertEquals(2, link.sent.count { it.endsWith("31B80000") })
+        assertEquals(2, link.sent.count { it.endsWith("1802FF00") })
+        assertFalse(link.sent.any { it.endsWith("1800FF00") })
+        // A completed silence with matching live keepalives is not a damaged
+        // stream. Unsupported format detection must not require another open.
+        assertEquals(rejected.sent.filter { it.endsWith("C000100003011") },
+            link.sent.filter { it.endsWith("C000100003011") })
+        assertFalse(link.sent.contains("ATZ"))
+    }
+    @Test fun centralIdentityChoosesEachEcuTransportAndIsCachedForTheWholeScan() = runBlocking {
+        for (family in listOf("1K0", "5Q0")) {
+            val tp = Link(missingGateway = true, missingCentral = true, missingSupplemental = true)
+            val uds = UdsLink(includeCentral = true, includeEngine = true,
+                centralIdentityReply = partReply(family + "937087"))
+            val sent = mutableListOf<String>()
+            val mixed = object : ElmLink {
+                override val label = "Synthetic chassis policy"
+                var rawCan = false
+                var last: ElmLink = uds
+                override suspend fun open() {}
+                override fun close() { tp.close(); uds.close() }
+                override suspend fun readByte() = last.readByte()
+                override suspend fun write(bytes: ByteArray) {
+                    val command = bytes.toString(Charsets.US_ASCII).trim()
+                    sent += command
+                    if (command == "ATCAF0") rawCan = true
+                    if (command == "ATCAF1") rawCan = false
+                    last = if (rawCan) tp else uds
+                    last.write(bytes)
+                }
+            }
+            val units = linkedMapOf<String, ControlUnit>()
+            val outcome = scanWithSupplementalInfo(ElmEngine(mixed, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+            assertTrue("$family: ${outcome.note}", outcome.complete)
+            assertEquals(setOf("VAG-19", "VAG-09", "VAG-01"), units.keys)
+            assertEquals(4, sent.count { it == "20C000100003011" })
+            assertEquals(family == "1K0", sent.contains("01C000100003011"))
+            assertEquals(family == "1K0", sent.contains("33C000100003011"))
+            assertEquals(2 + if (family == "5Q0") 1 else 0, sent.count { it == "1902AF" })
+            assertEquals(2 + if (family == "5Q0") 1 else 0, sent.count { it == "22F187" })
+        }
+    }
+    @Test fun failureDuringRecoveryStopsBeforeTheNextEcu() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000016200000172000001", closedDestination = 0x24,
+            closeAttempts = 2, failReset = true)
+        val units = linkedMapOf<String, ControlUnit>()
+        // Start once to make the subsequent recovery reset the failing one.
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val result = runCatching { scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> }) }
+        assertTrue(result.exceptionOrNull() is IOException)
+        assertEquals("ATZ", link.sent.last())
+        assertFalse(link.sent.contains("25C000100003011"))
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+    }
+    @Test fun failedRecoveryClosesItsReplacementAndPreservesPreviouslyReadDtcs() = runBlocking<Unit> {
+        for (failure in listOf("open", "vehicle-proof", "cancel-confirmation")) {
+            val old = Link(installedReply = "5A9F0D190000016200000172000001", closedDestination = 0x24,
+                dtcReply = "5801051924")
+            val delegate = Link()
+            val sent = mutableListOf<String>()
+            val pending = ArrayDeque<Int>()
+            var closes = 0
+            val replacement = object : ElmLink {
+                override val label = "Scripted failed recovery"
+                override suspend fun open() {
+                    if (failure == "open") throw IOException("opening failed")
+                    delegate.open()
+                }
+                override suspend fun write(bytes: ByteArray) {
+                    val command = bytes.toString(Charsets.US_ASCII).trim()
+                    sent += command
+                    if (failure == "vehicle-proof" && command == "0100")
+                        pending.addAll("NO DATA\r>".map { it.code })
+                    else delegate.write(bytes)
+                }
+                override suspend fun readByte(): Int = pending.pollFirst() ?: delegate.readByte()
+                override fun close() { closes++; pending.clear(); delegate.close() }
+            }
+            val units = linkedMapOf<String, ControlUnit>()
+            val error = runCatching {
+                scanWithSupplementalInfo(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it },
+                    { command, _, outcome ->
+                        if (failure == "cancel-confirmation" && command == "VAG_CHANNEL_RECOVERY" && outcome == "CONFIRMED")
+                            throw CancellationException("Stopped after vehicle proof")
+                    }, identifyEcus = false, discoverAdditionalUnits = false,
+                    recreateEngine = { ElmEngine(replacement, { _, _, _, _ -> }) })
+            }.exceptionOrNull()
+            if (failure == "cancel-confirmation") assertTrue(error is CancellationException)
+            else assertTrue("$failure: $error", error is IOException)
+            assertTrue("$failure: replacement leaked", closes > 0)
+            assertFalse(sent.any { it.endsWith("C000100003011") })
+            assertFalse(old.sent.contains("25C000100003011"))
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals(listOf("01305"), units.getValue("VAG-19").dtcs.map { it.code })
+            assertNotEquals(ReadState.COMPLETE, units.getValue("VAG-72").state)
+        }
+    }
+
+    @Test fun recoveryFactoryReplacesTheClosedTransportBeforeContinuing() = runBlocking {
+        val old = Link(installedReply = "5A9F0D190000016200000172000001", closedDestination = 0x24)
+        val fresh = Link()
+        var created = 0
+        val units = linkedMapOf<String, ControlUnit>()
+        val outcome = scanWithSupplementalInfo(ElmEngine(old, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+            recreateEngine = { created++; ElmEngine(fresh, { _, _, _, _ -> }) })
+        assertTrue(outcome.note, outcome.complete)
+        assertEquals(1, created)
+        assertEquals("ATST0B", old.sent.last())
+        assertEquals("ATZ", fresh.sent.first())
+        assertTrue(fresh.sent.contains("0100"))
+        assertTrue(fresh.sent.contains("25C000100003011"))
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-62").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-72").state)
+        assertFalse(fresh.sent.any { it.endsWith("1A9F") })
+    }
+    @Test fun recorded036CloseAndResetContinueQueueWithExplicitSyntheticTail() = runBlocking {
+        val recorded = javaClass.getResourceAsStream("/replay/vehicle-036-oem.tsv")!!.bufferedReader().useLines { lines ->
+            lines.map { line -> val fields = line.split('\t', limit = 2)
+                fields[0] to String(java.util.Base64.getDecoder().decode(fields[1]), Charsets.UTF_8)
+            }.toList()
+        }
+        val probes = recorded.flatMap { row ->
+            if (row.first == "3E00" && row.second.trim() == "NO DATA")
+                listOf(row, "1003" to "NO DATA", "22F187" to "NO DATA") else listOf(row)
+        }
+        // This historical client closed/reopened Gateway after NRC11. Keep
+        // the recorded per-ECU payloads and later real62 close/reset, but
+        // explicitly inject a peer A8 to exercise today's justified reopen
+        // path. Remove only the now-redundant client disconnect. Healthy
+        // same-channel discovery is checked independently above.
+        val peerClosed = withExplicitGatewayPeerClose(probes)
+        // All replies after the captured prefix are synthetic, including retry.
+        val prefix = withExplicitPhysicalFlowControl(peerClosed)
+        val link = Link(recordedPrefix = prefix)
+        val units = linkedMapOf<String, ControlUnit>()
+        val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }),
+            { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false, identifyEcus = false)
+        assertTrue(outcome.listConfirmed)
+        assertFalse(outcome.complete) // Real04/46 remain unconfirmed.
+        assertEquals(18, units.size)
+        assertEquals(listOf("01305", "01304"), units.getValue("VAG-19").dtcs.map { it.code })
+        for (id in listOf("62", "72", "16", "08")) assertEquals(id, ReadState.COMPLETE, units.getValue("VAG-$id").state)
+        assertEquals(2, link.sent.count { it == "24C000100003011" })
+        assertEquals(1, link.sent.count { it == "ATZ" }) // Actual recorded recovery.
+    }
+    private fun partReply(part: String) = "62F187" + VagOemReadOnly.hex(part.map { it.code })
+    @Test fun gatewayLogicalFallbackReadsEachOwnMemoryAcrossFramingBackends() = runBlocking {
+        for (backend in listOf("CAF1", "RAW", "STN", "VT")) {
+            val link = UdsLink(identityReply = partReply("5Q0907530"), bitmapReply = "7F2231",
+                infoReplies = mapOf("222A2A" to "622A2A19160316"), rawCan = backend == "RAW",
+                nativeBanner = if (backend == "STN") "STN1170 v5.6.5" else "?",
+                vtBanner = if (backend == "VT") "VLINKER v2.2.78" else "?")
+            val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = backend == "RAW")
+            engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            val result = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false)
+            assertTrue("$backend: ${result.note}", result.complete)
+            assertEquals(setOf("VAG-19", "VAG-16", "VAG-03"), units.keys)
+            assertTrue(units.values.all { it.state == ReadState.COMPLETE && it.source == "RESPONSE" })
+            assertEquals(listOf("77A", "776", "77D"), link.addressedRequests.filter { it.second == "1902AF" }.map { it.first })
+            assertEquals(1, link.sent.count { it == "222A2A" })
+            assertFalse(link.sent.any { it in setOf("22F1B7", "2204A3", "222A28") })
+        }
+    }
+    @Test fun codedAndEventOnlyHintsDoNotBecomeFoundOrEmptyFaultMemories() = runBlocking {
+        val coded = "6204A3" + VagOemReadOnly.hex(List(32) { if (it == 1) 0x40 else 0 })
+        val events = "622A28" + VagOemReadOnly.hex(List(32) { if (it == 2) 0x08 else 0 })
+        val link = UdsLink(identityReply = partReply("5Q0907530"), bitmapReply = "7F2231",
+            infoReplies = mapOf("2204A3" to coded, "222A28" to events),
+            quietPreflightReceivers = setOf("778", "77D"))
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false, allowGatewayIdentityFallback = false)
+        assertFalse(result.listConfirmed); assertFalse(result.complete)
+        assertEquals(setOf("VAG-19", "VAG-09", "VAG-03"), units.keys)
+        for (id in listOf("VAG-09", "VAG-03")) {
+            val unit = units.getValue(id)
+            assertEquals("CANDIDATE", unit.source); assertNotEquals(ReadState.COMPLETE, unit.state)
+            assertTrue(unit.dtcs.isEmpty()); assertTrue(unit.answeredModes.isEmpty())
+        }
+        assertEquals(listOf("77A"), link.addressedRequests.filter { it.second == "1902AF" }.map { it.first })
+    }
+    @Test fun installedIndexAndCodedHintKeepDifferentPresenceStates() = runBlocking {
+        val coded = "6204A3" + VagOemReadOnly.hex(List(32) { if (it == 1) 0x40 else 0 })
+        val link = UdsLink(identityReply = partReply("5Q0907530"), bitmapReply = "7F2231",
+            infoReplies = mapOf("22F1B7" to "62F1B70013", "2204A3" to coded))
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertTrue(result.listConfirmed); assertFalse(result.complete)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        assertEquals("CANDIDATE", units.getValue("VAG-09").source)
+        assertTrue(units.getValue("VAG-09").answeredModes.isEmpty())
+        assertEquals(listOf("77A", "77D"), link.addressedRequests.filter { it.second == "1902AF" }.map { it.first })
+    }
+    @Test fun codedHintsDoNotShrinkAnIndependentlyPermittedCatalog() = runBlocking {
+        val coded = "6204A3" + VagOemReadOnly.hex(List(32) { if (it == 1) 0x40 else 0 })
+        val link = UdsLink(identityReply = partReply("5Q0907530"), bitmapReply = "7F2231",
+            infoReplies = mapOf("2204A3" to coded))
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        val failure = runCatching { ElmVagScan.scan(engine, {
+            units[it.address] = it
+            if (it.address == "VAG-01") throw CancellationException("Fixture scope checked")
+        }, { _, _, _ -> }, allowCandidateFallback = true, identifyEcus = false, discoverAdditionalUnits = false) }.exceptionOrNull()
+        assertTrue(failure.toString(), failure is CancellationException)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals("CANDIDATE", units.getValue("VAG-01").source)
+    }
+    @Test fun logicalPowertrainListCanSelectTheKnown29BitEndpointWithoutDuplicatingTheUnit() = runBlocking {
+        val link = UdsLink(identityReply = partReply("5Q0907530"), bitmapReply = "7F2231",
+            infoReplies = mapOf("222A2A" to "622A2A1901"), quietPreflightReceivers = setOf("7E8"),
+            dtcByReceiver = mapOf("7E8" to "NO DATA", "17FE0076" to "59028D12345608"))
+        val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+            identifyEcus = false, discoverAdditionalUnits = false)
+        assertTrue(result.note, result.complete)
+        assertEquals(setOf("VAG-19", "VAG-01"), units.keys)
+        assertEquals(listOf("123456"), units.getValue("VAG-01").dtcs.map { it.code })
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals(1, link.addressedRequests.count { it == "17FE0076" to "1902AF" })
+        assertFalse(units.containsKey("VAG-FF"))
+    }
+    @Test fun sourceIoAndCancellationDoNotSendAnotherDidOrSessionClose() = runBlocking {
+        for (mode in listOf("io", "cancel")) {
+            val link = UdsLink(identityReply = partReply("5Q0907530"), bitmapReply = "7F2231", gatewaySourceFailure = mode)
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            val failure = runCatching { ElmVagScan.scan(engine, {}, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false) }.exceptionOrNull()
+            if (mode == "io") assertTrue(failure is IOException) else assertTrue(failure is CancellationException)
+            assertEquals("222A2A", link.sent.last())
+            assertFalse(link.sent.contains("22F1B7"))
+        }
+    }
+    @Test fun malformedOrDeniedGatewaySourcesDoNotAuthorizeMoreDiscoveryReads() = runBlocking {
+        for (mode in listOf("malformed", "denied")) {
+            val link = UdsLink(identityReply = partReply("5Q0907530"),
+                bitmapReply = if (mode == "denied") "7F2233" else "7F2231",
+                infoReplies = mapOf("222A2A" to "622A2A00"))
+            val engine = ElmEngine(link, { _, _, _, _ -> }); engine.connect()
+            val units = linkedMapOf<String, ControlUnit>()
+            val result = ElmVagScan.scan(engine, { units[it.address] = it }, { _, _, _ -> },
+                identifyEcus = false, discoverAdditionalUnits = false, allowGatewayIdentityFallback = false)
+            assertFalse(result.listConfirmed); assertFalse(result.complete)
+            assertFalse(link.sent.contains("22F1B7"))
+            if (mode == "denied") assertFalse(link.sent.contains("222A2A"))
+            assertTrue(units.values.none { it.state == ReadState.COMPLETE })
+        }
+    }
+    @Test fun activeFilterDoesNotSuppressListedEcuReadsOrInventFailures() = runBlocking {
+        val link = UdsLink(includeCentral = true, infoReplies = mapOf("22539B" to "62539B0101"))
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertTrue(result.note, result.complete)
+        assertTrue(result.note.contains("фильтр"))
+        assertEquals(setOf("VAG-19", "VAG-09"), units.keys)
+        assertTrue(units.values.all { it.state == ReadState.COMPLETE })
+        assertTrue(link.sent.contains("20C000100003011"))
+        assertFalse(link.sent.any { it.startsWith("2E") || it.startsWith("27") || it.startsWith("29") })
+        assertEquals(1, link.sent.count { it == "22539B" })
+    }
+    @Test fun listedCanEngineGetsOneSetupRetryBeforeUdsFallback() = runBlocking {
+        val link = UdsLink(includeEngine = true)
+        val units = linkedMapOf<String, ControlUnit>()
+        val events = mutableListOf<String>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { command, _, _ -> events += command })
+        assertTrue(result.note, result.complete)
+        assertEquals(8, link.sent.count { it == "01C000100003011" })
+        assertEquals(1, events.count { it == "VAG_ENGINE_CONNECTION_RETRY" })
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertTrue(link.sent.lastIndexOf("01C000100003011") < link.sent.indexOf("ATCRA7E8"))
+    }
+    @Test fun cancellationBeforeEngineRetryPreventsFurtherTraffic() = runBlocking {
+        val link = UdsLink(includeEngine = true)
+        val failure = runCatching {
+            scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { command, _, _ ->
+                if (command == "VAG_ENGINE_CONNECTION_RETRY") throw CancellationException("Stop")
+            })
+        }.exceptionOrNull()
+        assertTrue(failure is CancellationException)
+        assertEquals(4, link.sent.count { it == "01C000100003011" })
+        assertEquals("01C000100003011", link.sent.last())
+        assertFalse(link.sent.contains("ATCRA7E8"))
+    }
+    @Test fun wrongOptionalDtcEnvelopePreservesFaultAndContinuesOtherEcus() = runBlocking {
+        fun text(did: String, value: String) = "62$did" + VagOemReadOnly.hex(value.map { it.code })
+        for (manual in listOf(false, true)) {
+            val old = UdsLink(includeEngine = true, rawCan = manual, dtcReply = "59028D12345608",
+                detailsReply = "590665432108010203", infoReplies = mapOf(
+                    "22F19E" to text("F19E", "EV_TEST_UNIT"), "22F1A2" to text("F1A2", "001")))
+            val fresh = UdsLink(rawCan = manual)
+            val units = linkedMapOf<String, ControlUnit>()
+            var replacements = 0
+            val engine = ElmEngine(old, { _, _, _, _ -> }, manualUds = manual)
+            engine.connect()
+            scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> }, discoverAdditionalUnits = false,
+                recreateEngine = {
+                    replacements++
+                    assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+                    ElmEngine(fresh, { _, _, _, _ -> }, manualUds = manual)
+                })
+            assertEquals(1, replacements)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+            assertFalse(fresh.sent.contains("1906123456FF"))
+            assertEquals(1, old.sent.count { it == "1906123456FF" })
+        }
+    }
+    @Test fun udsDtcIsPublishedBeforeOptionalExtendedRecordFailures() = runBlocking {
+        fun text(did: String, value: String) = "62$did" + VagOemReadOnly.hex(value.map { it.code })
+        for (mode in listOf("raw", "reject", "duplicate", "wrong-code", "io", "cancel")) {
+            val link = UdsLink(dtcReply = "59028D12345608", infoReplies = mapOf(
+                "22F19E" to text("F19E", "EV_TEST_UNIT"), "22F1A2" to text("F1A2", "001")),
+                detailsReply = when (mode) { "raw" -> "590612345608010203"; "duplicate" -> "590612345608010203010405"; "wrong-code" -> "590665432108010203"; else -> "7F1931" },
+                detailsFailure = mode.takeIf { it in setOf("io", "cancel") })
+            val units = linkedMapOf<String, ControlUnit>()
+            val events = mutableListOf<String>()
+            val result = runCatching { scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }),
+                { units[it.address] = it }, { command, _, _ -> events += command }) }
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals("123456", units.getValue("VAG-19").dtcs.single().code)
+            assertEquals(1, link.sent.count { it == "1906123456FF" })
+            if (mode in setOf("raw", "reject", "duplicate")) assertTrue(result.getOrThrow().complete)
+            else {
+                if (mode == "cancel") assertTrue(result.exceptionOrNull() is CancellationException)
+                else assertTrue(result.exceptionOrNull() is IOException)
+                assertEquals("1906123456FF", link.sent.last())
+            }
+        }
+    }
+    @Test fun kwpAdditionalRecordsUseTheActualCodeAndKeepOriginalDtc() = runBlocking {
+        val link = Link(detailsReply = "5200000000")
+        val units = linkedMapOf<String, ControlUnit>()
+        val events = mutableListOf<Pair<String, String>>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { command, _, state -> events += command to state })
+        assertTrue(result.note, result.complete)
+        assertEquals("P0299", units.getValue("VAG-01").dtcs.single().code)
+        assertEquals(1, link.sent.count { it.endsWith("1200040299") })
+        assertTrue(events.contains("VAG_DTC_DETAILS_01" to "RAW_ONLY"))
+    }
+    @Test fun cleanCloseDuringDetailsKeepsDtcAndContinuesNextEcuWithoutRepeatingIt() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", closeDetailsAt = 1)
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+            discoverAdditionalUnits = false)
+        assertTrue(result.note, result.complete)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals("P0299", units.getValue("VAG-01").dtcs.single().code)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        assertEquals(1, link.sent.count { it == "01C000100003011" })
+        assertEquals(1, link.sent.count { it.endsWith("1200040299") })
+        assertEquals(1, link.sent.count { it == "ATZ" })
+        assertTrue(link.sent.indexOf("0100") < link.sent.indexOf("03C000100003011"))
+    }
+    @Test fun malformedKwpOptionalRecordKeepsDtcAndContinuesTheNextEcu() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", detailsReply = "520001020304")
+        val units = linkedMapOf<String, ControlUnit>()
+        val events = mutableListOf<String>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }),
+            { units[it.address] = it }, { command, text, _ -> events += "$command:$text" }, discoverAdditionalUnits = false)
+        assertTrue(result.note, result.complete)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals("P0299", units.getValue("VAG-01").dtcs.single().code)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        assertTrue(events.any { it.startsWith("VAG_DTC_DETAILS_01:") && it.contains("INVALID_RECORDS") })
+        assertEquals(1, link.sent.count { it.endsWith("1200040299") })
+    }
+    @Test fun completeDtcFollowedByCleanCloseDoesNotBecomePartial() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", closeAfterReply = "1800FF00")
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { _, _, _ -> }, discoverAdditionalUnits = false)
+        assertTrue(result.note, result.complete)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals("P0299", units.getValue("VAG-01").dtcs.single().code)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        assertEquals(1, link.sent.count { it == "01C000100003011" })
+        assertFalse(link.sent.any { it.endsWith("1200040299") })
+        assertFalse(link.sent.contains("ATZ"))
+    }
+    @Test fun cleanCloseAfterCapabilityUsesNewChannelAndKeepsCachedMetadata() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", closeAfterReply = "31B80000")
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { _, _, _ -> }, discoverAdditionalUnits = false)
+        assertTrue(result.note, result.complete)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-01").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        assertEquals(2, link.sent.count { it == "01C000100003011" })
+        assertEquals(1, link.sent.count { it.endsWith("1800FF00") })
+        assertFalse(link.sent.contains("ATZ"))
+    }
+    @Test fun repeatedCleanServiceCloseHasFiniteRetriesAndDoesNotStopOtherEcus() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010100000103000001", closeAfterReply = "1089")
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { _, _, _ -> }, discoverAdditionalUnits = false)
+        assertFalse(result.complete)
+        assertEquals(ReadState.PARTIAL, units.getValue("VAG-01").state)
+        assertTrue(units.getValue("VAG-01").dtcs.isEmpty())
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-03").state)
+        assertEquals(4, link.sent.count { it == "01C000100003011" })
+        assertFalse(link.sent.any { it.endsWith("1800FF00") })
+        assertFalse(link.sent.contains("ATZ"))
+    }
+    @Test fun udsPublishesDtcBeforeReadingOptionalDescriptionFields() = runBlocking {
+        fun textReply(did: String, value: String) = "62$did" + VagOemReadOnly.hex(value.map { it.code })
+        val link = UdsLink(identityReply = partReply("1K0907530"), infoReplies = mapOf(
+            "22F197" to textReply("F197", "TEST CONTROLLER"), "22F189" to textReply("F189", "9999"),
+            "22F19E" to textReply("F19E", "EV_TEST_UNIT"), "220174" to "62017401"))
+        val units = linkedMapOf<String, ControlUnit>()
+        val events = mutableListOf<Pair<String, String>>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it },
+            { command, _, state -> events += command to state })
+        assertTrue(result.note, result.complete)
+        for (request in listOf("22F197", "22F189", "22F19E", "220174")) {
+            assertEquals(1, link.sent.count { it == request })
+            assertTrue(link.sent.indexOf("1902AF") < link.sent.indexOf(request))
+        }
+        assertTrue(units.getValue("VAG-19").note.contains("ПО 9999"))
+        assertTrue(events.contains("VAG_ECU_INFO_19" to "PARSED"))
+    }
+    @Test fun physicalUdsEnablesAllowedAdaptiveRequestsWithItsOneSecondWindow() = runBlocking {
+        val link = UdsLink()
+        scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> })
+        assertTrue(link.sent.indexOf("ATSTFA") >= 0)
+        assertTrue(link.sent.indexOf("ATSTFA") < link.sent.indexOf("ATAT1"))
+        assertTrue(link.sent.indexOf("3E00") < link.sent.indexOf("ATAT1"))
+        assertTrue(link.sent.indexOf("1003") < link.sent.indexOf("ATAT1"))
+        assertTrue(link.sent.indexOf("ATAT1") < link.sent.indexOf("22F187"))
+    }
+    @Test fun unsupportedAdaptiveTimingFallsBackBeforeItsFirstIdentificationRead() = runBlocking {
+        val link = UdsLink(adaptiveReply = "?")
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> })
+        assertTrue(result.complete)
+        val position = link.sent.indexOf("ATAT1")
+        assertTrue(position >= 0)
+        assertTrue(link.sent.indexOf("3E00") < position)
+        assertEquals("ATAT0", link.sent[position + 1])
+        assertTrue(link.sent.indexOf("1003") < position)
+        assertTrue(position + 1 < link.sent.indexOf("22F187"))
+    }
+    @Test fun malformedAdaptiveReplyCannotStartIdentificationOrDtcRead() = runBlocking {
+        val link = UdsLink(adaptiveReply = "BUFFER FULL")
+        val failure = runCatching { scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> }) }.exceptionOrNull()
+        assertTrue(failure.toString(), failure is IOException)
+        assertTrue(link.sent.contains("3E00"))
+        assertTrue(link.sent.contains("1003"))
+        assertFalse(link.sent.contains("22F187"))
+        assertFalse(link.sent.contains("1902AF"))
+    }
+    @Test fun tpPreflightIoCannotInventAnUnreadDtc() = runBlocking {
+        val link = Link(failIdentity = true, dtcReply = "5801051924")
+        val units = linkedMapOf<String, ControlUnit>()
+        val failure = runCatching { scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }),
+            { units[it.address] = it }, { _, _, _ -> }) }.exceptionOrNull()
+        assertTrue(failure is IOException)
+        assertEquals(ReadState.PARTIAL, units.getValue("VAG-19").state)
+        assertTrue(units.getValue("VAG-19").dtcs.isEmpty())
+        assertFalse(link.sent.any { it.endsWith("1802FF00") })
+    }
+    @Test fun missingOptionalUdsFieldsNeverBecomeMissingDtcResponse() = runBlocking {
+        val link = UdsLink(infoReplies = listOf("22F197", "22F189", "22F19E", "220174").associateWith { "NO DATA" })
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertTrue(result.note, result.complete)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertTrue(link.sent.contains("1902AF"))
+        assertEquals(2, link.sent.count { it == "22F19E" })
+    }
+    @Test fun brokenOrCancelledDescriptionReadStopsTrafficAndPreservesTheAlreadyReadDtc() = runBlocking {
+        for (mode in listOf("wrong-did", "io", "cancel")) {
+            val link = UdsLink(infoReplies = if (mode == "wrong-did") mapOf("22F197" to "62F18939393939") else emptyMap(),
+                infoFailure = mode.takeIf { it != "wrong-did" }, dtcReply = "59028D12345608")
+            val units = linkedMapOf<String, ControlUnit>()
+            val failure = runCatching { scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }),
+                { units[it.address] = it }, { _, _, _ -> }) }.exceptionOrNull()
+            if (mode == "cancel") assertTrue(failure is CancellationException) else assertTrue(failure is IOException)
+            assertEquals("22F197", link.sent.last())
+            assertFalse(link.sent.contains("22F189"))
+            assertEquals(1, link.sent.count { it == "1902AF" })
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertEquals(1, units.getValue("VAG-19").dtcs.size)
+        }
+    }
+    @Test fun validatedPartNumberSelectsTheActualInstallationFormat() = runBlocking {
+        for ((part, bitmap) in listOf(
+            "5Q0907530" to ("01" + "00".repeat(31)),
+            "4G0907468" to ("000008" + "00".repeat(6)))) {
+            val link = UdsLink(identityReply = partReply(part), bitmapReply = "622A26$bitmap")
+            val units = linkedMapOf<String, ControlUnit>()
+            val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+                allowCandidateFallback = false, readGatewayIdentity = true)
+            assertTrue(outcome.note, outcome.complete)
+            assertEquals(setOf("VAG-19"), units.keys)
+            assertTrue(link.sent.indexOf("22F187") < link.sent.indexOf("222A26"))
+            assertFalse(link.sent.contains("2204A1"))
+            assertEquals(1, link.addressedRequests.count { it == ("77A" to "22F187") })
+        }
+    }
+    @Test fun unknownPositionsKeepCoverageIncomplete() = runBlocking {
+        for ((part, bitmap) in listOf(
+            "5Q0907530" to ("01" + "00".repeat(30) + "01"))) {
+            val link = UdsLink(identityReply = partReply(part), bitmapReply = "622A26$bitmap")
+            val units = linkedMapOf<String, ControlUnit>()
+            val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+                allowCandidateFallback = false)
+            assertTrue(outcome.listConfirmed)
+            assertFalse(outcome.complete)
+            assertEquals(setOf("VAG-19"), units.keys)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        }
+    }
+    @Test fun mk8ProductionScanUsesFunctionalListAndRestoresPhysicalSessionBeforeClose() = runBlocking {
+        val link = UdsLink(identityReply = partReply("5WA907530"), bitmapReply = "622A2601" + "00".repeat(31))
+        val units = linkedMapOf<String, ControlUnit>()
+        val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertTrue(outcome.note, outcome.complete)
+        assertEquals(setOf("VAG-19"), units.keys)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertFalse(link.sent.contains("222A26"))
+        val functional = link.sent.indexOf("03222A2600000000")
+        val close = link.sent.indexOf("1001")
+        assertTrue(link.sent.indexOf("1003") < functional)
+        assertTrue(functional < close)
+        val restoration = link.sent.subList(functional, close)
+        assertTrue(restoration.contains("ATCAF1"))
+        assertTrue(restoration.contains("ATCRA77A"))
+        assertTrue(restoration.contains("ATFCSH710"))
+        assertEquals(1, link.sent.count { it == "03222A2600000000" })
+    }
+    @Test fun listOnlyPolicyRejectsEmptyModernInstallationMaps() = runBlocking {
+        for (part in listOf("5Q0907530", "5WA907530")) {
+            val link = UdsLink(identityReply = partReply(part), bitmapReply = "622A26" + "00".repeat(32))
+            val units = mutableListOf<ControlUnit>()
+            val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units += it }, { _, _, _ -> }, allowCandidateFallback = false, allowGatewayIdentityFallback = false)
+            assertFalse(outcome.listConfirmed)
+            assertFalse(outcome.complete)
+            assertTrue(units.isEmpty())
+            assertFalse(link.sent.contains("1902AF"))
+        }
+    }
+    @Test fun failedPhysicalRestorationCannotSendSessionCloseUnderFunctionalConfiguration() = runBlocking {
+        for (setting in listOf("ATCAF1", "ATCRA77A", "ATFCSH710", "ATCFC1")) {
+            val link = UdsLink(identityReply = partReply("5WA907530"), bitmapReply = "622A2601" + "00".repeat(31),
+                rejectAfterFunctional = setting)
+            val result = runCatching { scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), {}, { _, _, _ -> }) }
+            assertTrue("$setting: $result", result.exceptionOrNull() is IOException)
+            assertEquals(setting, link.sent.last())
+            assertFalse(link.sent.contains("1001"))
+            assertFalse(link.sent.contains("1902AF"))
+        }
+    }
+    @Test fun interruptedFunctionalCollectionRequiresNewVerifiedEngineBeforeDtcQueue() = runBlocking {
+        val data = MutableList(32) { 0 }
+        data[0] = 1
+        val bit = (0..255).single { b ->
+            val one = MutableList(32) { 0 }.also { it[b / 8] = 0x80 ushr (b % 8) }
+            VagInstallationBitmap.decode(0x19, "5WA907530", listOf(0x62, 0x2A, 0x26) + one).ids.contains(0x42)
+        }
+        data[bit / 8] = data[bit / 8] or (0x80 ushr (bit % 8))
+        val broken = UdsLink(identityReply = partReply("5WA907530"),
+            bitmapReply = "622A26" + VagOemReadOnly.hex(data), functionalReceiveFailure = true)
+        val fresh = UdsLink()
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        val result = scanWithSupplementalInfo(ElmEngine(broken, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> },
+            recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }) })
+        assertEquals(1, replacements)
+        assertTrue(result.listConfirmed)
+        assertFalse(result.complete)
+        assertEquals("ATMA", broken.sent.last())
+        assertEquals("ATZ", fresh.sent.first())
+        assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOf("1902AF"))
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-42").state)
+    }
+    @Test fun malformedBitmapDoesNotTurnIntoEmptyInstalledList() = runBlocking {
+        for (bitmap in listOf("622A26" + "00".repeat(31), "622A28" + "00".repeat(32), "7F2231")) {
+            val link = UdsLink(identityReply = partReply("5Q0907530"), bitmapReply = bitmap)
+            val units = mutableListOf<ControlUnit>()
+            val result = runCatching { scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units += it }, { _, _, _ -> },
+                allowCandidateFallback = false, allowGatewayIdentityFallback = false) }
+            if (bitmap.startsWith("622A28")) {
+                assertTrue(result.exceptionOrNull() is IOException)
+                assertEquals("222A26", link.sent.last())
+            } else {
+                assertFalse(result.getOrThrow().listConfirmed)
+                assertFalse(result.getOrThrow().complete)
+            }
+            assertTrue(units.isEmpty())
+            assertFalse(link.sent.contains("1902AF"))
+        }
+    }
+    @Test fun synthetic263ByteListSurvivesRepeatedKeepaliveAndSequenceWrap() = runBlocking {
+        val link = Link(keepalive = true, longList = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> })
+        assertTrue(result.note, result.listConfirmed)
+        assertEquals(65, units.size)
+        assertEquals("GATEWAY", units.getValue("VAG-04").source)
+        assertEquals(ReadState.NOT_QUERIED, units.getValue("VAG-04").state)
+        assertTrue(link.sent.count { it == "A10194FF82FF" } >= 2)
+        assertFalse(result.complete) // Unknown reported IDs have no invented route.
+    }
+    @Test fun pendingAfterPromptUsesReceiveOnlyAndClosesSessionAfterFinal() = runBlocking {
+        val link = UdsLink(pending = 2)
+        val journal = mutableListOf<String>()
+        val engine = ElmEngine(link, { cmd, _, _, _ -> journal += cmd })
+        engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> })
+        assertTrue(result.note, result.complete)
+        assertEquals(1, link.sent.count { it == "1902AF" })
+        val readIndex = link.sent.indexOf("1902AF")
+        val closeIndex = link.sent.drop(readIndex + 1).indexOf("1001") + readIndex + 1
+        // Restore the allowed session-close timing only after the final reply
+        // has ended receive-only monitoring and restored the framing backend.
+        assertEquals(listOf("ATCFC0", "ATCAF0", "ATMA", "", "ATCAF1", "ATCFC1", "ATAT1", "22F197", "22F189", "22F19E", "220174", "1001"),
+            link.sent.subList(readIndex + 1, closeIndex + 1))
+        assertTrue(journal.contains("ATMA"))
+    }
+    @Test fun repeatedPendingIsBoundedWithoutResendOrPrematureSessionClose() = runBlocking {
+        val link = UdsLink(pending = 3)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        try { scanWithSupplementalInfo(engine, {}, { _, _, _ -> }); fail("pending limit expected") }
+        catch (failure: IOException) { assertTrue(failure.message!!.contains("VAG-19")) }
+        val afterRead = link.sent.drop(link.sent.indexOf("1902AF") + 1)
+        assertEquals(1, link.sent.count { it == "1902AF" })
+        assertEquals(8, afterRead.count { it == "ATMA" })
+        assertFalse(afterRead.contains("1001"))
+    }
+    @Test fun wrongSequenceIsNeverAcceptedAsZeroDtcs() = runBlocking {
+        val link = Link(wrongSequence = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val channel = ElmTp20Channel(engine)
+        channel.open(0x1F)
+        assertTrue(runCatching { channel.request("1089") }.isFailure)
+    }
+    @Test fun unexpectedRawAddressAndIncompletePayloadFailClosed() {
+        assertTrue(runCatching { ElmTp20Channel.frames("21900D00003000701", 0x21F, "") }.isFailure)
+        assertTrue(runCatching { ElmTp20Channel.frames("NO DATA", 0x21F, "") }.isFailure)
+        assertEquals(200L, ElmTp20Channel.timingMs(0x94))
+        assertEquals(20L, ElmTp20Channel.timingMs(0x82))
+        assertTrue(runCatching { ElmTp20Channel.timingMs(0xFF) }.isFailure)
+    }
+    @Test fun recoveredUdsEquivalentIsTriedAfterCompletedTpNoDataAndReturnsToDefaultSession() = runBlocking {
+        val link = UdsLink()
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val units = mutableListOf<ControlUnit>()
+        val result = scanWithSupplementalInfo(engine, { units += it }, { _, _, _ -> })
+        assertEquals(ElmVagScan.Protocol.UDS, result.protocol)
+        assertTrue(result.note, result.complete)
+        assertTrue(units.last().dtcs.isEmpty())
+        assertEquals(ReadState.COMPLETE, units.last().state)
+        assertEquals(2, link.sent.count { it == "1001" })
+        assertTrue(link.sent.indexOf("ATSH710") > link.sent.indexOf("1FC000100003011"))
+    }
+    @Test fun udsResponseFromAnotherAddressNeverConfirmsGateway() = runBlocking {
+        val link = UdsLink(wrongId = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        try { scanWithSupplementalInfo(engine, {}, { _, _, _ -> }); fail("Expected strict address failure") }
+        catch (_: IOException) { }
+        assertFalse(link.sent.contains("1902AF"))
+        assertFalse(link.sent.contains("1001"))
+    }
+    @Test fun cancellationDuringProgressDoesNotStartNextEcu() = runBlocking {
+        val link = Link()
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        try {
+            scanWithSupplementalInfo(engine, { throw CancellationException("Scripted Stop") }, { _, _, _ -> })
+            fail("Expected cancellation")
+        } catch (_: CancellationException) { }
+        assertEquals(1, link.sent.count { it == "1FC000100003011" })
+        assertFalse(link.sent.contains("01C000100003011"))
+    }
+    @Test fun gatewayIdentificationIsIndependentFromDtcAndList() = runBlocking {
+        val reply = "5A9B" + ("1K0907530K  " + "0178").toByteArray().joinToString("") { "%02X".format(it) } + "00".repeat(10)
+        for (identity in listOf(reply, "7F1A10", "7F1A11", "7F1A12", "7F1A31", "7F1A33", "5A9B010203")) {
+            val link = Link(identityReply = identity)
+            val engine = ElmEngine(link, { _, _, _, _ -> })
+            engine.connect()
+            val events = mutableListOf<Pair<String, String>>()
+            val units = mutableListOf<ControlUnit>()
+            // This test isolates Gateway identity. Chassis/supplemental discovery
+            // has its own F187 probes and is covered by the complete scan tests.
+            val outcome = scanWithSupplementalInfo(engine, { units += it }, { cmd, text, _ -> events += cmd to text },
+                readGatewayIdentity = true, identifyEcus = false, discoverAdditionalUnits = false)
+            assertTrue(outcome.note, outcome.complete)
+            assertTrue(units.any { it.state == ReadState.COMPLETE })
+            assertEquals(1, link.sent.count { it.endsWith("1A9B") })
+            val metadata = events.single { it.first == "VAG_GATEWAY_IDENTITY" }.second
+            assertEquals(identity == reply, metadata.contains("1K0907530K"))
+            if (identity == reply) assertTrue(outcome.note.contains("0178"))
+            assertEquals(identity in setOf("7F1A10", "7F1A11", "7F1A12"), link.sent.any { it.endsWith("22F187") })
+        }
+    }
+    @Test fun completedDtcRejectionsRemainPartialWithoutSwitchingProtocol() = runBlocking {
+        for (reply in listOf("7F1811", "7F1822", "7F1831", "7F1833")) {
+            val link = Link(dtcReply = reply)
+            val units = linkedMapOf<String, ControlUnit>()
+            val outcome = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+            assertFalse(outcome.complete)
+            assertTrue(units.values.all { it.state == ReadState.PARTIAL && it.dtcs.isEmpty() })
+            assertFalse(link.sent.contains("ATSH710"))
+            assertFalse(link.sent.contains("1902AF"))
+        }
+    }
+    @Test fun completeDtcSurvivesFailureOrCancellationDuringSessionTeardown() = runBlocking {
+        for (uds in listOf(false, true)) for (mode in listOf("io", "cancel")) {
+            val tp = Link(dtcReply = "5801051924", closeFailure = mode)
+            val iso = UdsLink(dtcReply = "59028D12345608", closeFailure = mode)
+            val units = linkedMapOf<String, ControlUnit>()
+            val failure = runCatching {
+                scanWithSupplementalInfo(ElmEngine(if (uds) iso else tp, { _, _, _, _ -> }),
+                    { units[it.address] = it }, { _, _, _ -> })
+            }.exceptionOrNull()
+            if (mode == "io") assertTrue(failure.toString(), failure is IOException)
+            else assertTrue(failure.toString(), failure is CancellationException)
+            val saved = units.getValue("VAG-19")
+            assertEquals(ReadState.COMPLETE, saved.state)
+            assertEquals(if (uds) "123456" else "01305", saved.dtcs.single().code)
+            assertTrue(saved.answeredModes.contains(DtcKind.OEM))
+            assertEquals(if (uds) setOf("VAG-19") else setOf("VAG-19", "VAG-01"), units.keys)
+            if (!uds) {
+                assertEquals(ReadState.NOT_QUERIED, units.getValue("VAG-01").state)
+                assertTrue(units.getValue("VAG-01").dtcs.isEmpty())
+                assertTrue(units.getValue("VAG-01").answeredModes.isEmpty())
+            }
+            assertEquals(if (uds) "1001" else "A80", (if (uds) iso.sent else tp.sent).last())
+        }
+    }
+    @Test fun gatewayServiceCapabilityIsIndependentOfItsTransport() = runBlocking {
+        val link = Link(rejectService1A = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> }, readGatewayIdentity = true, identifyEcus = false)
+        assertTrue(result.note, result.listConfirmed)
+        assertEquals(ElmVagScan.Protocol.TP20, result.protocol)
+        assertTrue(link.sent.any { it.endsWith("22F187") })
+        assertFalse(link.sent.any { it.endsWith("1A9B") })
+        assertEquals(1, link.sent.count { it.endsWith("1A9F") })
+    }
+    @Test fun identityIoStopsWithoutSendingMoreCommandsOnBrokenStream() = runBlocking {
+        val link = Link(failIdentity = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> })
+        engine.connect()
+        val saved = linkedMapOf<String, ControlUnit>()
+        assertTrue(runCatching { scanWithSupplementalInfo(engine, { saved[it.address] = it }, { _, _, _ -> }, readGatewayIdentity = true, identifyEcus = false) }.exceptionOrNull() is IOException)
+        assertTrue(link.sent.last().endsWith("1A9B"))
+        assertTrue(saved.isNotEmpty())
+        assertTrue(saved.values.all { it.state == ReadState.COMPLETE })
+    }
+    private fun centralIdentity(part: String) = "5A9B" + VagOemReadOnly.hex(
+        (part.padEnd(12) + "0001").map { it.code } + List(10) { 0 })
+    @Test fun actualUnlistedCentralResponseAddsItsOwnDtcReadAndSelectsChassis() = runBlocking {
+        val link = Link(unlistedCentralResponds = true, identityReply = centralIdentity("1K0937087"))
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertTrue(result.note, result.complete)
+        assertEquals(setOf("VAG-19", "VAG-01", "VAG-09"), units.keys)
+        assertEquals("RESPONSE", units.getValue("VAG-09").source)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-09").state)
+        assertEquals(2, link.sent.count { it == "20C000100003011" })
+    }
+    @Test fun regulatorDiscoveryDoesNotRequireAnAnsweredOrListedCentralEcu() = runBlocking {
+        val link = Link(missingCentral = true, missingSupplemental = false)
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertTrue(result.note, result.complete)
+        assertEquals(setOf("VAG-19", "VAG-01", "VAG-61"), units.keys)
+        assertEquals("RESPONSE", units.getValue("VAG-61").source)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-61").state)
+        assertFalse(units.containsKey("VAG-09"))
+        assertEquals(2, link.sent.count { it == "33C000100003011" })
+    }
+    @Test fun cleanGatewayCloseDuringDiscoveryUsesFreshVerifiedConnectionBeforeFallback() = runBlocking {
+        val broken = Link(closeGatewayList = true)
+        val fresh = Link()
+        val units = linkedMapOf<String, ControlUnit>()
+        var replacements = 0
+        val failure = runCatching { scanWithSupplementalInfo(ElmEngine(broken, { _, _, _, _ -> }), { unit ->
+            units[unit.address] = unit
+            if (unit.address == "VAG-19" && unit.state == ReadState.COMPLETE) throw CancellationException("Fixture checkpoint")
+        }, { _, _, _ -> }, allowCandidateFallback = true,
+            recreateEngine = { replacements++; ElmEngine(fresh, { _, _, _, _ -> }) }) }.exceptionOrNull()
+        assertTrue(failure is CancellationException)
+        assertEquals(1, replacements)
+        assertEquals("ATST0B", broken.sent.last())
+        assertEquals("ATZ", fresh.sent.first())
+        assertTrue(fresh.sent.indexOf("0100") < fresh.sent.indexOf("1FC000100003011"))
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(1, broken.sent.count { it == "A3" }) // idle check
+        assertEquals(4, broken.sent.count { it == "A32" }) // bounded response polls
+    }
+    @Test fun completedUdsAbsenceIsCachedWithoutFalseZeroDtcOrDuplicatePresenceRequests() = runBlocking {
+        val link = UdsLink(includeCentral = true, centralSilent = true)
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertFalse(result.complete)
+        assertEquals(ReadState.NO_RESPONSE, units.getValue("VAG-09").state)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+        assertEquals(3, link.addressedRequests.count { it == ("778" to "3E00") })
+        assertEquals(1, link.addressedRequests.count { it == ("778" to "1003") })
+        assertEquals(2, link.addressedRequests.count { it == ("778" to "22F187") })
+        assertFalse(link.addressedRequests.contains("778" to "1902AF"))
+    }
+    @Test fun rawUdsMetadataUsesAdaptiveTimingWhileDtcKeepsTheFixedWindow() = runBlocking {
+        val link = UdsLink(rawCan = true, includeSteering = true)
+        val engine = ElmEngine(link, { _, _, _, _ -> }, manualUds = true)
+        engine.connect()
+        scanWithSupplementalInfo(engine, {}, { _, _, _ -> }, discoverAdditionalUnits = false)
+        var timing = ""
+        var metadata = 0
+        var faults = 0
+        for (command in link.sent) {
+            if (command in setOf("ATAT0", "ATAT1")) timing = command
+            if (command == "1003") assertEquals("Connection poke inherits presence timing", "ATAT0", timing)
+            if (command in setOf("22F187", "22F197", "22F189", "22F19E", "220174", "1001")) {
+                assertEquals("$command must use its allowed adaptive timing", "ATAT1", timing)
+                metadata++
+            }
+            if (command == "1902AF") {
+                assertEquals("DTC must retain the non-adaptive receive window", "ATAT0", timing)
+                faults++
+            }
+        }
+        assertTrue(metadata > 5)
+        assertTrue(faults >= 2)
+    }
+    @Test fun gatewayDiscoveryDoesNotRequireALegislatedElevenBitObdPair() = runBlocking {
+        for (protocol in listOf("7", "8", "9", "?")) {
+            val link = Link(obdReply = "18DAF110064100BE3EA813", initialCanProtocol = protocol)
+            val engine = ElmEngine(link, { _, _, _, _ -> })
+            engine.connect()
+            val plan = VagOemScanPlan.create(engine.isCanVehicle, null, emptySet())
+            assertTrue("CAN $protocol must admit fixed Gateway discovery", plan.attemptGateway)
+            val units = linkedMapOf<String, ControlUnit>()
+            val outcome = scanWithSupplementalInfo(engine, { units[it.address] = it }, { _, _, _ -> },
+                allowCandidateFallback = plan.profile!!.allowCandidateFallback, discoverAdditionalUnits = false)
+            assertTrue(outcome.note, outcome.listConfirmed)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-19").state)
+            assertTrue(link.sent.contains("ATSP6"))
+            assertFalse(link.sent.contains("ATSH7E0"))
+        }
+    }
+    @Test fun additionalDiscoveryCompletesBeforeTheFirstDtcRead() = runBlocking {
+        val link = Link(installedReply = "5A9F091900000109000001",
+            identityReply = centralIdentity("1K0937087"), missingSupplemental = false)
+        val units = linkedMapOf<String, ControlUnit>()
+        scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        val probe = link.sent.indexOf("33C000100003011")
+        val firstDtc = link.sent.indexOfFirst { it.endsWith("1802FF00") || it.endsWith("1800FF00") || it == "1902AF" }
+        assertTrue("Supplemental discovery must precede the first DTC request", probe >= 0 && firstDtc > probe)
+        assertEquals(ReadState.COMPLETE, units.getValue("VAG-61").state)
+        assertEquals("The completed discovery identity must be reused for ECU61", 1,
+            link.identityDestinations.count { it == 0x33 })
+    }
+    @Test fun additionalEcuRequiresResponseAndThenReadsItsActualFaults() = runBlocking {
+        for (identity in listOf(centralIdentity("1K0937087"), "7F1A31")) {
+            val link = Link(installedReply = "5A9F091900000109000001", identityReply = identity, missingSupplemental = false)
+            val units = linkedMapOf<String, ControlUnit>()
+            val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }),
+                { units[it.address] = it }, { _, _, _ -> })
+            assertTrue(result.note, result.complete)
+            assertEquals(setOf("VAG-19", "VAG-09", "VAG-61"), units.keys)
+            assertEquals(ReadState.COMPLETE, units.getValue("VAG-61").state)
+            assertEquals("RESPONSE", units.getValue("VAG-61").source)
+            assertEquals(2, link.sent.count { it == "33C000100003011" })
+            assertFalse(link.sent.contains("ATSH17FC009C"))
+            val probe = link.sent.indexOf("33C000100003011")
+            assertEquals(0, link.sent.take(probe).count { it.endsWith("1802FF00") })
+            assertTrue(link.sent.drop(probe).any { it.endsWith("1802FF00") })
+        }
+    }
+    @Test fun additionalEcuNoResponseDoesNotInventAUnit() = runBlocking {
+        val link = Link(installedReply = "5A9F091900000109000001",
+            identityReply = centralIdentity("1K0937087"), missingSupplemental = true)
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertTrue(result.note, result.complete)
+        assertFalse(units.containsKey("VAG-61"))
+        assertEquals(4, link.sent.count { it == "33C000100003011" })
+        assertFalse(link.sent.contains("ATSH17FC009C"))
+    }
+    @Test fun supplementalTpEcuDoesNotInheritGatewayUdsProtocol() = runBlocking {
+        val tp = Link(missingGateway = true, identityReply = "7F1A31", dtcReply = "5801051924", missingSupplemental = false,
+            unlistedCentralResponds = true)
+        val uds = UdsLink(includeCentral = true, identityReply = partReply("1K0937087"))
+        val sent = mutableListOf<String>()
+        val mixed = object : ElmLink {
+            override val label = "Synthetic mixed-protocol vehicle"
+            var rawCan = false
+            var last: ElmLink = uds
+            override suspend fun open() {}
+            override fun close() { tp.close(); uds.close() }
+            override suspend fun readByte() = last.readByte()
+            override suspend fun write(bytes: ByteArray) {
+                val command = bytes.toString(Charsets.US_ASCII).trim()
+                sent += command
+                if (command == "ATCAF0") rawCan = true
+                if (command == "ATCAF1") rawCan = false
+                last = if (rawCan) tp else uds
+                last.write(bytes)
+            }
+        }
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(mixed, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> })
+        assertEquals(ElmVagScan.Protocol.UDS, result.protocol)
+        assertTrue(result.note, result.complete)
+        val extra = units.getValue("VAG-61")
+        assertEquals(ReadState.COMPLETE, extra.state)
+        assertEquals("01305", extra.dtcs.single().code)
+        assertEquals("RESPONSE", extra.source)
+        assertEquals(2, sent.count { it == "33C000100003011" })
+        assertFalse(sent.contains("ATSHFC009C"))
+        assertEquals(1, sent.count { it == "1902AF" })
+    }
+    @Test fun centralPartExcludesLegacyProcedureOnUdsOnlyChassis() = runBlocking {
+        for (prefix in listOf("1EA", "2Q0", "2Q1", "2Q5", "2QW", "4N0", "5Q0", "5Q1", "5WA", "6C0", "8W0", "8W1", "971")) {
+            val link = Link(installedReply = "5A9F091900000109000001", identityReply = centralIdentity(prefix + "937087"))
+            val units = linkedMapOf<String, ControlUnit>()
+            val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false)
+            assertTrue(result.note, result.complete)
+            assertFalse(units.containsKey("VAG-61"))
+            assertFalse(link.sent.contains("33C000100003011"))
+        }
+    }
+    @Test fun additionalProcedureSkipsAnAlreadyListedEcu() = runBlocking {
+        val link = Link(installedReply = "5A9F0D190000010900000161000001", missingSupplemental = false)
+        val units = linkedMapOf<String, ControlUnit>()
+        val result = scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }), { units[it.address] = it }, { _, _, _ -> }, identifyEcus = false)
+        assertTrue(result.note, result.complete)
+        assertEquals(1, link.sent.count { it == "33C000100003011" })
+        assertFalse(link.sent.any { it.endsWith("1A9B") })
+    }
+    @Test fun additionalDiscoveryIoPreservesTheDeclaredScopeWithoutInventingUnreadDtc() = runBlocking {
+        val link = Link(installedReply = "5A9F091900000109000001",
+            identityReply = centralIdentity("1K0937087"), failSupplemental = true, missingSupplemental = false)
+        val units = linkedMapOf<String, ControlUnit>()
+        val error = runCatching { scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }),
+            { units[it.address] = it }, { _, _, _ -> }) }.exceptionOrNull()
+        assertTrue(error.toString(), error is IOException)
+        assertEquals(setOf("VAG-19", "VAG-09"), units.keys)
+        assertTrue(units.values.all { it.state == ReadState.NOT_QUERIED && it.dtcs.isEmpty() })
+        assertTrue(link.sent.last().endsWith("1A9B"))
+        assertEquals(1, link.sent.count { it == "33C000100003011" })
+    }
+    @Test fun malformedSupplementalSetupCannotBecomeAbsenceOrProtocolFallback() = runBlocking {
+        for (setup in listOf("23400D00003000701", "23300D00003", "233A10F94FF82FF")) {
+            val link = Link(installedReply = "5A9F091900000109000001",
+                identityReply = centralIdentity("1K0937087"), supplementalSetup = setup)
+            val units = linkedMapOf<String, ControlUnit>()
+            val error = runCatching { scanWithSupplementalInfo(ElmEngine(link, { _, _, _, _ -> }),
+                { units[it.address] = it }, { _, _, _ -> }) }.exceptionOrNull()
+            assertTrue("$setup: $error", error is IOException)
+            assertEquals("33C000100003011", link.sent.last())
+            assertFalse(units.containsKey("VAG-61"))
+            assertTrue(units.values.all { it.state == ReadState.NOT_QUERIED && it.dtcs.isEmpty() })
+        }
+    }
+    @Test fun udsIdentificationUsesOnlyItsMatchingDidAndPreservesZeroDtc() = runBlocking {
+        for (reply in listOf("62F187314B30", "7F2231", "62F187314B30393037353330")) {
+            // Short printable data is an unknown identity, never a fabricated part.
+            val link = UdsLink(identityReply = reply)
+            val engine = ElmEngine(link, { _, _, _, _ -> })
+            engine.connect()
+            val result = scanWithSupplementalInfo(engine, {}, { _, _, _ -> }, readGatewayIdentity = true)
+            assertTrue(result.note, result.complete)
+            assertTrue(link.sent.contains("22F187"))
+            assertEquals(reply.endsWith("314B30393037353330"), result.note.contains("1K0907530"))
+            assertFalse(link.sent.contains("22F190"))
+        }
+    }
+
+}

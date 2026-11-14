@@ -1,0 +1,20 @@
+.gradle/
+.kotlin/
+.idea/
+local.properties
+build/
+**/build/
+*.iml
+
+# Generated delivery and temporary artifacts
+*.apk
+*.aab
+*.idsig
+/release/
+/temp/
+/apk-*/
+
+# Private workspace instructions (never publish)
+/MASTER_PROMPT.md
+/CHECKPOINT_NEW_CHAT.md
+/PROJECT_CONTEXT.md
